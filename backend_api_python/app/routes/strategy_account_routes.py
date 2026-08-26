@@ -44,6 +44,34 @@ def get_account_snapshot():
         }), 500
 
 
+@strategy_blp.route('/account/managed-positions', methods=['GET'])
+@login_required
+def get_managed_account_positions():
+    """只读返回当前凭证已登记在标准策略实例下的持仓。"""
+    credential_id = request.args.get('credential_id', type=int)
+    if not credential_id:
+        return jsonify({
+            'code': 0,
+            'msg': 'Missing credential_id',
+            'data': {'items': []},
+        }), 400
+    try:
+        from app.services.live_trading.account_positions import list_managed_positions_for_account
+
+        rows = list_managed_positions_for_account(
+            user_id=int(g.user_id),
+            credential_id=int(credential_id),
+        )
+        return jsonify({'code': 1, 'msg': 'success', 'data': {'items': rows}})
+    except Exception:
+        logger.exception("get_managed_account_positions failed")
+        return jsonify({
+            'code': 0,
+            'msg': '加载持仓策略归属失败',
+            'data': {'items': []},
+        }), 500
+
+
 @strategy_blp.route('/account/positions', methods=['GET'])
 @login_required
 def get_account_positions():
