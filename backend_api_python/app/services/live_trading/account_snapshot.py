@@ -309,6 +309,14 @@ def _parse_binance_futures_positions(rows: List[Dict[str, Any]]) -> List[Dict[st
         except Exception:
             amt = 0.0
             ep = 0.0
+        try:
+            mark_price = float(p.get("markPrice") or 0.0)
+        except Exception:
+            mark_price = 0.0
+        try:
+            leverage = max(1, int(float(p.get("leverage") or 1)))
+        except Exception:
+            leverage = 1
         if not sym or abs(amt) <= 0:
             continue
         hb_sym = sym
@@ -321,6 +329,8 @@ def _parse_binance_futures_positions(rows: List[Dict[str, Any]]) -> List[Dict[st
                 "side": side,
                 "size": abs(float(amt)),
                 "entry_price": ep,
+                "mark_price": mark_price,
+                "leverage": leverage,
                 "market_type": "swap",
                 "inst_id": sym,
             }
