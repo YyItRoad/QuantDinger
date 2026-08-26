@@ -72,6 +72,34 @@ def get_managed_account_positions():
         }), 500
 
 
+@strategy_blp.route('/account/managed-strategies', methods=['POST'])
+@login_required
+def create_managed_account_strategy():
+    """用标准策略创建流程接管交易所当前整笔仓位。"""
+    payload = request.get_json(silent=True) or {}
+    position_ref = payload.get("position")
+    strategy_payload = payload.get("strategy")
+    if not isinstance(position_ref, dict) or not isinstance(strategy_payload, dict):
+        return jsonify({'code': 0, 'msg': '缺少仓位或策略配置', 'data': None}), 400
+    try:
+        from app.services.live_trading.position_management import (
+            PositionManagementError,
+            create_managed_strategy,
+        )
+
+        result = create_managed_strategy(
+            user_id=int(g.user_id),
+            position_ref=position_ref,
+            strategy_payload=strategy_payload,
+        )
+        return jsonify({'code': 1, 'msg': '已创建持仓管理策略', 'data': result}), 201
+    except PositionManagementError as exc:
+        return jsonify({'code': 0, 'msg': str(exc), 'data': None}), exc.status_code
+    except Exception as exc:
+        logger.exception("create_managed_account_strategy failed")
+        return jsonify({'code': 0, 'msg': str(exc), 'data': None}), 400
+
+
 @strategy_blp.route('/account/positions', methods=['GET'])
 @login_required
 def get_account_positions():

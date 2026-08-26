@@ -1,0 +1,227 @@
+"""从现有创建策略流程接入交易所整笔仓位。"""
+
+import inspect
+
+import pytest
+from flask import Flask, g
+
+from app.routes import strategy_account_routes as routes
+from app.services.live_trading import position_management
+
+
+class _StrategyService:
+    def __init__(self):
+        self.created_payload = None
+        self.deleted = []
+
+    def create_strategy(self, payload):
+        self.created_payload = dict(payload)
+        return 44
+
+    def get_strategy(self, strategy_id, user_id=None):
+        assert strategy_id == 44
+        assert user_id == 3
+        return {
+            "id": 44,
+            "strategy_name": payload_name(self.created_payload),
+            "status": "stopped",
+            "timeframe": "1h",
+        }
+
+    def delete_strategy(self, strategy_id, user_id=None):
+        self.deleted.append((strategy_id, user_id))
+        return True
+
+
+def payload_name(payload):
+    return str((payload or {}).get("name") or "")
+
+
+def _snapshot():
+    return {
+        "swap_positions": [{
+            "symbol": "KAITO/USDC",
+            "side": "long",
+            "size": "422.5",
+            "entry_price": "0.355",
+            "mark_price": "0.3397",
+            "leverage": "5",
+            "market_type": "swap",
+            "inst_id": "KAITOUSDC",
+        }],
+        "spot_positions": [],
+        "partial": False,
+        "error": "",
+    }
+
+
+def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
+    service = _StrategyService()
+    recorded = []
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    monkeypatch.setattr(position_management, "upsert_position", lambda **kwargs: recorded.append(kwargs))
+
+    result = position_management.create_managed_strategy(
+        user_id=3,
+        position_ref={
+            "credential_id": 7,
+            "symbol": "KAITO/USDC:USDC",
+            "side": "long",
+            "market_type": "swap",
+            "inst_id": "KAITOUSDC",
+        },
+        strategy_payload={
+            "sourceId": 9,
+            "name": "[持仓] KAITO/USDC ATR趋势管理",
+            "initialCapital": 1000,
+            "executionMode": "signal",
+            "credentialId": 999,
+            "leverageEnabled": False,
+            "leverage": 1,
+            "params": {"atr_period": 14},
+        },
+    )
+
+    assert service.created_payload == {
+        "sourceId": 9,
+        "name": "[持仓] KAITO/USDC ATR趋势管理",
+        "initialCapital": 1000,
+        "executionMode": "live",
+        "credentialId": 7,
+        "leverageEnabled": True,
+        "leverage": 5.0,
+        "params": {"atr_period": 14},
+        "user_id": 3,
+    }
+    assert recorded == [{
+        "strategy_id": 44,
+        "symbol": "KAITO/USDC",
+        "side": "long",
+        "size": 422.5,
+        "entry_price": 0.355,
+        "current_price": 0.3397,
+        "highest_price": 0.3397,
+        "lowest_price": 0.3397,
+        "user_id": 3,
+        "market_type": "swap",
+        "credential_id": 7,
+        "inst_id": "KAITOUSDC",
+    }]
+    assert result == {
+        "strategy_id": 44,
+        "strategy_name": "[持仓] KAITO/USDC ATR趋势管理",
+        "status": "stopped",
+        "timeframe": "1h",
+        "symbol": "KAITO/USDC",
+        "side": "long",
+        "size": "422.5",
+        "entry_price": "0.355",
+        "mark_price": "0.3397",
+        "leverage": "5",
+    }
+
+
+def test_create_managed_strategy_rejects_position_already_registered(monkeypatch):
+    service = _StrategyService()
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [{
+        "strategy_id": 12,
+        "symbol": "KAITO/USDC",
+        "side": "long",
+        "market_type": "swap",
+    }])
+
+    with pytest.raises(position_management.PositionManagementError) as exc:
+        position_management.create_managed_strategy(
+            user_id=3,
+            position_ref={
+                "credential_id": 7,
+                "symbol": "KAITO/USDC",
+                "side": "long",
+                "market_type": "swap",
+            },
+            strategy_payload={"sourceId": 9, "name": "管理策略"},
+        )
+
+    assert exc.value.status_code == 409
+    assert str(exc.value) == "该仓位已经由策略管理，请先同步持仓"
+    assert service.created_payload is None
+
+
+def test_create_managed_strategy_rejects_incomplete_snapshot(monkeypatch):
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: {
+        "swap_positions": [],
+        "spot_positions": [],
+        "partial": True,
+        "error": "币安合约仓位读取失败",
+    })
+
+    with pytest.raises(position_management.PositionManagementError, match="交易所仓位同步失败") as exc:
+        position_management.create_managed_strategy(
+            user_id=3,
+            position_ref={"credential_id": 7, "symbol": "KAITO/USDC", "side": "long", "market_type": "swap"},
+            strategy_payload={"sourceId": 9, "name": "管理策略"},
+        )
+
+    assert exc.value.status_code == 409
+
+
+def test_create_managed_strategy_rejects_source_that_does_not_monitor_position(monkeypatch):
+    service = _StrategyService()
+    service.get_strategy = lambda strategy_id, user_id=None: {
+        "id": strategy_id,
+        "strategy_name": "BTC 管理策略",
+        "status": "stopped",
+        "timeframe": "1h",
+        "trading_config": {
+            "strategy_manifest": {
+                "universe": {
+                    "kind": "static",
+                    "reference": "",
+                    "instruments": [{"market": "Crypto", "symbol": "BTC/USDT", "market_type": "swap"}],
+                }
+            }
+        },
+    }
+    recorded = []
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    monkeypatch.setattr(position_management, "upsert_position", lambda **kwargs: recorded.append(kwargs))
+
+    with pytest.raises(position_management.PositionManagementError, match="策略源码没有订阅当前仓位品种") as exc:
+        position_management.create_managed_strategy(
+            user_id=3,
+            position_ref={"credential_id": 7, "symbol": "KAITO/USDC", "side": "long", "market_type": "swap"},
+            strategy_payload={"sourceId": 9, "name": "管理策略"},
+        )
+
+    assert exc.value.status_code == 409
+    assert service.deleted == [(44, 3)]
+    assert recorded == []
+
+
+def test_create_managed_strategy_route_returns_created_instance(monkeypatch):
+    app = Flask(__name__)
+    expected = {"strategy_id": 44, "status": "stopped"}
+    calls = []
+
+    def fake_create(*, user_id, position_ref, strategy_payload):
+        calls.append((user_id, position_ref, strategy_payload))
+        return expected
+
+    monkeypatch.setattr(position_management, "create_managed_strategy", fake_create)
+    payload = {
+        "position": {"credential_id": 7, "symbol": "KAITO/USDC", "side": "long", "market_type": "swap"},
+        "strategy": {"sourceId": 9, "name": "管理策略"},
+    }
+    with app.test_request_context("/api/account/managed-strategies", method="POST", json=payload):
+        g.user_id = 3
+        response, status = inspect.unwrap(routes.create_managed_account_strategy)()
+
+    assert status == 201
+    assert response.get_json() == {"code": 1, "msg": "已创建持仓管理策略", "data": expected}
+    assert calls == [(3, payload["position"], payload["strategy"])]
