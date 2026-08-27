@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import hashlib
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Iterator
 
 from app.services.live_trading.account_positions import list_managed_positions_for_account
 from app.services.live_trading.account_snapshot import fetch_account_snapshot
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
 from app.services.strategy import get_strategy_service
+from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
 
@@ -111,6 +114,74 @@ def _spot_last_price(*, user_id: int, credential_id: int, symbol: str) -> float:
         return 0.0
 
 
+def _signed_lock_key(value: str) -> int:
+    raw = hashlib.sha256(value.encode("utf-8")).digest()[:4]
+    return int.from_bytes(raw, byteorder="big", signed=True)
+
+
+@contextmanager
+def _management_leg_lock(
+    *,
+    credential_id: int,
+    market_type: str,
+    symbol: str,
+    side: str,
+) -> Iterator[None]:
+    """Serialize adoption of one account leg across API processes."""
+    leg = "|".join((
+        str(int(credential_id)),
+        _market_type(market_type),
+        _symbol(symbol),
+        str(side or "").strip().lower(),
+    ))
+    lock_key = _signed_lock_key(leg)
+    with get_db_connection() as db:
+        cur = db.cursor()
+        try:
+            cur.execute("SELECT pg_advisory_lock(%s, %s)", (7414, lock_key))
+            yield
+        finally:
+            try:
+                cur.execute("SELECT pg_advisory_unlock(%s, %s)", (7414, lock_key))
+            finally:
+                cur.close()
+
+
+def _delete_created_strategy(
+    service: Any,
+    *,
+    strategy_id: int,
+    user_id: int,
+    reason: str,
+) -> bool:
+    """Best-effort compensation that never hides the original creation error."""
+    try:
+        deleted = bool(service.delete_strategy(int(strategy_id), user_id=int(user_id)))
+    except Exception as exc:
+        logger.error(
+            "清理创建失败的持仓管理策略异常 strategy=%s reason=%s: %s",
+            strategy_id,
+            reason,
+            exc,
+            exc_info=True,
+        )
+        return False
+    if not deleted:
+        logger.error(
+            "清理创建失败的持仓管理策略未删除任何记录 strategy=%s reason=%s",
+            strategy_id,
+            reason,
+        )
+        return False
+    return True
+
+
+def _cleanup_failure_suffix(*, cleaned: bool, strategy_id: int) -> str:
+    if cleaned:
+        return ""
+    return f"；自动清理失败，残留策略 ID：{int(strategy_id)}，请在策略列表中删除"
+
+
 def _positive_number(value: Any, label: str) -> float:
     try:
         number = float(value)
@@ -165,6 +236,28 @@ def create_managed_strategy(
     if uid <= 0 or credential_id <= 0:
         raise PositionManagementError("缺少有效的账户凭证")
 
+    with _management_leg_lock(
+        credential_id=credential_id,
+        market_type=_market_type(position_ref.get("market_type")),
+        symbol=_symbol(position_ref.get("symbol") or position_ref.get("symbol_canonical")),
+        side=str(position_ref.get("side") or "").strip().lower(),
+    ):
+        return _create_managed_strategy_locked(
+            user_id=uid,
+            credential_id=credential_id,
+            position_ref=position_ref,
+            strategy_payload=strategy_payload,
+        )
+
+
+def _create_managed_strategy_locked(
+    *,
+    user_id: int,
+    credential_id: int,
+    position_ref: Dict[str, Any],
+    strategy_payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    uid = int(user_id)
     snapshot = fetch_account_snapshot(user_id=uid, credential_id=credential_id)
     fresh = _fresh_position(snapshot, position_ref)
 
@@ -213,8 +306,17 @@ def create_managed_strategy(
     strategy_id = int(service.create_strategy(payload))
     strategy = service.get_strategy(strategy_id, user_id=uid) or {}
     if not _strategy_monitors_position(strategy, symbol, market_type):
-        service.delete_strategy(strategy_id, user_id=uid)
-        raise PositionManagementError("策略源码没有订阅当前仓位品种，请选择对应品种的源码", status_code=409)
+        cleaned = _delete_created_strategy(
+            service,
+            strategy_id=strategy_id,
+            user_id=uid,
+            reason="strategy_source_mismatch",
+        )
+        suffix = _cleanup_failure_suffix(cleaned=cleaned, strategy_id=strategy_id)
+        raise PositionManagementError(
+            f"策略源码没有订阅当前仓位品种，请选择对应品种的源码{suffix}",
+            status_code=409 if cleaned else 500,
+        )
     try:
         upsert_position(
             strategy_id=strategy_id,
@@ -231,8 +333,14 @@ def create_managed_strategy(
             inst_id=inst_id,
         )
     except Exception as exc:
-        service.delete_strategy(strategy_id, user_id=uid)
-        raise PositionManagementError("创建策略后登记仓位失败", status_code=500) from exc
+        cleaned = _delete_created_strategy(
+            service,
+            strategy_id=strategy_id,
+            user_id=uid,
+            reason="position_registration_failed",
+        )
+        suffix = _cleanup_failure_suffix(cleaned=cleaned, strategy_id=strategy_id)
+        raise PositionManagementError(f"创建策略后登记仓位失败{suffix}", status_code=500) from exc
 
     return {
         "strategy_id": strategy_id,

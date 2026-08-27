@@ -1,12 +1,62 @@
 """从现有创建策略流程接入交易所整笔仓位。"""
 
 import inspect
+from contextlib import contextmanager
 
 import pytest
 from flask import Flask, g
 
 from app.routes import strategy_account_routes as routes
 from app.services.live_trading import position_management
+
+
+_REAL_MANAGEMENT_LEG_LOCK = position_management._management_leg_lock
+
+
+@pytest.fixture(autouse=True)
+def _without_database_advisory_lock(monkeypatch):
+    @contextmanager
+    def unlocked(**_kwargs):
+        yield
+
+    monkeypatch.setattr(position_management, "_management_leg_lock", unlocked)
+
+
+def test_management_leg_lock_uses_same_advisory_key_for_lock_and_unlock(monkeypatch):
+    statements = []
+
+    class _Cursor:
+        def execute(self, sql, params):
+            statements.append((sql, params))
+
+        def close(self):
+            statements.append(("close", ()))
+
+    class _Db:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr(position_management, "get_db_connection", lambda: _Db())
+
+    with _REAL_MANAGEMENT_LEG_LOCK(
+        credential_id=7,
+        market_type="swap",
+        symbol="KAITO/USDC:USDC",
+        side="LONG",
+    ):
+        statements.append(("inside", ()))
+
+    assert statements[0][0] == "SELECT pg_advisory_lock(%s, %s)"
+    assert statements[1] == ("inside", ())
+    assert statements[2][0] == "SELECT pg_advisory_unlock(%s, %s)"
+    assert statements[0][1] == statements[2][1]
+    assert statements[0][1][0] == 7414
 
 
 class _StrategyService:
@@ -340,6 +390,81 @@ def test_create_managed_strategy_rejects_source_that_does_not_monitor_position(m
     assert exc.value.status_code == 409
     assert service.deleted == [(44, 3)]
     assert recorded == []
+
+
+def test_create_managed_strategy_reports_cleanup_failure(monkeypatch):
+    service = _StrategyService()
+    service.delete_strategy = lambda *_args, **_kwargs: False
+    service.get_strategy = lambda strategy_id, user_id=None: {
+        "id": strategy_id,
+        "strategy_name": "BTC 管理策略",
+        "status": "stopped",
+        "timeframe": "1h",
+        "trading_config": {
+            "strategy_manifest": {
+                "universe": {
+                    "instruments": [{"market": "Crypto", "symbol": "BTC/USDT", "market_type": "swap"}],
+                }
+            }
+        },
+    }
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+
+    with pytest.raises(position_management.PositionManagementError, match="残留策略 ID：44") as exc:
+        position_management.create_managed_strategy(
+            user_id=3,
+            position_ref={
+                "credential_id": 7,
+                "symbol": "KAITO/USDC",
+                "side": "long",
+                "market_type": "swap",
+            },
+            strategy_payload={"sourceId": 9, "name": "管理策略"},
+        )
+
+    assert exc.value.status_code == 500
+
+
+def test_cleanup_exception_does_not_hide_original_creation_error(monkeypatch):
+    service = _StrategyService()
+
+    def fail_delete(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    service.delete_strategy = fail_delete
+    service.get_strategy = lambda strategy_id, user_id=None: {
+        "id": strategy_id,
+        "strategy_name": "BTC 管理策略",
+        "status": "stopped",
+        "timeframe": "1h",
+        "trading_config": {
+            "strategy_manifest": {
+                "universe": {
+                    "instruments": [{"market": "Crypto", "symbol": "BTC/USDT", "market_type": "swap"}],
+                }
+            }
+        },
+    }
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+
+    with pytest.raises(position_management.PositionManagementError, match="策略源码没有订阅当前仓位品种") as exc:
+        position_management.create_managed_strategy(
+            user_id=3,
+            position_ref={
+                "credential_id": 7,
+                "symbol": "KAITO/USDC",
+                "side": "long",
+                "market_type": "swap",
+            },
+            strategy_payload={"sourceId": 9, "name": "管理策略"},
+        )
+
+    assert exc.value.status_code == 500
+    assert "残留策略 ID：44" in str(exc.value)
 
 
 def test_create_managed_strategy_route_returns_created_instance(monkeypatch):
