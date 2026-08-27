@@ -172,6 +172,141 @@ def test_create_managed_strategy_rejects_incomplete_snapshot(monkeypatch):
     assert exc.value.status_code == 409
 
 
+def test_partial_snapshot_accepts_usable_target_market_position(monkeypatch):
+    snapshot = _snapshot()
+    snapshot.update({
+        "partial": True,
+        "warnings": ["Binance 现货持仓：交易所鉴权失败"],
+        "error": "",
+    })
+
+    fresh = position_management._fresh_position(
+        snapshot,
+        {
+            "symbol": "KAITO/USDC",
+            "side": "long",
+            "market_type": "swap",
+            "inst_id": "KAITOUSDC",
+        },
+    )
+
+    assert fresh["inst_id"] == "KAITOUSDC"
+
+
+def test_fresh_position_prefers_exact_inst_id_before_leg_fallback():
+    snapshot = {
+        "swap_positions": [
+            {
+                "symbol": "BTC/USD",
+                "side": "long",
+                "market_type": "swap",
+                "inst_id": "BTC-USD-OLD",
+                "size": 1,
+            },
+            {
+                "symbol": "BTC/USD",
+                "side": "long",
+                "market_type": "swap",
+                "inst_id": "BTC-USD-NEW",
+                "size": 2,
+            },
+        ],
+        "spot_positions": [],
+        "partial": False,
+        "error": "",
+    }
+
+    fresh = position_management._fresh_position(
+        snapshot,
+        {
+            "symbol": "BTC/USD",
+            "side": "long",
+            "market_type": "swap",
+            "inst_id": "BTC-USD-NEW",
+        },
+    )
+
+    assert fresh["inst_id"] == "BTC-USD-NEW"
+    assert fresh["size"] == 2
+
+
+def test_create_spot_management_uses_takeover_price_when_cost_basis_missing(monkeypatch):
+    service = _StrategyService()
+    recorded = []
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: {
+        "swap_positions": [],
+        "spot_positions": [{
+            "symbol": "ETH/USDT",
+            "side": "long",
+            "size": "0.25",
+            "entry_price": "0",
+            "market_type": "spot",
+            "inst_id": "ETH-USDT",
+        }],
+        "partial": False,
+        "error": "",
+    })
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    monkeypatch.setattr(position_management, "_spot_last_price", lambda **_kwargs: 2500.0)
+    monkeypatch.setattr(position_management, "upsert_position", lambda **kwargs: recorded.append(kwargs))
+
+    result = position_management.create_managed_strategy(
+        user_id=3,
+        position_ref={
+            "credential_id": 7,
+            "symbol": "ETH/USDT",
+            "side": "long",
+            "market_type": "spot",
+            "inst_id": "ETH-USDT",
+        },
+        strategy_payload={"sourceId": 9, "name": "ETH 现货管理"},
+    )
+
+    assert recorded[0]["entry_price"] == 2500.0
+    assert recorded[0]["current_price"] == 2500.0
+    assert recorded[0]["market_type"] == "spot"
+    assert result["entry_price"] == "2500.0"
+    assert result["mark_price"] == "2500.0"
+
+
+def test_create_spot_management_falls_back_to_entry_when_ticker_is_unavailable(monkeypatch):
+    service = _StrategyService()
+    recorded = []
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: {
+        "swap_positions": [],
+        "spot_positions": [{
+            "symbol": "ETH/USDT",
+            "side": "long",
+            "size": "0.25",
+            "entry_price": "2100",
+            "market_type": "spot",
+            "inst_id": "ETH-USDT",
+        }],
+        "partial": False,
+        "error": "",
+    })
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    monkeypatch.setattr(position_management, "_spot_last_price", lambda **_kwargs: 0.0)
+    monkeypatch.setattr(position_management, "upsert_position", lambda **kwargs: recorded.append(kwargs))
+
+    position_management.create_managed_strategy(
+        user_id=3,
+        position_ref={
+            "credential_id": 7,
+            "symbol": "ETH/USDT",
+            "side": "long",
+            "market_type": "spot",
+            "inst_id": "ETH-USDT",
+        },
+        strategy_payload={"sourceId": 9, "name": "ETH 现货管理"},
+    )
+
+    assert recorded[0]["entry_price"] == 2100.0
+    assert recorded[0]["current_price"] == 2100.0
+
+
 def test_create_managed_strategy_rejects_source_that_does_not_monitor_position(monkeypatch):
     service = _StrategyService()
     service.get_strategy = lambda strategy_id, user_id=None: {

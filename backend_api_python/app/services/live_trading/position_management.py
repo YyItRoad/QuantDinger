@@ -9,6 +9,10 @@ from app.services.live_trading.account_positions import list_managed_positions_f
 from app.services.live_trading.account_snapshot import fetch_account_snapshot
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
 from app.services.strategy import get_strategy_service
+from app.utils.logger import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class PositionManagementError(ValueError):
@@ -40,27 +44,71 @@ def _same_leg(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
 
 
 def _fresh_position(snapshot: Dict[str, Any], position_ref: Dict[str, Any]) -> Dict[str, Any]:
-    if snapshot.get("partial") is True or snapshot.get("error"):
-        detail = str(snapshot.get("error") or "交易所账户快照不完整")
-        raise PositionManagementError(f"交易所仓位同步失败：{detail}", status_code=409)
-
     market_type = _market_type(position_ref.get("market_type"))
     rows = snapshot.get("swap_positions") if market_type == "swap" else snapshot.get("spot_positions")
     rows = rows if isinstance(rows, list) else []
     requested_inst_id = str(position_ref.get("inst_id") or "").strip()
     requested_side = str(position_ref.get("side") or "").strip().lower()
 
+    # When the caller supplied an exchange instrument id, prefer it across the
+    # whole target-market bucket before falling back to canonical leg matching.
+    # This prevents an earlier same-symbol row from hiding a later exact match.
+    if requested_inst_id:
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            row["market_type"] = _market_type(row.get("market_type") or market_type)
+            if (
+                str(row.get("side") or "").strip().lower() == requested_side
+                and str(row.get("inst_id") or "").strip() == requested_inst_id
+            ):
+                return row
+
     for raw in rows:
         if not isinstance(raw, dict):
             continue
         row = dict(raw)
         row["market_type"] = _market_type(row.get("market_type") or market_type)
-        same_inst_id = requested_inst_id and str(row.get("inst_id") or "").strip() == requested_inst_id
         if str(row.get("side") or "").strip().lower() != requested_side:
             continue
-        if same_inst_id or _same_leg(row, position_ref):
+        if _same_leg(row, position_ref):
             return row
+
+    # A warning from another market bucket must not invalidate a successfully
+    # refreshed target position. Only surface the snapshot error when the target
+    # leg itself could not be found.
+    if snapshot.get("partial") is True or snapshot.get("error"):
+        detail = str(snapshot.get("error") or "交易所目标市场仓位快照不完整")
+        raise PositionManagementError(f"交易所仓位同步失败：{detail}", status_code=409)
     raise PositionManagementError("交易所中已找不到该仓位，请先同步持仓", status_code=409)
+
+
+def _number_or_zero(value: Any) -> float:
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _spot_last_price(*, user_id: int, credential_id: int, symbol: str) -> float:
+    """Read one fresh spot ticker without expanding the whole account snapshot."""
+    if _symbol(symbol) == "USDT":
+        return 1.0
+    try:
+        from app.services.exchange_execution import resolve_exchange_config
+        from app.services.live_trading.factory import create_client
+        from app.services.live_trading.spot_sizing import fetch_spot_last_price
+
+        exchange_config = resolve_exchange_config(
+            {"credential_id": int(credential_id)},
+            user_id=int(user_id),
+        )
+        client = create_client(exchange_config, market_type="spot")
+        return _number_or_zero(fetch_spot_last_price(client, symbol=_symbol(symbol)))
+    except Exception as exc:
+        logger.warning("读取现货最新价格失败 credential=%s symbol=%s: %s", credential_id, symbol, exc)
+        return 0.0
 
 
 def _positive_number(value: Any, label: str) -> float:
@@ -124,13 +172,29 @@ def create_managed_strategy(
     if any(_same_leg(row, fresh) for row in existing):
         raise PositionManagementError("该仓位已经由策略管理，请先同步持仓", status_code=409)
 
+    market_type = _market_type(fresh.get("market_type") or position_ref.get("market_type"))
+    symbol = _symbol(fresh.get("symbol"))
+    if market_type == "spot":
+        mark_price = _number_or_zero(fresh.get("mark_price"))
+        if mark_price <= 0:
+            mark_price = _spot_last_price(
+                user_id=uid,
+                credential_id=credential_id,
+                symbol=symbol,
+            )
+        if mark_price <= 0:
+            mark_price = _number_or_zero(fresh.get("entry_price"))
+        if _number_or_zero(fresh.get("entry_price")) <= 0 and mark_price > 0:
+            # Spot wallet APIs usually do not expose cost basis. Management PnL
+            # therefore starts from the fresh takeover price.
+            fresh["entry_price"] = mark_price
+        fresh["mark_price"] = mark_price
+
     size = _positive_number(fresh.get("size"), "持仓数量")
     entry_price = _positive_number(fresh.get("entry_price"), "开仓价")
     mark_price = _positive_number(fresh.get("mark_price"), "最新价格")
     leverage = _positive_number(fresh.get("leverage") or 1, "杠杆倍数")
     side = str(fresh.get("side") or "").strip().lower()
-    market_type = _market_type(fresh.get("market_type") or position_ref.get("market_type"))
-    symbol = _symbol(fresh.get("symbol"))
     inst_id = str(fresh.get("inst_id") or position_ref.get("inst_id") or "").strip()
 
     payload = dict(strategy_payload)
