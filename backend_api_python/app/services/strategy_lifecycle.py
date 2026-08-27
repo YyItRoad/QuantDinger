@@ -64,6 +64,30 @@ def maybe_stop_position_management_strategy(strategy_id: int) -> bool:
     user_id = int(strategy.get("user_id") or 0)
     if not service.update_strategy_status(sid, "stopped", user_id=user_id):
         return False
+
+    # Do not stop a process-local executor directly here. Position sync may run
+    # on a different trading worker from the one that owns this strategy's
+    # runtime lease. A durable stop command is claimed by the lease owner, which
+    # then performs the normal executor cleanup and releases that lease.
+    try:
+        from app.services.strategy_command_repository import StrategyCommandRepository
+
+        StrategyCommandRepository().enqueue(
+            strategy_id=sid,
+            user_id=user_id,
+            command_type="stop",
+            payload={"close_positions": False},
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to queue position-management stop command for strategy %s: %s",
+            sid,
+            exc,
+            exc_info=True,
+        )
+        append_strategy_log(sid, "error", f"持仓已平仓，但自动停止命令创建失败：{exc}")
+        return False
+
     append_strategy_log(sid, "info", "持仓已全部平仓，管理策略已自动停止")
     return True
 

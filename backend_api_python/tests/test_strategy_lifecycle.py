@@ -34,12 +34,28 @@ class _ManagedStrategyService:
 def test_managed_strategy_stops_after_last_position_is_flat(monkeypatch):
     service = _ManagedStrategyService()
     logs = []
+    commands = []
+
+    class _Repository:
+        def enqueue(self, **kwargs):
+            commands.append(kwargs)
+
     monkeypatch.setattr(strategy_lifecycle, "get_strategy_service", lambda: service)
     monkeypatch.setattr(strategy_lifecycle, "_strategy_has_open_positions", lambda _sid: False)
     monkeypatch.setattr(strategy_lifecycle, "append_strategy_log", lambda *args: logs.append(args))
+    monkeypatch.setattr(
+        "app.services.strategy_command_repository.StrategyCommandRepository",
+        _Repository,
+    )
 
     assert strategy_lifecycle.maybe_stop_position_management_strategy(44) is True
     assert service.strategy["status"] == "stopped"
+    assert commands == [{
+        "strategy_id": 44,
+        "user_id": 3,
+        "command_type": "stop",
+        "payload": {"close_positions": False},
+    }]
     assert logs == [(44, "info", "持仓已全部平仓，管理策略已自动停止")]
 
 
