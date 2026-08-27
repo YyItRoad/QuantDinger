@@ -29,6 +29,9 @@ def test_management_leg_lock_uses_same_advisory_key_for_lock_and_unlock(monkeypa
         def execute(self, sql, params):
             statements.append((sql, params))
 
+        def fetchone(self):
+            return {"acquired": True}
+
         def close(self):
             statements.append(("close", ()))
 
@@ -52,11 +55,89 @@ def test_management_leg_lock_uses_same_advisory_key_for_lock_and_unlock(monkeypa
     ):
         statements.append(("inside", ()))
 
-    assert statements[0][0] == "SELECT pg_advisory_lock(%s, %s)"
+    assert statements[0][0] == "SELECT pg_try_advisory_lock(%s, %s) AS acquired"
     assert statements[1] == ("inside", ())
     assert statements[2][0] == "SELECT pg_advisory_unlock(%s, %s)"
     assert statements[0][1] == statements[2][1]
     assert statements[0][1][0] == 7414
+
+
+def test_management_leg_lock_rejects_when_another_request_owns_it(monkeypatch):
+    statements = []
+
+    class _Cursor:
+        def execute(self, sql, params):
+            statements.append((sql, params))
+
+        def fetchone(self):
+            return {"acquired": False}
+
+        def close(self):
+            statements.append(("close", ()))
+
+    class _Db:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def cursor(self):
+            return _Cursor()
+
+    monkeypatch.setattr(position_management, "get_db_connection", lambda: _Db())
+
+    with pytest.raises(position_management.PositionManagementError, match="正在被接管") as exc:
+        with _REAL_MANAGEMENT_LEG_LOCK(
+            credential_id=7,
+            market_type="swap",
+            symbol="KAITO/USDC",
+            side="long",
+        ):
+            pytest.fail("未获取锁时不应进入临界区")
+
+    assert exc.value.status_code == 409
+    assert all("pg_advisory_unlock" not in sql for sql, _params in statements)
+
+
+def test_exchange_snapshot_is_fetched_before_management_lock(monkeypatch):
+    service = _StrategyService()
+    events = []
+
+    def snapshot(**_kwargs):
+        events.append("snapshot")
+        return _snapshot()
+
+    @contextmanager
+    def lock(**kwargs):
+        events.append(("lock", kwargs))
+        yield
+
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", snapshot)
+    monkeypatch.setattr(position_management, "_management_leg_lock", lock)
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    monkeypatch.setattr(position_management, "upsert_position", lambda **_kwargs: None)
+
+    position_management.create_managed_strategy(
+        user_id=3,
+        position_ref={
+            "credential_id": 7,
+            "symbol": "KAITO/USDC:USDC",
+            "side": "long",
+            "market_type": "swap",
+            "inst_id": "KAITOUSDC",
+        },
+        strategy_payload={"sourceId": 9, "name": "管理策略"},
+    )
+
+    assert events[0] == "snapshot"
+    assert events[1] == ("lock", {
+        "credential_id": 7,
+        "market_type": "swap",
+        "symbol": "KAITO/USDC",
+        "side": "long",
+    })
 
 
 class _StrategyService:

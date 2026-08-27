@@ -137,12 +137,23 @@ def _management_leg_lock(
     lock_key = _signed_lock_key(leg)
     with get_db_connection() as db:
         cur = db.cursor()
+        acquired = False
         try:
-            cur.execute("SELECT pg_advisory_lock(%s, %s)", (7414, lock_key))
+            cur.execute("SELECT pg_try_advisory_lock(%s, %s) AS acquired", (7414, lock_key))
+            row = cur.fetchone()
+            if isinstance(row, dict):
+                acquired = bool(row.get("acquired"))
+            elif isinstance(row, (tuple, list)) and row:
+                acquired = bool(row[0])
+            else:
+                acquired = bool(row)
+            if not acquired:
+                raise PositionManagementError("该仓位正在被接管，请稍后重试", status_code=409)
             yield
         finally:
             try:
-                cur.execute("SELECT pg_advisory_unlock(%s, %s)", (7414, lock_key))
+                if acquired:
+                    cur.execute("SELECT pg_advisory_unlock(%s, %s)", (7414, lock_key))
             finally:
                 cur.close()
 
@@ -236,17 +247,23 @@ def create_managed_strategy(
     if uid <= 0 or credential_id <= 0:
         raise PositionManagementError("缺少有效的账户凭证")
 
+    # Refresh exchange state before taking a DB-backed adoption lock. Network
+    # latency must never occupy a connection from the application DB pool.
+    snapshot = fetch_account_snapshot(user_id=uid, credential_id=credential_id)
+    fresh = _fresh_position(snapshot, position_ref)
+
     with _management_leg_lock(
         credential_id=credential_id,
-        market_type=_market_type(position_ref.get("market_type")),
-        symbol=_symbol(position_ref.get("symbol") or position_ref.get("symbol_canonical")),
-        side=str(position_ref.get("side") or "").strip().lower(),
+        market_type=_market_type(fresh.get("market_type") or position_ref.get("market_type")),
+        symbol=_symbol(fresh.get("symbol") or fresh.get("symbol_canonical")),
+        side=str(fresh.get("side") or "").strip().lower(),
     ):
         return _create_managed_strategy_locked(
             user_id=uid,
             credential_id=credential_id,
             position_ref=position_ref,
             strategy_payload=strategy_payload,
+            fresh=fresh,
         )
 
 
@@ -256,11 +273,9 @@ def _create_managed_strategy_locked(
     credential_id: int,
     position_ref: Dict[str, Any],
     strategy_payload: Dict[str, Any],
+    fresh: Dict[str, Any],
 ) -> Dict[str, Any]:
     uid = int(user_id)
-    snapshot = fetch_account_snapshot(user_id=uid, credential_id=credential_id)
-    fresh = _fresh_position(snapshot, position_ref)
-
     existing = list_managed_positions_for_account(user_id=uid, credential_id=credential_id)
     if any(_same_leg(row, fresh) for row in existing):
         raise PositionManagementError("该仓位已经由策略管理，请先同步持仓", status_code=409)
