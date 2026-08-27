@@ -165,19 +165,27 @@ class StrategyService:
             return False
         from app.services.strategy_v2 import get_strategy_v2_deployment_service
 
+        existing_config = existing.get("trading_config") or {}
+        position_management = (
+            dict(existing_config.get("position_management") or {})
+            if isinstance(existing_config, dict)
+            else {}
+        )
         changes = self._deployment_payload(payload)
         merged = {
-            "sourceId": (existing.get("trading_config") or {}).get("script_source_id"),
+            "sourceId": existing_config.get("script_source_id"),
             "name": existing.get("strategy_name"),
             "initialCapital": existing.get("initial_capital"),
             "executionMode": existing.get("execution_mode"),
             "leverage": existing.get("leverage"),
             "leverageEnabled": float(existing.get("leverage") or 1) > 1,
-            "params": (existing.get("trading_config") or {}).get("params") or {},
-            "directionMode": (existing.get("trading_config") or {}).get("direction_mode") or "",
-            "positionSide": (existing.get("trading_config") or {}).get("position_side") or "",
-            "accountRisk": (existing.get("trading_config") or {}).get("account_risk") or {},
+            "params": existing_config.get("params") or {},
+            "directionMode": existing_config.get("direction_mode") or "",
+            "positionSide": existing_config.get("position_side") or "",
+            "accountRisk": existing_config.get("account_risk") or {},
         }
+        if position_management:
+            merged["positionManagement"] = position_management
         merged.update({key: value for key, value in changes.items() if value is not None})
         get_strategy_v2_deployment_service().save(
             user_id=int(existing.get("user_id") or user_id or 0),
@@ -279,7 +287,7 @@ class StrategyService:
             "sourceId", "name", "initialCapital", "executionMode", "credentialId",
             "leverageEnabled", "leverage", "params", "notificationChannels",
             "notificationTargets", "directionMode", "positionSide",
-            "accountRisk",
+            "accountRisk", "positionManagement",
         }
         unsupported = set(payload) - allowed - {"user_id"}
         if unsupported:

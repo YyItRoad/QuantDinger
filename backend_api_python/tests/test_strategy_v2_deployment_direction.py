@@ -79,6 +79,25 @@ def test_deployment_persists_manifest_direction_and_legacy_position_side(monkeyp
     assert trading_config["strategy_manifest"]["directionMode"] == "both"
 
 
+def test_deployment_persists_position_management_in_same_runtime_config_write(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(deployment, "get_script_source_service", lambda: _Sources())
+    monkeypatch.setattr(deployment, "get_db_connection", lambda: _Db(cursor))
+    payload = _payload("both")
+    payload["positionManagement"] = {
+        "enabled": True,
+        "auto_stop_when_flat": True,
+    }
+
+    StrategyV2DeploymentService().save(user_id=7, payload=payload)
+    trading_config = json.loads(cursor.params[-1])
+
+    assert trading_config["position_management"] == {
+        "enabled": True,
+        "auto_stop_when_flat": True,
+    }
+
+
 def test_deployment_rejects_direction_override_that_conflicts_with_manifest(monkeypatch):
     monkeypatch.setattr(deployment, "get_script_source_service", lambda: _Sources())
 

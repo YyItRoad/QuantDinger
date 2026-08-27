@@ -7,9 +7,11 @@ threads, and runtime logs stay consistent (avoids endless retry spam after resta
 
 from __future__ import annotations
 
+import json
 import threading
-from typing import Set
+from typing import Any, Set
 
+from app.services.strategy import get_strategy_service
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.strategy_runtime_logs import append_strategy_log
@@ -18,6 +20,52 @@ logger = get_logger(__name__)
 
 _quiet_lock = threading.Lock()
 _quiet_sids: Set[int] = set()
+
+
+def _config_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return dict(parsed) if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _strategy_has_open_positions(strategy_id: int) -> bool:
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            "SELECT 1 FROM qd_strategy_positions WHERE strategy_id = %s AND size > 0 LIMIT 1",
+            (int(strategy_id),),
+        )
+        row = cur.fetchone()
+        cur.close()
+    return bool(row)
+
+
+def maybe_stop_position_management_strategy(strategy_id: int) -> bool:
+    """Stop a marked management instance after its final position is gone."""
+    sid = int(strategy_id or 0)
+    if sid <= 0:
+        return False
+    service = get_strategy_service()
+    strategy = service.get_strategy(sid) or {}
+    config = _config_object(strategy.get("trading_config"))
+    marker = _config_object(config.get("position_management"))
+    if marker.get("enabled") is not True or marker.get("auto_stop_when_flat") is not True:
+        return False
+    if str(strategy.get("status") or "").strip().lower() != "running":
+        return False
+    if _strategy_has_open_positions(sid):
+        return False
+    user_id = int(strategy.get("user_id") or 0)
+    if not service.update_strategy_status(sid, "stopped", user_id=user_id):
+        return False
+    append_strategy_log(sid, "info", "持仓已全部平仓，管理策略已自动停止")
+    return True
 
 
 def is_fatal_exchange_error(msg: str) -> bool:

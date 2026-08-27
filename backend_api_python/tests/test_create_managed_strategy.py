@@ -32,7 +32,6 @@ class _StrategyService:
         self.deleted.append((strategy_id, user_id))
         return True
 
-
 def payload_name(payload):
     return str((payload or {}).get("name") or "")
 
@@ -93,6 +92,10 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
         "leverageEnabled": True,
         "leverage": 5.0,
         "params": {"atr_period": 14},
+        "positionManagement": {
+            "enabled": True,
+            "auto_stop_when_flat": True,
+        },
         "user_id": 3,
     }
     assert recorded == [{

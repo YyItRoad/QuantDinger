@@ -70,6 +70,9 @@ class StrategyV2DeploymentService:
         account_risk = payload.get("accountRisk") or payload.get("account_risk") or {}
         if not isinstance(account_risk, dict):
             raise StrategyV2ContractError("strategyV2.accountRiskInvalid")
+        position_management = payload.get("positionManagement") or {}
+        if not isinstance(position_management, dict):
+            raise StrategyV2ContractError("strategyV2.runtimeConfigInvalid")
 
         notification_config = {
             "channels": list(payload.get("notificationChannels") or []),
@@ -145,6 +148,8 @@ class StrategyV2DeploymentService:
             "position_side": position_side,
             "account_risk": dict(account_risk),
         })
+        if position_management:
+            runtime_config["position_management"] = dict(position_management)
         market_category = manifest.markets[0] if len(manifest.markets) == 1 else "Mixed"
         exchange_config = {"credential_id": credential_id, "exchange_id": exchange_id} if credential_id else {}
 

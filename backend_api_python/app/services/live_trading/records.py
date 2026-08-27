@@ -17,6 +17,10 @@ import time
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 from app.utils.db import get_db_connection
+from app.utils.logger import get_logger
+
+
+logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from app.services.live_trading.leg_context import LegContext
@@ -801,6 +805,16 @@ def apply_fill_to_local_position(
         new_size = cur_size - filled_qty
         if new_size <= 0:
             _delete_position(sid, sym_key, side)
+            from app.services.strategy_lifecycle import maybe_stop_position_management_strategy
+
+            try:
+                maybe_stop_position_management_strategy(sid)
+            except Exception as exc:
+                logger.warning(
+                    "Position-management lifecycle check failed for strategy %s: %s",
+                    sid,
+                    exc,
+                )
             return profit, None, matched_entry
         # Keep entry price for remaining position.
         new_high = max(cur_high or px, px)

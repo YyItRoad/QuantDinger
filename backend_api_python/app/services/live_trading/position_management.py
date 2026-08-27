@@ -140,6 +140,10 @@ def create_managed_strategy(
         "credentialId": credential_id,
         "leverageEnabled": leverage > 1,
         "leverage": leverage,
+        "positionManagement": {
+            "enabled": True,
+            "auto_stop_when_flat": True,
+        },
     })
     service = get_strategy_service()
     strategy_id = int(service.create_strategy(payload))
