@@ -222,7 +222,7 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
         "credentialId": 7,
         "leverageEnabled": True,
         "leverage": 5.0,
-        "params": {"atr_period": 14},
+        "params": {"atr_period": 14, "leverage": 5.0},
         "positionManagement": {
             "enabled": True,
             "auto_stop_when_flat": True,

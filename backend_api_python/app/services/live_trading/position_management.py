@@ -306,12 +306,15 @@ def _create_managed_strategy_locked(
     inst_id = str(fresh.get("inst_id") or position_ref.get("inst_id") or "").strip()
 
     payload = dict(strategy_payload)
+    params = _object(payload.get("params"))
+    params["leverage"] = leverage
     payload.update({
         "user_id": uid,
         "executionMode": "live",
         "credentialId": credential_id,
         "leverageEnabled": leverage > 1,
         "leverage": leverage,
+        "params": params,
         "positionManagement": {
             "enabled": True,
             "auto_stop_when_flat": True,
