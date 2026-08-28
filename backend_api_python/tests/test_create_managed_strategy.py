@@ -22,30 +22,18 @@ def _without_database_advisory_lock(monkeypatch):
     monkeypatch.setattr(position_management, "_management_leg_lock", unlocked)
 
 
-def test_management_leg_lock_uses_same_advisory_key_for_lock_and_unlock(monkeypatch):
-    statements = []
+def test_management_leg_lock_uses_short_lived_process_lease(monkeypatch):
+    calls = []
 
-    class _Cursor:
-        def execute(self, sql, params):
-            statements.append((sql, params))
+    class _Repository:
+        def acquire_process_lease(self, **kwargs):
+            calls.append(("acquire", kwargs))
+            return True
 
-        def fetchone(self):
-            return {"acquired": True}
+        def release_process_lease(self, **kwargs):
+            calls.append(("release", kwargs))
 
-        def close(self):
-            statements.append(("close", ()))
-
-    class _Db:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def cursor(self):
-            return _Cursor()
-
-    monkeypatch.setattr(position_management, "get_db_connection", lambda: _Db())
+    monkeypatch.setattr(position_management, "StrategyCommandRepository", _Repository)
 
     with _REAL_MANAGEMENT_LEG_LOCK(
         credential_id=7,
@@ -53,39 +41,31 @@ def test_management_leg_lock_uses_same_advisory_key_for_lock_and_unlock(monkeypa
         symbol="KAITO/USDC:USDC",
         side="LONG",
     ):
-        statements.append(("inside", ()))
+        calls.append(("inside", {}))
 
-    assert statements[0][0] == "SELECT pg_try_advisory_lock(%s, %s) AS acquired"
-    assert statements[1] == ("inside", ())
-    assert statements[2][0] == "SELECT pg_advisory_unlock(%s, %s)"
-    assert statements[0][1] == statements[2][1]
-    assert statements[0][1][0] == 7414
+    assert [item[0] for item in calls] == ["acquire", "inside", "release"]
+    acquired = calls[0][1]
+    released = calls[2][1]
+    assert acquired["lease_key"].startswith("position-management:")
+    assert acquired["lease_seconds"] == 120
+    assert released == {
+        "lease_key": acquired["lease_key"],
+        "owner_id": acquired["owner_id"],
+    }
 
 
 def test_management_leg_lock_rejects_when_another_request_owns_it(monkeypatch):
-    statements = []
+    calls = []
 
-    class _Cursor:
-        def execute(self, sql, params):
-            statements.append((sql, params))
-
-        def fetchone(self):
-            return {"acquired": False}
-
-        def close(self):
-            statements.append(("close", ()))
-
-    class _Db:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
+    class _Repository:
+        def acquire_process_lease(self, **kwargs):
+            calls.append(("acquire", kwargs))
             return False
 
-        def cursor(self):
-            return _Cursor()
+        def release_process_lease(self, **kwargs):
+            calls.append(("release", kwargs))
 
-    monkeypatch.setattr(position_management, "get_db_connection", lambda: _Db())
+    monkeypatch.setattr(position_management, "StrategyCommandRepository", _Repository)
 
     with pytest.raises(position_management.PositionManagementError, match="正在被接管") as exc:
         with _REAL_MANAGEMENT_LEG_LOCK(
@@ -97,7 +77,26 @@ def test_management_leg_lock_rejects_when_another_request_owns_it(monkeypatch):
             pytest.fail("未获取锁时不应进入临界区")
 
     assert exc.value.status_code == 409
-    assert all("pg_advisory_unlock" not in sql for sql, _params in statements)
+    assert [item[0] for item in calls] == ["acquire"]
+
+
+def test_management_leg_lock_release_failure_does_not_hide_result(monkeypatch):
+    class _Repository:
+        def acquire_process_lease(self, **_kwargs):
+            return True
+
+        def release_process_lease(self, **_kwargs):
+            raise RuntimeError("temporary release failure")
+
+    monkeypatch.setattr(position_management, "StrategyCommandRepository", _Repository)
+
+    with _REAL_MANAGEMENT_LEG_LOCK(
+        credential_id=7,
+        market_type="swap",
+        symbol="KAITO/USDC",
+        side="long",
+    ):
+        pass
 
 
 def test_exchange_snapshot_is_fetched_before_management_lock(monkeypatch):
@@ -138,6 +137,54 @@ def test_exchange_snapshot_is_fetched_before_management_lock(monkeypatch):
         "symbol": "KAITO/USDC",
         "side": "long",
     })
+
+
+def test_spot_ticker_is_fetched_before_management_lock(monkeypatch):
+    service = _StrategyService()
+    events = []
+
+    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: {
+        "swap_positions": [],
+        "spot_positions": [{
+            "symbol": "ETH/USDT",
+            "side": "long",
+            "size": "0.25",
+            "entry_price": "0",
+            "market_type": "spot",
+            "inst_id": "ETH-USDT",
+        }],
+        "partial": False,
+        "error": "",
+    })
+
+    def ticker(**_kwargs):
+        events.append("ticker")
+        return 2500.0
+
+    @contextmanager
+    def lock(**_kwargs):
+        events.append("lock")
+        yield
+
+    monkeypatch.setattr(position_management, "_spot_last_price", ticker)
+    monkeypatch.setattr(position_management, "_management_leg_lock", lock)
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    monkeypatch.setattr(position_management, "upsert_position", lambda **_kwargs: None)
+
+    position_management.create_managed_strategy(
+        user_id=3,
+        position_ref={
+            "credential_id": 7,
+            "symbol": "ETH/USDT",
+            "side": "long",
+            "market_type": "spot",
+            "inst_id": "ETH-USDT",
+        },
+        strategy_payload={"sourceId": 9, "name": "ETH 现货管理"},
+    )
+
+    assert events == ["ticker", "lock"]
 
 
 class _StrategyService:
@@ -569,3 +616,22 @@ def test_create_managed_strategy_route_returns_created_instance(monkeypatch):
     assert status == 201
     assert response.get_json() == {"code": 1, "msg": "已创建持仓管理策略", "data": expected}
     assert calls == [(3, payload["position"], payload["strategy"])]
+
+
+def test_create_managed_strategy_route_hides_unexpected_internal_error(monkeypatch):
+    app = Flask(__name__)
+
+    def fail_create(**_kwargs):
+        raise RuntimeError("database password leaked")
+
+    monkeypatch.setattr(position_management, "create_managed_strategy", fail_create)
+    payload = {
+        "position": {"credential_id": 7, "symbol": "KAITO/USDC", "side": "long", "market_type": "swap"},
+        "strategy": {"sourceId": 9, "name": "管理策略"},
+    }
+    with app.test_request_context("/api/account/managed-strategies", method="POST", json=payload):
+        g.user_id = 3
+        response, status = inspect.unwrap(routes.create_managed_account_strategy)()
+
+    assert status == 500
+    assert response.get_json() == {"code": 0, "msg": "创建持仓管理策略失败", "data": None}

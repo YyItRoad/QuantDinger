@@ -95,9 +95,9 @@ def create_managed_account_strategy():
         return jsonify({'code': 1, 'msg': '已创建持仓管理策略', 'data': result}), 201
     except PositionManagementError as exc:
         return jsonify({'code': 0, 'msg': str(exc), 'data': None}), exc.status_code
-    except Exception as exc:
+    except Exception:
         logger.exception("create_managed_account_strategy failed")
-        return jsonify({'code': 0, 'msg': str(exc), 'data': None}), 400
+        return jsonify({'code': 0, 'msg': '创建持仓管理策略失败', 'data': None}), 500
 
 
 @strategy_blp.route('/account/positions', methods=['GET'])

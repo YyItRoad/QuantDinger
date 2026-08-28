@@ -5,13 +5,14 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import uuid
 from typing import Any, Dict, Iterator
 
 from app.services.live_trading.account_positions import list_managed_positions_for_account
 from app.services.live_trading.account_snapshot import fetch_account_snapshot
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
 from app.services.strategy import get_strategy_service
-from app.utils.db import get_db_connection
+from app.services.strategy_command_repository import StrategyCommandRepository
 from app.utils.logger import get_logger
 
 
@@ -114,9 +115,9 @@ def _spot_last_price(*, user_id: int, credential_id: int, symbol: str) -> float:
         return 0.0
 
 
-def _signed_lock_key(value: str) -> int:
-    raw = hashlib.sha256(value.encode("utf-8")).digest()[:4]
-    return int.from_bytes(raw, byteorder="big", signed=True)
+def _management_lease_key(value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+    return f"position-management:{digest}"
 
 
 @contextmanager
@@ -127,35 +128,60 @@ def _management_leg_lock(
     symbol: str,
     side: str,
 ) -> Iterator[None]:
-    """Serialize adoption of one account leg across API processes."""
+    """Serialize adoption without holding a pooled DB connection while creating the strategy."""
     leg = "|".join((
         str(int(credential_id)),
         _market_type(market_type),
         _symbol(symbol),
         str(side or "").strip().lower(),
     ))
-    lock_key = _signed_lock_key(leg)
-    with get_db_connection() as db:
-        cur = db.cursor()
-        acquired = False
+    lease_key = _management_lease_key(leg)
+    owner_id = uuid.uuid4().hex
+    repository = StrategyCommandRepository()
+    acquired = repository.acquire_process_lease(
+        lease_key=lease_key,
+        owner_id=owner_id,
+        lease_seconds=120,
+    )
+    if not acquired:
+        raise PositionManagementError("该仓位正在被接管，请稍后重试", status_code=409)
+    try:
+        yield
+    finally:
         try:
-            cur.execute("SELECT pg_try_advisory_lock(%s, %s) AS acquired", (7414, lock_key))
-            row = cur.fetchone()
-            if isinstance(row, dict):
-                acquired = bool(row.get("acquired"))
-            elif isinstance(row, (tuple, list)) and row:
-                acquired = bool(row[0])
-            else:
-                acquired = bool(row)
-            if not acquired:
-                raise PositionManagementError("该仓位正在被接管，请稍后重试", status_code=409)
-            yield
-        finally:
-            try:
-                if acquired:
-                    cur.execute("SELECT pg_advisory_unlock(%s, %s)", (7414, lock_key))
-            finally:
-                cur.close()
+            repository.release_process_lease(lease_key=lease_key, owner_id=owner_id)
+        except Exception as exc:
+            # The lease expires automatically; cleanup failure must not hide the
+            # adoption result or hold a database connection open.
+            logger.warning("释放持仓接管租约失败 lease=%s: %s", lease_key, exc)
+
+
+def _complete_fresh_position_price(
+    *,
+    user_id: int,
+    credential_id: int,
+    fresh: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Complete spot takeover prices before entering the database-only critical section."""
+    resolved = dict(fresh)
+    if _market_type(resolved.get("market_type")) != "spot":
+        return resolved
+    symbol = _symbol(resolved.get("symbol"))
+    mark_price = _number_or_zero(resolved.get("mark_price"))
+    if mark_price <= 0:
+        mark_price = _spot_last_price(
+            user_id=int(user_id),
+            credential_id=int(credential_id),
+            symbol=symbol,
+        )
+    if mark_price <= 0:
+        mark_price = _number_or_zero(resolved.get("entry_price"))
+    if _number_or_zero(resolved.get("entry_price")) <= 0 and mark_price > 0:
+        # Spot wallet APIs usually do not expose cost basis. Management PnL
+        # therefore starts from the fresh takeover price.
+        resolved["entry_price"] = mark_price
+    resolved["mark_price"] = mark_price
+    return resolved
 
 
 def _delete_created_strategy(
@@ -251,6 +277,11 @@ def create_managed_strategy(
     # latency must never occupy a connection from the application DB pool.
     snapshot = fetch_account_snapshot(user_id=uid, credential_id=credential_id)
     fresh = _fresh_position(snapshot, position_ref)
+    fresh = _complete_fresh_position_price(
+        user_id=uid,
+        credential_id=credential_id,
+        fresh=fresh,
+    )
 
     with _management_leg_lock(
         credential_id=credential_id,
@@ -282,22 +313,6 @@ def _create_managed_strategy_locked(
 
     market_type = _market_type(fresh.get("market_type") or position_ref.get("market_type"))
     symbol = _symbol(fresh.get("symbol"))
-    if market_type == "spot":
-        mark_price = _number_or_zero(fresh.get("mark_price"))
-        if mark_price <= 0:
-            mark_price = _spot_last_price(
-                user_id=uid,
-                credential_id=credential_id,
-                symbol=symbol,
-            )
-        if mark_price <= 0:
-            mark_price = _number_or_zero(fresh.get("entry_price"))
-        if _number_or_zero(fresh.get("entry_price")) <= 0 and mark_price > 0:
-            # Spot wallet APIs usually do not expose cost basis. Management PnL
-            # therefore starts from the fresh takeover price.
-            fresh["entry_price"] = mark_price
-        fresh["mark_price"] = mark_price
-
     size = _positive_number(fresh.get("size"), "持仓数量")
     entry_price = _positive_number(fresh.get("entry_price"), "开仓价")
     mark_price = _positive_number(fresh.get("mark_price"), "最新价格")
