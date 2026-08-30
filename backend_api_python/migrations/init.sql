@@ -827,12 +827,128 @@ ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_strategy_id int4 
 ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS source_language varchar(16) DEFAULT NULL;
 ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS name_i18n jsonb DEFAULT NULL;
 ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS description_i18n jsonb DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_contract jsonb DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_contract_version int4 DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_contract_hash varchar(64) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_binding_mode varchar(24) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_type varchar(24) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_direction_mode varchar(24) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_primary_frequency varchar(16) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_markets varchar(255) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_market_types varchar(255) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS strategy_timeframes varchar(255) DEFAULT NULL;
+-- Canonical marketplace applicability metadata. Legacy strategy_* columns
+-- above remain only for upgrade/rollback compatibility.
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_contract jsonb DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_contract_version int4 DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_contract_hash varchar(64) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_binding_mode varchar(24) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_strategy_type varchar(24) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_direction_mode varchar(24) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_execution_mode varchar(24) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_execution_frequency varchar(16) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_confirmation_frequencies varchar(255) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_markets varchar(255) DEFAULT NULL;
+ALTER TABLE qd_indicator_codes ADD COLUMN IF NOT EXISTS marketplace_market_types varchar(255) DEFAULT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_user_id ON qd_indicator_codes USING btree (user_id);
 CREATE INDEX IF NOT EXISTS idx_indicator_review_status ON qd_indicator_codes USING btree (review_status);
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_source ON qd_indicator_codes USING btree (source_indicator_id);
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_source_script ON qd_indicator_codes USING btree (source_script_source_id);
 CREATE INDEX IF NOT EXISTS idx_indicator_codes_source_strategy ON qd_indicator_codes USING btree (source_strategy_id);
+CREATE INDEX IF NOT EXISTS idx_indicator_strategy_binding ON qd_indicator_codes USING btree (strategy_binding_mode);
+CREATE INDEX IF NOT EXISTS idx_indicator_strategy_type ON qd_indicator_codes USING btree (strategy_type);
+CREATE INDEX IF NOT EXISTS idx_indicator_strategy_frequency ON qd_indicator_codes USING btree (strategy_primary_frequency);
+CREATE INDEX IF NOT EXISTS idx_indicator_marketplace_binding ON qd_indicator_codes USING btree (marketplace_binding_mode);
+CREATE INDEX IF NOT EXISTS idx_indicator_marketplace_strategy_type ON qd_indicator_codes USING btree (marketplace_strategy_type);
+CREATE INDEX IF NOT EXISTS idx_indicator_marketplace_execution_mode ON qd_indicator_codes USING btree (marketplace_execution_mode);
+CREATE INDEX IF NOT EXISTS idx_indicator_marketplace_execution_frequency ON qd_indicator_codes USING btree (marketplace_execution_frequency);
+
+-- Copy legacy marketplace metadata into the canonical namespace.  This is
+-- idempotent and intentionally leaves the old columns intact for rollback.
+UPDATE qd_indicator_codes
+SET marketplace_contract = COALESCE(
+        marketplace_contract,
+        CASE WHEN strategy_contract IS NULL THEN NULL ELSE
+          strategy_contract || jsonb_build_object(
+            'contract_version', 2,
+            'execution_mode', COALESCE(
+              strategy_contract->>'execution_mode',
+              CASE
+                WHEN code ~ E'run_(daily|weekly|monthly)\\s*\\(' AND code ~ E'def\\s+handle_data\\s*\\(' THEN 'hybrid'
+                WHEN code ~ E'run_(daily|weekly|monthly)\\s*\\(' THEN 'scheduled'
+                ELSE 'bar'
+              END
+            ),
+            'execution_frequency', COALESCE(
+              strategy_contract->>'execution_frequency',
+              strategy_contract->>'driving_frequency',
+              strategy_contract->>'primary_frequency',
+              ''
+            ),
+            'confirmation_frequencies', COALESCE(
+              strategy_contract->'confirmation_frequencies',
+              (SELECT COALESCE(jsonb_agg(value), '[]'::jsonb)
+               FROM jsonb_array_elements_text(COALESCE(strategy_contract->'frequencies', '[]'::jsonb)) AS f(value)
+               WHERE value <> COALESCE(
+                 strategy_contract->>'execution_frequency',
+                 strategy_contract->>'driving_frequency',
+                 strategy_contract->>'primary_frequency',
+                 ''
+               ))
+            )
+          )
+        END
+    ),
+    marketplace_contract_version = COALESCE(
+      marketplace_contract_version,
+      CASE WHEN strategy_contract IS NULL THEN NULL ELSE 2 END
+    ),
+    marketplace_contract_hash = COALESCE(marketplace_contract_hash, strategy_contract_hash),
+    marketplace_binding_mode = COALESCE(marketplace_binding_mode, strategy_binding_mode),
+    marketplace_strategy_type = COALESCE(marketplace_strategy_type, strategy_type),
+    marketplace_direction_mode = COALESCE(marketplace_direction_mode, strategy_direction_mode),
+    marketplace_execution_mode = COALESCE(
+      marketplace_execution_mode,
+      strategy_contract->>'execution_mode',
+      CASE
+        WHEN code ~ E'run_(daily|weekly|monthly)\\s*\\(' AND code ~ E'def\\s+handle_data\\s*\\(' THEN 'hybrid'
+        WHEN code ~ E'run_(daily|weekly|monthly)\\s*\\(' THEN 'scheduled'
+        ELSE 'bar'
+      END
+    ),
+    marketplace_execution_frequency = COALESCE(
+      marketplace_execution_frequency,
+      strategy_contract->>'execution_frequency',
+      strategy_primary_frequency
+    ),
+    marketplace_confirmation_frequencies = COALESCE(
+      marketplace_confirmation_frequencies,
+      CASE WHEN jsonb_exists(marketplace_contract, 'confirmation_frequencies') THEN
+        '|' || array_to_string(
+          ARRAY(SELECT jsonb_array_elements_text(marketplace_contract->'confirmation_frequencies')),
+          '|'
+        ) || '|'
+      ELSE NULL END
+    ),
+    marketplace_markets = COALESCE(marketplace_markets, strategy_markets),
+    marketplace_market_types = COALESCE(marketplace_market_types, strategy_market_types)
+WHERE COALESCE(asset_type, 'indicator') = 'script_template';
+
+-- Populate the confirmation-frequency search index after the canonical JSON
+-- contract is visible (UPDATE expressions above read the pre-update row).
+UPDATE qd_indicator_codes
+SET marketplace_confirmation_frequencies = CASE
+      WHEN jsonb_array_length(COALESCE(marketplace_contract->'confirmation_frequencies', '[]'::jsonb)) = 0
+        THEN NULL
+      ELSE '|' || array_to_string(
+        ARRAY(SELECT jsonb_array_elements_text(marketplace_contract->'confirmation_frequencies')),
+        '|'
+      ) || '|'
+    END
+WHERE COALESCE(asset_type, 'indicator') = 'script_template'
+  AND marketplace_contract IS NOT NULL
+  AND marketplace_confirmation_frequencies IS NULL;
 
 CREATE TABLE IF NOT EXISTS qd_indicator_code_versions (
    id serial4 NOT NULL,
@@ -850,6 +966,51 @@ CREATE TABLE IF NOT EXISTS qd_indicator_code_versions (
 CREATE INDEX IF NOT EXISTS idx_indicator_code_versions_indicator ON qd_indicator_code_versions USING btree (indicator_id, version_no DESC);
 CREATE INDEX IF NOT EXISTS idx_indicator_code_versions_user ON qd_indicator_code_versions USING btree (user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_indicator_code_versions_no ON qd_indicator_code_versions USING btree (indicator_id, version_no);
+
+-- Bounded AI authoring memory and unapplied code candidates. These records are
+-- intentionally separate from canonical indicator code/version history.
+CREATE TABLE IF NOT EXISTS qd_ai_workspace_threads (
+   id SERIAL PRIMARY KEY,
+   user_id INTEGER NOT NULL,
+   asset_type VARCHAR(32) NOT NULL,
+   asset_id INTEGER NOT NULL,
+   title VARCHAR(255) DEFAULT '',
+   summary_json TEXT,
+   summary_until_message_id INTEGER,
+   summary_version INTEGER DEFAULT 0,
+   created_at TIMESTAMP DEFAULT NOW(),
+   updated_at TIMESTAMP DEFAULT NOW(),
+   UNIQUE (user_id, asset_type, asset_id)
+);
+CREATE TABLE IF NOT EXISTS qd_ai_workspace_messages (
+   id SERIAL PRIMARY KEY,
+   thread_id INTEGER NOT NULL REFERENCES qd_ai_workspace_threads(id) ON DELETE CASCADE,
+   user_id INTEGER NOT NULL,
+   role VARCHAR(16) NOT NULL,
+   content TEXT NOT NULL,
+   message_type VARCHAR(32) DEFAULT 'chat',
+   change_id INTEGER,
+   metadata_json TEXT,
+   created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS qd_ai_workspace_changes (
+   id SERIAL PRIMARY KEY,
+   thread_id INTEGER NOT NULL REFERENCES qd_ai_workspace_threads(id) ON DELETE CASCADE,
+   user_id INTEGER NOT NULL,
+   asset_type VARCHAR(32) NOT NULL,
+   asset_id INTEGER NOT NULL,
+   base_code_hash VARCHAR(64) NOT NULL,
+   candidate_code TEXT NOT NULL,
+   change_summary_json TEXT,
+   validation_json TEXT,
+   status VARCHAR(24) DEFAULT 'candidate',
+   applied_version_no INTEGER,
+   created_at TIMESTAMP DEFAULT NOW(),
+   updated_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_qd_ai_workspace_threads_asset ON qd_ai_workspace_threads(user_id, asset_type, asset_id);
+CREATE INDEX IF NOT EXISTS idx_qd_ai_workspace_messages_thread ON qd_ai_workspace_messages(thread_id, id);
+CREATE INDEX IF NOT EXISTS idx_qd_ai_workspace_changes_thread ON qd_ai_workspace_changes(thread_id, id);
 
 -- =============================================================================
 -- 10. Watchlist
