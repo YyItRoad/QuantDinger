@@ -17,6 +17,7 @@ QuantDinger 是一套可自托管的 AI 量化交易平台，覆盖行情研究�
 | 安装 QuantDinger | [云服务器部署](deployment/CLOUD_DEPLOYMENT_CN.md) | [安装故障排查](deployment/INSTALL_TROUBLESHOOTING_CN.md) |
 | 上生产环境 | [生产加固](deployment/PRODUCTION_HARDENING_CN.md) | [可观测性](deployment/OBSERVABILITY_CN.md) |
 | 开发交易策略 | [Strategy API V2 策略指南](trading/STRATEGY_DEV_GUIDE_CN.md) | [图表指标指南](trading/INDICATOR_DEV_GUIDE_CN.md) |
+| 管理手工交易仓位 | [持仓管理使用指南](trading/POSITION_MANAGEMENT_GUIDE_CN.md) | [EMA 金叉爆发指标与策略](trading/EMA_CROSS_BURST_GUIDE_CN.md) |
 | 接入 AI Agent | [MCP 接入](agent/MCP_SETUP_CN.md) | [Agent Gateway 快速开始](agent/AGENT_QUICKSTART_CN.md) |
 | 通过 HTTP 集成 | [Human API 与 OpenAPI](api/README_CN.md) | [API 约定（英文）](architecture/API_CONVENTIONS.md) |
 | 扩展后端能力 | [系统架构总览](architecture/README_CN.md) | [扩展指南（英文）](architecture/EXTENSION_GUIDE.md) |
@@ -86,6 +87,10 @@ Celery broker 与结果存储。修改进程归属或共享状态前，请先阅
 
 - [Strategy API V2 策略开发](trading/STRATEGY_DEV_GUIDE_CN.md)
 - [图表指标开发](trading/INDICATOR_DEV_GUIDE_CN.md)
+- [持仓管理使用指南](trading/POSITION_MANAGEMENT_GUIDE_CN.md)
+- [EMA 金叉爆发指标与策略指南](trading/EMA_CROSS_BURST_GUIDE_CN.md)
+- [EMA 金叉爆发永续合约多头策略说明](EMA金叉爆发永续合约策略.md)
+- [AiCoin EMA 金叉爆发指标](AiCoin_EMA金叉爆发指标.md)
 - [公开股票池与基本面数据](trading/PUBLIC_UNIVERSE_AND_FUNDAMENTALS_CN.md)
 - [Interactive Brokers](trading/IBKR_TRADING_GUIDE_CN.md)
 - 可运行示例位于 [`examples/`](examples/)
