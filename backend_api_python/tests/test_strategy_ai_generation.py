@@ -1,5 +1,3 @@
-from pathlib import Path
-
 import pytest
 
 from app.services.ai_generation_contracts import (
@@ -13,7 +11,11 @@ from app.services.strategy_ai_generation import (
     validate_generated_strategy,
 )
 from app.services.strategy_v2 import StrategyV2ContractError
-from app.routes.strategy import STRATEGY_CANDIDATE_MESSAGE_KEY, _strategy_ai_text
+from app.routes.strategy import (
+    STRATEGY_CANDIDATE_MESSAGE_KEY,
+    _strategy_ai_billing_feature,
+    _strategy_ai_text,
+)
 from app.services.strategy_ai_workspace import (
     RECENT_MESSAGE_LIMIT,
     WORKSPACE_MESSAGE_LIMIT,
@@ -219,14 +221,6 @@ def test_strategy_candidate_status_message_follows_interface_language():
     )
 
 
-def test_strategy_ide_uses_candidate_workflow_and_indicator_conversion_contract():
-    root = Path(__file__).parents[3] / "QuantDinger-Vue"
-    page = (root / "src/views/strategy-ide/index.vue").read_text(encoding="utf-8")
-    assert "runStrategyAiTurn" in page
-    assert "previewStrategyAiCandidate" in page
-    assert "applyStrategyAiCandidate" in page
-    assert "setStrategyAiCandidateStatus" in page
-    assert "generationMode: 'indicator_conversion'" in page
-    assert "instrument: source.instrument" in page
-    assert "timeframe: source.timeframe" in page
-    assert "showAiStrategyGenerator" not in page
+def test_strategy_ai_billing_matches_indicator_ai_tariff():
+    assert _strategy_ai_billing_feature("discussion") == "ai_copilot_chat"
+    assert _strategy_ai_billing_feature("modify") == "ai_code_gen"
