@@ -241,9 +241,21 @@ def _object(value: Any) -> Dict[str, Any]:
     return {}
 
 
-def _strategy_monitors_position(strategy: Dict[str, Any], symbol: str, market_type: str) -> bool:
+def _strategy_monitors_position(
+    strategy: Dict[str, Any],
+    symbol: str,
+    market_type: str,
+    side: str,
+) -> bool:
     config = _object(strategy.get("trading_config"))
     manifest = _object(config.get("strategy_manifest"))
+    metadata = _object(manifest.get("metadata"))
+    if metadata.get("position_management_generic") is True:
+        direction_mode = str(
+            config.get("direction_mode") or manifest.get("directionMode") or ""
+        ).strip().lower()
+        expected = "long_only" if str(side).strip().lower() == "long" else "short_only"
+        return direction_mode == expected and _market_type(strategy.get("market_type")) == market_type
     universe = _object(manifest.get("universe"))
     if universe.get("reference"):
         return True
@@ -323,6 +335,8 @@ def _create_managed_strategy_locked(
     payload = dict(strategy_payload)
     params = _object(payload.get("params"))
     params["leverage"] = leverage
+    managed_instrument = f"Crypto:{symbol}@{market_type}"
+    params["managed_instrument"] = managed_instrument
     payload.update({
         "user_id": uid,
         "executionMode": "live",
@@ -333,12 +347,14 @@ def _create_managed_strategy_locked(
         "positionManagement": {
             "enabled": True,
             "auto_stop_when_flat": True,
+            "instrument": managed_instrument,
+            "side": side,
         },
     })
     service = get_strategy_service()
     strategy_id = int(service.create_strategy(payload))
     strategy = service.get_strategy(strategy_id, user_id=uid) or {}
-    if not _strategy_monitors_position(strategy, symbol, market_type):
+    if not _strategy_monitors_position(strategy, symbol, market_type, side):
         cleaned = _delete_created_strategy(
             service,
             strategy_id=strategy_id,

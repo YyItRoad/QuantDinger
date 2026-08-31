@@ -123,6 +123,14 @@ class StrategyV2DeploymentService:
         manifest_metadata = manifest.metadata()
         manifest_market_type = self._manifest_market_type(manifest_metadata)
         symbol = self._manifest_symbol(manifest_metadata)
+        manifest_flags = self._object(manifest_metadata.get("metadata"))
+        managed_instrument = str(position_management.get("instrument") or "").strip()
+        if manifest_flags.get("position_management_generic") is True and managed_instrument:
+            from app.services.strategy_v2.instruments import parse_instrument
+
+            managed_spec = parse_instrument(managed_instrument)
+            symbol = managed_spec.symbol
+            manifest_market_type = managed_spec.market_type
         # Source metadata also contains the IDE's last run configuration.  That
         # configuration may still carry the editor defaults (Crypto/BTC/USDT)
         # even when the compiled source contract declares another instrument

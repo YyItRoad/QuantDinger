@@ -31,6 +31,7 @@ from app.services.strategy_v2 import (
     StrategyV2BacktestService,
     StrategyV2LiveSession,
     compile_strategy_v2,
+    parse_instrument,
 )
 from app.services.strategy_v2.live_execution import LiveOrderRequest, StrategyV2OrderGateway
 from app.utils.db import get_db_connection
@@ -345,12 +346,17 @@ class TradingExecutor:
 
             service = StrategyV2BacktestService()
             now = datetime.now(timezone.utc)
-            candidates, universe_id = service.resolve_candidates(
-                user_id=user_id,
-                manifest=program.manifest,
-                start_date=now - timedelta(days=7),
-                end_date=now,
-            )
+            managed_candidate = _managed_position_candidate(trading_config)
+            if managed_candidate:
+                candidates = [managed_candidate]
+                universe_id = None
+            else:
+                candidates, universe_id = service.resolve_candidates(
+                    user_id=user_id,
+                    manifest=program.manifest,
+                    start_date=now - timedelta(days=7),
+                    end_date=now,
+                )
             account_exchange = str(
                 exchange_config.get("exchange_id") or exchange_config.get("exchangeId") or ""
             ).strip().lower()
@@ -2008,6 +2014,22 @@ def _json_object(value: Any) -> dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+def _managed_position_candidate(trading_config: Mapping[str, Any]) -> dict[str, Any] | None:
+    position_management = _json_object(trading_config.get("position_management"))
+    managed_instrument = str(position_management.get("instrument") or "").strip()
+    if position_management.get("enabled") is not True or not managed_instrument:
+        return None
+    instrument = parse_instrument(managed_instrument)
+    return {
+        "key": instrument.key,
+        "market": instrument.market,
+        "symbol": instrument.symbol,
+        "exchange_id": instrument.exchange_id,
+        "market_type": instrument.market_type,
+        "instrument_id": instrument.instrument_id,
+    }
 
 
 def _member_key(member: dict[str, Any]) -> str:

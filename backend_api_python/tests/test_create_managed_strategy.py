@@ -269,10 +269,16 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
         "credentialId": 7,
         "leverageEnabled": True,
         "leverage": 5.0,
-        "params": {"atr_period": 14, "leverage": 5.0},
+        "params": {
+            "atr_period": 14,
+            "leverage": 5.0,
+            "managed_instrument": "Crypto:KAITO/USDC@swap",
+        },
         "positionManagement": {
             "enabled": True,
             "auto_stop_when_flat": True,
+            "instrument": "Crypto:KAITO/USDC@swap",
+            "side": "long",
         },
         "user_id": 3,
     }
@@ -302,6 +308,44 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
         "mark_price": "0.3397",
         "leverage": "5",
     }
+
+
+def test_generic_position_manager_accepts_matching_direction():
+    strategy = {
+        "market_type": "swap",
+        "trading_config": {
+            "direction_mode": "short_only",
+            "strategy_manifest": {
+                "metadata": {"position_management_generic": True},
+            },
+        },
+    }
+
+    assert position_management._strategy_monitors_position(
+        strategy,
+        "M/USDT",
+        "swap",
+        "short",
+    ) is True
+
+
+def test_generic_position_manager_rejects_wrong_direction():
+    strategy = {
+        "market_type": "swap",
+        "trading_config": {
+            "direction_mode": "long_only",
+            "strategy_manifest": {
+                "metadata": {"position_management_generic": True},
+            },
+        },
+    }
+
+    assert position_management._strategy_monitors_position(
+        strategy,
+        "M/USDT",
+        "swap",
+        "short",
+    ) is False
 
 
 def test_create_managed_strategy_rejects_position_already_registered(monkeypatch):
