@@ -8,7 +8,6 @@ import json
 import uuid
 from typing import Any, Dict, Iterator
 
-from app.services.live_trading.account_positions import list_managed_positions_for_account
 from app.services.live_trading.account_snapshot import fetch_account_snapshot
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
 from app.services.strategy import get_strategy_service
@@ -16,6 +15,7 @@ from app.services.strategy_command_repository import StrategyCommandRepository
 from app.services.strategy_v2.position_management_timeframe import (
     normalize_position_management_timeframe,
 )
+from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
 
@@ -26,6 +26,59 @@ class PositionManagementError(ValueError):
     def __init__(self, message: str, *, status_code: int = 400):
         super().__init__(message)
         self.status_code = int(status_code)
+
+
+def list_managed_positions_for_account(*, user_id: int, credential_id: int) -> list[Dict[str, Any]]:
+    """返回一个凭证下已登记到标准策略实例的当前持仓。"""
+    uid = int(user_id or 0)
+    cred = int(credential_id or 0)
+    if uid <= 0 or cred <= 0:
+        return []
+
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT p.strategy_id, s.strategy_name, s.status AS strategy_status,
+                   s.execution_mode, p.symbol, p.symbol_canonical, p.side, p.size,
+                   p.market_type, p.credential_id, p.inst_id
+            FROM qd_strategy_positions p
+            JOIN qd_strategies_trading s ON s.id = p.strategy_id
+            WHERE s.user_id = %s AND p.credential_id = %s AND p.size > 0
+            ORDER BY p.strategy_id, p.market_type, p.symbol, p.side
+            """,
+            (uid, cred),
+        )
+        raw_rows = cur.fetchall() or []
+        cur.close()
+
+    items: list[Dict[str, Any]] = []
+    for raw in raw_rows:
+        row = dict(raw)
+        side = str(row.get("side") or "").strip().lower()
+        if side not in ("long", "short"):
+            continue
+        market_type = str(row.get("market_type") or "").strip().lower()
+        if market_type in ("future", "futures", "perp", "perpetual"):
+            market_type = "swap"
+        symbol = normalize_strategy_symbol(
+            str(row.get("symbol_canonical") or row.get("symbol") or "")
+        )
+        if not symbol:
+            continue
+        items.append({
+            "strategy_id": int(row.get("strategy_id") or 0),
+            "strategy_name": str(row.get("strategy_name") or ""),
+            "strategy_status": str(row.get("strategy_status") or ""),
+            "execution_mode": str(row.get("execution_mode") or ""),
+            "symbol": symbol,
+            "side": side,
+            "size": str(row.get("size") or "0"),
+            "market_type": market_type,
+            "credential_id": int(row.get("credential_id") or 0),
+            "inst_id": str(row.get("inst_id") or ""),
+        })
+    return items
 
 
 def _market_type(value: Any) -> str:
