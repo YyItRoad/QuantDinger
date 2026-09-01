@@ -56,3 +56,48 @@
 - 不自动部署、不自动推送。
 - 不通过隐藏源码副本、动态改写策略源码或新增插件框架减少表面文件数量。
 - 任何业务时机或数据语义变化必须放入单独的功能提交。
+
+## 五、执行结果
+
+完成日期：2026 年 9 月 1 日。
+
+### 5.1 分步提交
+
+1. `aec08c8 test: 锁定持仓管理现有行为`
+2. `195390a refactor: 独立持仓管理接口与查询`
+3. `a6d145c refactor: 收口持仓管理策略适配`
+4. `4266d74 refactor: 收口持仓管理生命周期`
+
+### 5.2 验证结果
+
+- 完整后端测试：1695 项通过，5 项按测试条件跳过，6 个子测试通过，零失败。
+- Ruff 静态检查：`app`、`scripts`、`tests` 全部通过。
+- 持仓管理定向测试覆盖创建实例、真实品种和周期覆盖、成交平仓、交易所侧平仓、普通策略隔离以及持久化停止命令。
+- 测试在一次性容器中执行，未替换或重启现有服务，未连接实盘交易流程。
+
+### 5.3 相对官方上游的最终边界
+
+以下三个原项目文件已恢复为官方上游内容，不再包含持仓管理代码：
+
+- `app/routes/strategy_account_routes.py`
+- `app/services/live_trading/account_positions.py`
+- `app/services/strategy_lifecycle.py`
+
+持仓管理业务集中在以下三个专用文件：
+
+- `app/routes/strategy_position_management_routes.py`
+- `app/services/live_trading/position_management.py`
+- `app/services/strategy_v2/position_management_timeframe.py`
+
+原项目生产文件只保留无法取消的薄接入点：
+
+- `app/routes/strategy.py`：注册持仓管理接口。
+- `app/services/live_trading/account_snapshot.py`：为现货仓位补充最新价格。
+- `app/services/live_trading/records.py`：策略自身成交平仓后通知生命周期检查。
+- `app/services/live_trading/strategy_position_sync.py`：交易所仓位同步后通知生命周期检查。
+- `app/services/strategy.py`：更新策略实例时保留持仓管理配置。
+- `app/services/strategy_v2/deployment.py`：调用部署适配并保存实例配置。
+- `app/services/strategy_v2/runtime.py`：允许实盘会话使用已经完成周期覆盖的编译结果。
+- `app/services/trading_executor.py`：调用真实品种和周期适配器，后续行情、策略和订单流程保持原样。
+
+上述八个原项目生产文件相对官方上游合计增加 65 行、删除 12 行，净增加 53 行；原 Trading Worker 文件没有修改。
