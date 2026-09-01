@@ -5,6 +5,7 @@ from app.services.strategy_v2.contract import StrategyV2ContractError
 from app.services.strategy_v2.position_management_timeframe import (
     effective_position_management_program,
     normalize_position_management_timeframe,
+    resolve_position_management_candidates,
 )
 
 
@@ -62,6 +63,28 @@ def test_position_management_timeframe_only_accepts_ui_options():
         assert str(exc) == "strategyV2.positionManagementTimeframeInvalid"
     else:
         raise AssertionError("5m should be rejected")
+
+
+def test_managed_candidate_skips_original_universe_resolution():
+    fallback_calls = []
+    candidates, universe_id = resolve_position_management_candidates(
+        {
+            "position_management": {
+                "enabled": True,
+                "instrument": "Crypto:M/USDT@swap",
+            }
+        },
+        lambda: fallback_calls.append(True) or ([], 9),
+    )
+
+    assert fallback_calls == []
+    assert universe_id is None
+    assert candidates[0]["symbol"] == "M/USDT"
+
+
+def test_ordinary_strategy_keeps_original_universe_resolution():
+    expected = ([{"symbol": "BTC/USDT"}], 9)
+    assert resolve_position_management_candidates({}, lambda: expected) == expected
 
 
 def test_live_session_uses_effective_program_instead_of_recompiling_source_timeframe():

@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 from .contract import CompiledStrategyV2, StrategyV2ContractError
 from .frequencies import normalize_frequency
+from .instruments import parse_instrument
 from .models import StrategyManifest
 
 
@@ -51,9 +52,76 @@ def effective_position_management_program(
     return replace(program, manifest=manifest)
 
 
+def effective_position_management_instrument(
+    manifest: StrategyManifest,
+    position_management: Mapping[str, Any] | None,
+) -> tuple[str, str] | None:
+    """返回通用持仓管理实例绑定的真实品种和市场类型。"""
+    config = position_management if isinstance(position_management, Mapping) else {}
+    instrument = str(config.get("instrument") or "").strip()
+    if (
+        manifest.metadata_fields.get("position_management_generic") is not True
+        or not instrument
+    ):
+        return None
+    spec = parse_instrument(instrument)
+    return spec.symbol, spec.market_type
+
+
+def prepare_position_management_deployment(
+    program: CompiledStrategyV2,
+    value: Any,
+) -> tuple[CompiledStrategyV2, dict[str, Any], tuple[str, str] | None]:
+    """集中验证并生成部署阶段需要的持仓管理覆盖。"""
+    position_management = value or {}
+    if not isinstance(position_management, dict):
+        raise StrategyV2ContractError("strategyV2.runtimeConfigInvalid")
+    effective_program = effective_position_management_program(program, position_management)
+    instrument = effective_position_management_instrument(
+        effective_program.manifest, position_management
+    )
+    return effective_program, dict(position_management), instrument
+
+
+def position_management_candidate(
+    trading_config: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """将持仓管理实例配置转换为原执行器使用的候选品种。"""
+    config = trading_config if isinstance(trading_config, Mapping) else {}
+    position_management = config.get("position_management")
+    position_management = (
+        position_management if isinstance(position_management, Mapping) else {}
+    )
+    instrument = str(position_management.get("instrument") or "").strip()
+    if position_management.get("enabled") is not True or not instrument:
+        return None
+    spec = parse_instrument(instrument)
+    return {
+        "key": spec.key,
+        "market": spec.market,
+        "symbol": spec.symbol,
+        "exchange_id": spec.exchange_id,
+        "market_type": spec.market_type,
+        "instrument_id": spec.instrument_id,
+    }
+
+
+def resolve_position_management_candidates(
+    trading_config: Mapping[str, Any] | None,
+    fallback,
+) -> tuple[list[dict[str, Any]], Any]:
+    """管理实例只读取绑定品种，普通策略继续调用原候选解析。"""
+    candidate = position_management_candidate(trading_config)
+    return ([candidate], None) if candidate else fallback()
+
+
 __all__ = [
     "SUPPORTED_POSITION_MANAGEMENT_TIMEFRAMES",
+    "effective_position_management_instrument",
     "effective_position_management_manifest",
     "effective_position_management_program",
     "normalize_position_management_timeframe",
+    "position_management_candidate",
+    "prepare_position_management_deployment",
+    "resolve_position_management_candidates",
 ]
