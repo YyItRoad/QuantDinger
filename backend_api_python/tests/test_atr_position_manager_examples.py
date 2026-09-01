@@ -40,9 +40,9 @@ def _frame(*, periods: int = 30, final_high: float | None = None, final_low: flo
 
 def _position(side: str) -> dict:
     return {
-        INSTRUMENT + f"::{side}": {
+        INSTRUMENT: {
             "side": side,
-            "position_side": side,
+            "position_side": "",
             "amount": 10.0,
             "avg_cost": 100.0,
             "last_price": 100.0,

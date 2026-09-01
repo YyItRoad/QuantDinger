@@ -123,6 +123,7 @@ def handle_data(context, data):
         "enabled": True,
         "instrument": "Crypto:M/USDT@swap",
         "side": "short",
+        "timeframe": "4h",
     }
 
     StrategyV2DeploymentService().save(user_id=7, payload=payload)
@@ -130,8 +131,11 @@ def handle_data(context, data):
 
     assert cursor.params[5] == "M/USDT"
     assert cursor.params[9] == "swap"
+    assert cursor.params[6] == "4h"
     assert trading_config["symbol"] == "M/USDT"
     assert trading_config["market_type"] == "swap"
+    assert trading_config["strategy_manifest"]["drivingFrequency"] == "4h"
+    assert trading_config["strategy_manifest"]["subscriptions"][0]["frequency"] == "4h"
 
 
 def test_deployment_rejects_direction_override_that_conflicts_with_manifest(monkeypatch):

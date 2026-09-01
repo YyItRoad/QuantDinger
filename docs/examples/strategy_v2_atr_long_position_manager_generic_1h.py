@@ -146,7 +146,9 @@ def handle_data(context, data):
     if len(bars) < atr_period + 1:
         log("多单持仓检查跳过｜品种=" + instrument + "｜原因=ATR历史K线不足｜现有=" + str(len(bars)))
         return
-    position = get_position(instrument, position_side="long")
+    # 该策略实例已由 direction_mode=long_only 限定为多头，运行器会把
+    # 接管仓位登记为实例的默认仓位，因此这里不能再按双向持仓腿查询。
+    position = get_position(instrument)
     if abs(float(position.amount or 0.0)) <= 1e-12:
         if g.state is not None:
             reason = consume_last_exit_reason(instrument)

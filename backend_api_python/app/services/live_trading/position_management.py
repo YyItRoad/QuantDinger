@@ -13,6 +13,9 @@ from app.services.live_trading.account_snapshot import fetch_account_snapshot
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
 from app.services.strategy import get_strategy_service
 from app.services.strategy_command_repository import StrategyCommandRepository
+from app.services.strategy_v2.position_management_timeframe import (
+    normalize_position_management_timeframe,
+)
 from app.utils.logger import get_logger
 
 
@@ -333,6 +336,12 @@ def _create_managed_strategy_locked(
     inst_id = str(fresh.get("inst_id") or position_ref.get("inst_id") or "").strip()
 
     payload = dict(strategy_payload)
+    requested_timeframe = payload.pop("timeframe", None)
+    managed_timeframe = (
+        normalize_position_management_timeframe(requested_timeframe)
+        if requested_timeframe is not None and str(requested_timeframe).strip()
+        else ""
+    )
     params = _object(payload.get("params"))
     params["leverage"] = leverage
     managed_instrument = f"Crypto:{symbol}@{market_type}"
@@ -349,6 +358,7 @@ def _create_managed_strategy_locked(
             "auto_stop_when_flat": True,
             "instrument": managed_instrument,
             "side": side,
+            **({"timeframe": managed_timeframe} if managed_timeframe else {}),
         },
     })
     service = get_strategy_service()

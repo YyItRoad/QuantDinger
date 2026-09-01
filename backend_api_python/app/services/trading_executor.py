@@ -34,6 +34,9 @@ from app.services.strategy_v2 import (
     parse_instrument,
 )
 from app.services.strategy_v2.live_execution import LiveOrderRequest, StrategyV2OrderGateway
+from app.services.strategy_v2.position_management_timeframe import (
+    effective_position_management_program,
+)
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.numeric_precision import format_decimal
@@ -335,6 +338,10 @@ class TradingExecutor:
             program = compile_strategy_v2(code)
             user_id = int(strategy.get("user_id") or 0)
             trading_config = _json_object(strategy.get("trading_config"))
+            program = effective_position_management_program(
+                program,
+                _json_object(trading_config.get("position_management")),
+            )
             exchange_config = _json_object(strategy.get("exchange_config"))
             execution_mode = str(strategy.get("execution_mode") or "signal").strip().lower()
             if execution_mode not in {"signal", "live"}:
@@ -418,6 +425,7 @@ class TradingExecutor:
             )
             session = StrategyV2LiveSession(
                 code=code,
+                program=program,
                 frames=frames,
                 frequency_frames=frequency_frames,
                 initial_capital=initial_capital,

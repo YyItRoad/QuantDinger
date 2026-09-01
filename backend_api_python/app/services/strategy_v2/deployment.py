@@ -14,6 +14,7 @@ from app.services.strategy_direction import (
 from app.utils.db import get_db_connection
 
 from .contract import StrategyV2ContractError, compile_strategy_v2
+from .position_management_timeframe import effective_position_management_program
 
 
 class StrategyV2DeploymentService:
@@ -82,6 +83,8 @@ class StrategyV2DeploymentService:
         position_management = payload.get("positionManagement") or {}
         if not isinstance(position_management, dict):
             raise StrategyV2ContractError("strategyV2.runtimeConfigInvalid")
+        program = effective_position_management_program(program, position_management)
+        manifest = program.manifest
 
         notification_config = {
             "channels": list(payload.get("notificationChannels") or []),

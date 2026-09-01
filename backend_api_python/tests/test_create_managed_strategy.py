@@ -257,6 +257,7 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
             "credentialId": 999,
             "leverageEnabled": False,
             "leverage": 1,
+            "timeframe": "15m",
             "params": {"atr_period": 14},
         },
     )
@@ -279,6 +280,7 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
             "auto_stop_when_flat": True,
             "instrument": "Crypto:KAITO/USDC@swap",
             "side": "long",
+            "timeframe": "15m",
         },
         "user_id": 3,
     }

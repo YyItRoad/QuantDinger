@@ -2177,6 +2177,7 @@ class StrategyV2LiveSession:
         self,
         *,
         code: str,
+        program: CompiledStrategyV2 | None = None,
         frames: Mapping[str, pd.DataFrame],
         frequency_frames: Mapping[str, Mapping[str, pd.DataFrame]] | None = None,
         initial_capital: float,
@@ -2184,7 +2185,7 @@ class StrategyV2LiveSession:
         universe_resolver=None,
         schedule_timezone: str = "UTC",
     ) -> None:
-        self.program = compile_strategy_v2(code)
+        self.program = program or compile_strategy_v2(code)
         self._universe_resolver = universe_resolver
         self.portal = MultiAssetDataPortal(
             frames,
