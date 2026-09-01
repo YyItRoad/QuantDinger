@@ -2,8 +2,7 @@
 
 import pytest
 
-from app.services import strategy_lifecycle
-from app.services.live_trading import records
+from app.services.live_trading import position_management, records
 
 
 class _ManagedStrategyService:
@@ -39,15 +38,16 @@ def test_managed_strategy_stops_after_last_position_is_flat(monkeypatch):
         def enqueue(self, **kwargs):
             commands.append(kwargs)
 
-    monkeypatch.setattr(strategy_lifecycle, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(strategy_lifecycle, "_strategy_has_open_positions", lambda _sid: False)
-    monkeypatch.setattr(strategy_lifecycle, "append_strategy_log", lambda *args: logs.append(args))
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "_strategy_has_open_positions", lambda _sid: False)
     monkeypatch.setattr(
-        "app.services.strategy_command_repository.StrategyCommandRepository",
-        _Repository,
+        position_management,
+        "append_strategy_log",
+        lambda *args: logs.append(args),
     )
+    monkeypatch.setattr(position_management, "StrategyCommandRepository", _Repository)
 
-    assert strategy_lifecycle.maybe_stop_position_management_strategy(44) is True
+    assert position_management.maybe_stop_position_management_strategy(44) is True
     assert service.strategy["status"] == "stopped"
     assert commands == [{
         "strategy_id": 44,
@@ -70,7 +70,7 @@ def test_confirmed_full_close_notifies_lifecycle_immediately(monkeypatch):
     }, "KAITO/USDC"))
     monkeypatch.setattr(records, "_delete_position", lambda *args: deleted.append(args))
     monkeypatch.setattr(
-        strategy_lifecycle,
+        position_management,
         "maybe_stop_position_management_strategy",
         lambda strategy_id: lifecycle_checks.append(strategy_id) or True,
     )
@@ -103,7 +103,7 @@ def test_lifecycle_failure_does_not_break_confirmed_close(monkeypatch):
         raise RuntimeError("lifecycle database unavailable")
 
     monkeypatch.setattr(
-        strategy_lifecycle,
+        position_management,
         "maybe_stop_position_management_strategy",
         fail_lifecycle,
     )
@@ -124,19 +124,19 @@ def test_lifecycle_failure_does_not_break_confirmed_close(monkeypatch):
 
 def test_normal_strategy_is_not_stopped_when_flat(monkeypatch):
     service = _ManagedStrategyService(managed=False)
-    monkeypatch.setattr(strategy_lifecycle, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(strategy_lifecycle, "_strategy_has_open_positions", lambda _sid: False)
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "_strategy_has_open_positions", lambda _sid: False)
 
-    assert strategy_lifecycle.maybe_stop_position_management_strategy(44) is False
+    assert position_management.maybe_stop_position_management_strategy(44) is False
     assert service.strategy["status"] == "running"
 
 
 def test_managed_strategy_keeps_running_while_any_position_remains(monkeypatch):
     service = _ManagedStrategyService()
-    monkeypatch.setattr(strategy_lifecycle, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(strategy_lifecycle, "_strategy_has_open_positions", lambda _sid: True)
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "_strategy_has_open_positions", lambda _sid: True)
 
-    assert strategy_lifecycle.maybe_stop_position_management_strategy(44) is False
+    assert position_management.maybe_stop_position_management_strategy(44) is False
     assert service.strategy["status"] == "running"
 
 
@@ -153,7 +153,7 @@ def test_partial_close_does_not_notify_lifecycle(monkeypatch):
     monkeypatch.setattr(records, "upsert_position", lambda **kwargs: updated.append(kwargs))
     monkeypatch.setattr(records, "_fetch_position", lambda *_args: {"size": 1})
     monkeypatch.setattr(
-        strategy_lifecycle,
+        position_management,
         "maybe_stop_position_management_strategy",
         lambda strategy_id: lifecycle_checks.append(strategy_id) or True,
     )

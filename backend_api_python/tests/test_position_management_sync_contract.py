@@ -1,6 +1,6 @@
 """持仓管理实例现有交易所仓位同步行为。"""
 
-from app.services import strategy_lifecycle
+from app.services.live_trading import position_management
 from app.services.live_trading import strategy_position_sync as position_sync
 
 
@@ -9,7 +9,7 @@ def test_exchange_snapshot_checks_management_lifecycle_after_reconcile(monkeypat
     monkeypatch.setattr(position_sync, "_delete_position", lambda *_args: None)
     monkeypatch.setattr(position_sync, "upsert_position", lambda **_kwargs: None)
     monkeypatch.setattr(
-        strategy_lifecycle,
+        position_management,
         "maybe_stop_position_management_strategy",
         lambda strategy_id: lifecycle_checks.append(strategy_id) or False,
     )
@@ -33,7 +33,7 @@ def test_exchange_flat_snapshot_checks_management_lifecycle_once(monkeypatch):
     monkeypatch.setattr(position_sync, "_delete_position", lambda *args: deletes.append(args))
     monkeypatch.setattr(position_sync, "upsert_position", lambda **_kwargs: None)
     monkeypatch.setattr(
-        strategy_lifecycle,
+        position_management,
         "maybe_stop_position_management_strategy",
         lambda strategy_id: lifecycle_checks.append(strategy_id) or True,
     )
