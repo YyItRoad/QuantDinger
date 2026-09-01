@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,7 +44,7 @@ class GridMarketOrderExecution:
         yield self.avg_price
 
 
-def normalize_grid_order_quantity(
+def _normalize_grid_order_quantity_for_client(
     client: BaseRestClient,
     *,
     symbol: str,
@@ -173,6 +174,94 @@ def normalize_grid_order_quantity(
     return qty
 
 
+def _grid_exchange_id(client: BaseRestClient, exchange_config: Dict[str, Any]) -> str:
+    configured = str(
+        exchange_config.get("exchange_id")
+        or exchange_config.get("exchange")
+        or exchange_config.get("exchangeId")
+        or ""
+    ).strip().lower()
+    aliases = {
+        "gateio": "gate",
+        "gate.io": "gate",
+        "huobi": "htx",
+    }
+    if configured:
+        return aliases.get(configured, configured)
+    if isinstance(client, (BinanceFuturesClient, BinanceSpotClient)):
+        return "binance"
+    if isinstance(client, (BitgetMixClient, BitgetSpotClient)):
+        return "bitget"
+    if isinstance(client, BybitClient):
+        return "bybit"
+    if isinstance(client, (GateUsdtFuturesClient, GateSpotClient)):
+        return "gate"
+    if isinstance(client, HtxClient):
+        return "htx"
+    if isinstance(client, OkxClient):
+        return "okx"
+    return ""
+
+
+def normalize_grid_order_quantity(
+    client: BaseRestClient,
+    *,
+    symbol: str,
+    quantity: float,
+    market_type: str,
+    exchange_config: Optional[Dict[str, Any]] = None,
+    price: float = 0.0,
+) -> float:
+    """Normalize a grid order against both client and native exchange rules.
+
+    The client-specific pass converts contracts to base units where needed.
+    The common rules pass then floors amount precision and rejects quantities
+    below either the exchange minimum amount or minimum order notional.
+    """
+    cfg = exchange_config if isinstance(exchange_config, dict) else {}
+    normalized = _normalize_grid_order_quantity_for_client(
+        client,
+        symbol=symbol,
+        quantity=quantity,
+        market_type=market_type,
+        exchange_config=cfg,
+    )
+    if normalized <= 0:
+        return 0.0
+
+    exchange_id = _grid_exchange_id(client, cfg)
+    if not exchange_id:
+        return normalized
+    try:
+        from app.services.instrument_rules import get_instrument_rules_provider
+
+        rules = get_instrument_rules_provider().get_rules(
+            symbol,
+            exchange_id=exchange_id,
+            market_type=market_type,
+            client=client,
+        )
+        normalized = rules.normalize_amount(normalized, enforce_minimum=True)
+        px = max(0.0, float(price or 0.0))
+        min_notional = max(0.0, float(rules.min_notional or 0.0))
+        if normalized <= 0:
+            return 0.0
+        if px > 0 and min_notional > 0 and normalized * px < min_notional:
+            return 0.0
+        return normalized
+    except Exception as exc:
+        # If native rules cannot be verified, skipping the grid order is safer
+        # than passing an unrounded float to an exchange. The next sync cycle
+        # retries after the provider cache/endpoint recovers.
+        logger.warning(
+            "grid native quantity rules unavailable exchange=%s symbol=%s: %s",
+            exchange_id,
+            symbol,
+            exc,
+        )
+        return 0.0
+
+
 def make_grid_initial_client_order_id(strategy_id: int, leg: str = "") -> str:
     """Stable client oid for grid initial market leg (one per strategy/leg, avoids duplicate opens)."""
     suffix = str(leg or "").strip().lower()[:1]
@@ -182,7 +271,12 @@ def make_grid_initial_client_order_id(strategy_id: int, leg: str = "") -> str:
 
 
 def make_grid_client_order_id(strategy_id: int, cell_index: int, purpose: str) -> str:
-    """Short client oid (OKX max 32). purpose: e/l/x/s = entry long/exit/short entry."""
+    """Return a collision-resistant grid order id within OKX's 32-char limit.
+
+    Resting orders for the same cell can be replaced more than once in one
+    second. A second-resolution suffix is therefore not unique enough and is
+    rejected by exchanges such as Binance after an id has been used once.
+    """
     p = (purpose or "x")[:1].lower()
     if "long_entry" in purpose:
         p = "e"
@@ -192,8 +286,8 @@ def make_grid_client_order_id(strategy_id: int, cell_index: int, purpose: str) -
         p = "s"
     elif "short_exit" in purpose:
         p = "c"
-    ts = int(__import__("time").time()) % 1000000
-    return f"g{int(strategy_id) % 10000:04d}c{int(cell_index):03d}{p}{ts % 99999:05d}"[:32]
+    nonce = secrets.token_hex(6)
+    return f"g{int(strategy_id) % 10000:04d}c{int(cell_index):03d}{p}{nonce}"[:32]
 
 
 def place_grid_limit_order(
