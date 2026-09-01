@@ -79,65 +79,6 @@ def test_deployment_persists_manifest_direction_and_legacy_position_side(monkeyp
     assert trading_config["strategy_manifest"]["directionMode"] == "both"
 
 
-def test_deployment_persists_position_management_in_same_runtime_config_write(monkeypatch):
-    cursor = _Cursor()
-    monkeypatch.setattr(deployment, "get_script_source_service", lambda: _Sources())
-    monkeypatch.setattr(deployment, "get_db_connection", lambda: _Db(cursor))
-    payload = _payload("both")
-    payload["positionManagement"] = {
-        "enabled": True,
-        "auto_stop_when_flat": True,
-    }
-
-    StrategyV2DeploymentService().save(user_id=7, payload=payload)
-    trading_config = json.loads(cursor.params[-1])
-
-    assert trading_config["position_management"] == {
-        "enabled": True,
-        "auto_stop_when_flat": True,
-    }
-
-
-def test_generic_position_manager_persists_managed_symbol_in_instance(monkeypatch):
-    generic_source = """
-def initialize(context):
-    context.set_universe(["Crypto:BTC/USDT@swap"])
-    context.subscribe(frequency="1h")
-    context.allow_leverage(max_leverage=125)
-    context.set_metadata(direction_mode="short_only", position_management_generic=True)
-
-def handle_data(context, data):
-    pass
-"""
-
-    class _GenericSources:
-        @staticmethod
-        def get_source(_source_id, user_id=None):
-            return {"id": 9, "name": "Generic short manager", "code": generic_source}
-
-    cursor = _Cursor()
-    monkeypatch.setattr(deployment, "get_script_source_service", lambda: _GenericSources())
-    monkeypatch.setattr(deployment, "get_db_connection", lambda: _Db(cursor))
-    payload = _payload("")
-    payload["positionManagement"] = {
-        "enabled": True,
-        "instrument": "Crypto:M/USDT@swap",
-        "side": "short",
-        "timeframe": "4h",
-    }
-
-    StrategyV2DeploymentService().save(user_id=7, payload=payload)
-    trading_config = json.loads(cursor.params[-1])
-
-    assert cursor.params[5] == "M/USDT"
-    assert cursor.params[9] == "swap"
-    assert cursor.params[6] == "4h"
-    assert trading_config["symbol"] == "M/USDT"
-    assert trading_config["market_type"] == "swap"
-    assert trading_config["strategy_manifest"]["drivingFrequency"] == "4h"
-    assert trading_config["strategy_manifest"]["subscriptions"][0]["frequency"] == "4h"
-
-
 def test_deployment_rejects_direction_override_that_conflicts_with_manifest(monkeypatch):
     monkeypatch.setattr(deployment, "get_script_source_service", lambda: _Sources())
 

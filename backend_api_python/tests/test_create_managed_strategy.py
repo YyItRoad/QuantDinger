@@ -6,7 +6,7 @@ from contextlib import contextmanager
 import pytest
 from flask import Flask, g
 
-from app.routes import strategy_account_routes as routes
+from app.routes import strategy_position_management_routes as routes
 from app.services.live_trading import position_management
 
 

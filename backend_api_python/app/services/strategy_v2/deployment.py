@@ -14,7 +14,7 @@ from app.services.strategy_direction import (
 from app.utils.db import get_db_connection
 
 from .contract import StrategyV2ContractError, compile_strategy_v2
-from .position_management_timeframe import effective_position_management_program
+from .position_management_timeframe import prepare_position_management_deployment
 
 
 class StrategyV2DeploymentService:
@@ -80,10 +80,9 @@ class StrategyV2DeploymentService:
         account_risk = payload.get("accountRisk") or payload.get("account_risk") or {}
         if not isinstance(account_risk, dict):
             raise StrategyV2ContractError("strategyV2.accountRiskInvalid")
-        position_management = payload.get("positionManagement") or {}
-        if not isinstance(position_management, dict):
-            raise StrategyV2ContractError("strategyV2.runtimeConfigInvalid")
-        program = effective_position_management_program(program, position_management)
+        program, position_management, managed_instrument = prepare_position_management_deployment(
+            program, payload.get("positionManagement")
+        )
         manifest = program.manifest
 
         notification_config = {
@@ -193,14 +192,8 @@ class StrategyV2DeploymentService:
         manifest_metadata = manifest.metadata()
         manifest_market_type = self._manifest_market_type(manifest_metadata)
         symbol = self._manifest_symbol(manifest_metadata)
-        manifest_flags = self._object(manifest_metadata.get("metadata"))
-        managed_instrument = str(position_management.get("instrument") or "").strip()
-        if manifest_flags.get("position_management_generic") is True and managed_instrument:
-            from app.services.strategy_v2.instruments import parse_instrument
-
-            managed_spec = parse_instrument(managed_instrument)
-            symbol = managed_spec.symbol
-            manifest_market_type = managed_spec.market_type
+        if managed_instrument:
+            symbol, manifest_market_type = managed_instrument
         # Source metadata also contains the IDE's last run configuration.  That
         # configuration may still carry the editor defaults (Crypto/BTC/USDT)
         # even when the compiled source contract declares another instrument

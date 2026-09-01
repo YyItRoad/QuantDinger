@@ -115,20 +115,12 @@ def apply_exchange_snapshot_to_strategy_ledger(
             )
             written += 1
 
-    # Exchange-side closes (manual close, native SL/TP, liquidation, or another
-    # client) do not pass through apply_fill_to_local_position().  Run the
-    # lifecycle check once after the whole snapshot has been reconciled so a
-    # marked position-management strategy stops when its final leg disappears.
-    from app.services.strategy_lifecycle import maybe_stop_position_management_strategy
+    # 手动平仓、交易所止损等不会产生本系统成交回报，因此在完整同步后补查一次。
+    from app.services.live_trading.position_management import (
+        check_position_management_lifecycle,
+    )
 
-    try:
-        maybe_stop_position_management_strategy(sid)
-    except Exception as exc:
-        logger.warning(
-            "Position-management lifecycle check failed after exchange sync for strategy %s: %s",
-            sid,
-            exc,
-        )
+    check_position_management_lifecycle(sid, source="exchange sync")
 
     return written
 

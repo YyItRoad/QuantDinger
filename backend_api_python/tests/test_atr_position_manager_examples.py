@@ -4,7 +4,9 @@ import unittest
 import pandas as pd
 
 from app.services.strategy_v2.runtime import StrategyV2LiveSession, compile_strategy_v2
-from app.services.trading_executor import _managed_position_candidate
+from app.services.strategy_v2.position_management_timeframe import (
+    position_management_candidate,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -61,7 +63,7 @@ def _session(path: Path, frame: pd.DataFrame) -> StrategyV2LiveSession:
 
 class AtrPositionManagerExamplesTest(unittest.TestCase):
     def test_managed_position_candidate_uses_instance_instrument(self):
-        candidate = _managed_position_candidate({
+        candidate = position_management_candidate({
             "position_management": {
                 "enabled": True,
                 "instrument": MANAGED_INSTRUMENT,

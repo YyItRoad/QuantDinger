@@ -8,7 +8,6 @@ import json
 import uuid
 from typing import Any, Dict, Iterator
 
-from app.services.live_trading.account_positions import list_managed_positions_for_account
 from app.services.live_trading.account_snapshot import fetch_account_snapshot
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
 from app.services.strategy import get_strategy_service
@@ -16,7 +15,9 @@ from app.services.strategy_command_repository import StrategyCommandRepository
 from app.services.strategy_v2.position_management_timeframe import (
     normalize_position_management_timeframe,
 )
+from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
+from app.utils.strategy_runtime_logs import append_strategy_log
 
 
 logger = get_logger(__name__)
@@ -26,6 +27,59 @@ class PositionManagementError(ValueError):
     def __init__(self, message: str, *, status_code: int = 400):
         super().__init__(message)
         self.status_code = int(status_code)
+
+
+def list_managed_positions_for_account(*, user_id: int, credential_id: int) -> list[Dict[str, Any]]:
+    """返回一个凭证下已登记到标准策略实例的当前持仓。"""
+    uid = int(user_id or 0)
+    cred = int(credential_id or 0)
+    if uid <= 0 or cred <= 0:
+        return []
+
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT p.strategy_id, s.strategy_name, s.status AS strategy_status,
+                   s.execution_mode, p.symbol, p.symbol_canonical, p.side, p.size,
+                   p.market_type, p.credential_id, p.inst_id
+            FROM qd_strategy_positions p
+            JOIN qd_strategies_trading s ON s.id = p.strategy_id
+            WHERE s.user_id = %s AND p.credential_id = %s AND p.size > 0
+            ORDER BY p.strategy_id, p.market_type, p.symbol, p.side
+            """,
+            (uid, cred),
+        )
+        raw_rows = cur.fetchall() or []
+        cur.close()
+
+    items: list[Dict[str, Any]] = []
+    for raw in raw_rows:
+        row = dict(raw)
+        side = str(row.get("side") or "").strip().lower()
+        if side not in ("long", "short"):
+            continue
+        market_type = str(row.get("market_type") or "").strip().lower()
+        if market_type in ("future", "futures", "perp", "perpetual"):
+            market_type = "swap"
+        symbol = normalize_strategy_symbol(
+            str(row.get("symbol_canonical") or row.get("symbol") or "")
+        )
+        if not symbol:
+            continue
+        items.append({
+            "strategy_id": int(row.get("strategy_id") or 0),
+            "strategy_name": str(row.get("strategy_name") or ""),
+            "strategy_status": str(row.get("strategy_status") or ""),
+            "execution_mode": str(row.get("execution_mode") or ""),
+            "symbol": symbol,
+            "side": side,
+            "size": str(row.get("size") or "0"),
+            "market_type": market_type,
+            "credential_id": int(row.get("credential_id") or 0),
+            "inst_id": str(row.get("inst_id") or ""),
+        })
+    return items
 
 
 def _market_type(value: Any) -> str:
@@ -242,6 +296,75 @@ def _object(value: Any) -> Dict[str, Any]:
             return {}
         return dict(parsed) if isinstance(parsed, dict) else {}
     return {}
+
+
+def _strategy_has_open_positions(strategy_id: int) -> bool:
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            "SELECT 1 FROM qd_strategy_positions WHERE strategy_id = %s AND size > 0 LIMIT 1",
+            (int(strategy_id),),
+        )
+        row = cur.fetchone()
+        cur.close()
+    return bool(row)
+
+
+def maybe_stop_position_management_strategy(strategy_id: int) -> bool:
+    """最后一笔仓位消失后，通过原有持久化命令停止管理实例。"""
+    sid = int(strategy_id or 0)
+    if sid <= 0:
+        return False
+    service = get_strategy_service()
+    strategy = service.get_strategy(sid) or {}
+    config = _object(strategy.get("trading_config"))
+    marker = _object(config.get("position_management"))
+    if marker.get("enabled") is not True or marker.get("auto_stop_when_flat") is not True:
+        return False
+    if str(strategy.get("status") or "").strip().lower() != "running":
+        return False
+    if _strategy_has_open_positions(sid):
+        return False
+
+    user_id = int(strategy.get("user_id") or 0)
+    if not service.update_strategy_status(sid, "stopped", user_id=user_id):
+        return False
+
+    # 仓位同步可能发生在非运行租约持有者进程，因此使用原有持久化停止命令，
+    # 由真正持有租约的 Trading Worker 完成执行器清理并释放租约。
+    try:
+        StrategyCommandRepository().enqueue(
+            strategy_id=sid,
+            user_id=user_id,
+            command_type="stop",
+            payload={"close_positions": False},
+        )
+    except Exception as exc:
+        logger.error(
+            "Failed to queue position-management stop command for strategy %s: %s",
+            sid,
+            exc,
+            exc_info=True,
+        )
+        append_strategy_log(sid, "error", f"持仓已平仓，但自动停止命令创建失败：{exc}")
+        return False
+
+    append_strategy_log(sid, "info", "持仓已全部平仓，管理策略已自动停止")
+    return True
+
+
+def check_position_management_lifecycle(strategy_id: int, *, source: str) -> bool:
+    """在仓位变化后安全检查生命周期，不让附加检查破坏成交或同步主流程。"""
+    try:
+        return maybe_stop_position_management_strategy(strategy_id)
+    except Exception as exc:
+        logger.warning(
+            "Position-management lifecycle check failed after %s for strategy %s: %s",
+            source,
+            strategy_id,
+            exc,
+        )
+        return False
 
 
 def _strategy_monitors_position(

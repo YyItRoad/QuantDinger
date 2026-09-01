@@ -5,8 +5,8 @@ from decimal import Decimal
 
 from flask import Flask, g
 
-from app.routes import strategy_account_routes as routes
-from app.services.live_trading import account_positions
+from app.routes import strategy_position_management_routes as routes
+from app.services.live_trading import position_management
 
 
 class _Cursor:
@@ -54,9 +54,9 @@ def test_list_managed_positions_uses_existing_strategy_ledger(monkeypatch):
         "credential_id": 7,
         "inst_id": "KAITOUSDC",
     }])
-    monkeypatch.setattr(account_positions, "get_db_connection", lambda: _Database(cursor))
+    monkeypatch.setattr(position_management, "get_db_connection", lambda: _Database(cursor))
 
-    rows = account_positions.list_managed_positions_for_account(user_id=3, credential_id=7)
+    rows = position_management.list_managed_positions_for_account(user_id=3, credential_id=7)
 
     assert cursor.params == (3, 7)
     assert "p.size > 0" in cursor.sql
@@ -94,7 +94,7 @@ def test_managed_positions_returns_existing_strategy_rows(monkeypatch):
         calls.append((user_id, credential_id))
         return expected
 
-    monkeypatch.setattr(account_positions, "list_managed_positions_for_account", fake_list)
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", fake_list)
     with app.test_request_context("/api/account/managed-positions?credential_id=7"):
         g.user_id = 3
         response = inspect.unwrap(routes.get_managed_account_positions)()

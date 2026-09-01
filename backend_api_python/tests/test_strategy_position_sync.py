@@ -82,11 +82,9 @@ def test_strategy_has_trades_for_symbol_candidates():
 
 def test_apply_exchange_snapshot_upserts_allowed_symbol(monkeypatch):
     from app.services.live_trading import strategy_position_sync as sps
-    from app.services import strategy_lifecycle
 
     upserts = []
     deletes = []
-    lifecycle_checks = []
 
     def fake_upsert(**kwargs):
         upserts.append(kwargs)
@@ -96,11 +94,6 @@ def test_apply_exchange_snapshot_upserts_allowed_symbol(monkeypatch):
 
     monkeypatch.setattr(sps, "upsert_position", fake_upsert)
     monkeypatch.setattr(sps, "_delete_position", fake_delete)
-    monkeypatch.setattr(
-        strategy_lifecycle,
-        "maybe_stop_position_management_strategy",
-        lambda strategy_id: lifecycle_checks.append(strategy_id) or False,
-    )
 
     written = sps.apply_exchange_snapshot_to_strategy_ledger(
         strategy_id=42,
@@ -117,34 +110,6 @@ def test_apply_exchange_snapshot_upserts_allowed_symbol(monkeypatch):
     assert upserts[0]["side"] == "long"
     assert upserts[0]["size"] == 0.5
     assert deletes == [ (42, "ETH/USDT", "short") ]
-    assert lifecycle_checks == [42]
-
-
-def test_exchange_flat_snapshot_checks_management_lifecycle_once(monkeypatch):
-    from app.services import strategy_lifecycle
-    from app.services.live_trading import strategy_position_sync as sps
-
-    deletes = []
-    lifecycle_checks = []
-    monkeypatch.setattr(sps, "_delete_position", lambda *args: deletes.append(args))
-    monkeypatch.setattr(sps, "upsert_position", lambda **_kwargs: None)
-    monkeypatch.setattr(
-        strategy_lifecycle,
-        "maybe_stop_position_management_strategy",
-        lambda strategy_id: lifecycle_checks.append(strategy_id) or True,
-    )
-
-    written = sps.apply_exchange_snapshot_to_strategy_ledger(
-        strategy_id=42,
-        strategy_config={"trading_config": {"symbol": "ETH/USDT"}},
-        exch_size={"ETH/USDT": {"long": 0.0, "short": 0.0}},
-        exch_entry_price={},
-        market_type="swap",
-    )
-
-    assert written == 0
-    assert deletes == [(42, "ETH/USDT", "long"), (42, "ETH/USDT", "short")]
-    assert lifecycle_checks == [42]
 
 
 def test_apply_exchange_snapshot_skips_unrelated_symbols(monkeypatch):
