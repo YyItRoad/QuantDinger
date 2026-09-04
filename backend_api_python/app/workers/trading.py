@@ -77,18 +77,35 @@ class TradingWorker:
         rows = StrategyService().get_running_strategies_with_type()
         restored = 0
         for row in rows or []:
-            strategy_id = int(row["id"])
-            if not self._acquire_runtime(strategy_id):
-                continue
-            if self.executor.start_strategy(strategy_id):
-                restored += 1
-            else:
-                self.repository.release_strategy_lease(
-                    strategy_id=strategy_id,
-                    owner_id=self.worker_id,
-                )
-                StrategyService().update_strategy_status(strategy_id, "stopped")
+            self._maintain_ownership()
+            if self._stop.is_set():
+                break
+            try:
+                strategy_id = int(row["id"])
+                if not self._acquire_runtime(strategy_id):
+                    continue
+                if self.executor.start_strategy(strategy_id):
+                    restored += 1
+                else:
+                    self.repository.release_strategy_lease(
+                        strategy_id=strategy_id,
+                        owner_id=self.worker_id,
+                    )
+                    detail = getattr(self.executor, "_last_start_failure", "") or "unknown error"
+                    logger.warning(
+                        "Trading runtime restore deferred: strategy=%s; desired state remains running; reason=%s",
+                        strategy_id,
+                        detail,
+                    )
+            finally:
+                self._maintain_ownership()
         logger.info("Trading runtime restore completed: %s/%s", restored, len(rows or []))
+
+    def _maintain_ownership(self) -> None:
+        """Refresh worker and runtime ownership around potentially slow operations."""
+        self._heartbeat()
+        self._ensure_global_services()
+        self._renew_runtime_leases()
 
     def _execute(self, command: StrategyCommand) -> None:
         try:

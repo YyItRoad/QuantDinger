@@ -18,6 +18,10 @@ class FakeExecutor:
         self.running_strategies.pop(int(strategy_id), None)
         return True
 
+    def start_strategy(self, strategy_id):
+        self._last_start_failure = f"temporary network failure for {strategy_id}"
+        return False
+
 
 class FakeRepository:
     def __init__(self) -> None:
@@ -33,6 +37,10 @@ class FakeRepository:
 
     def release_strategy_lease(self, *, strategy_id, owner_id):
         self.released.append((strategy_id, owner_id))
+
+    def acquire_strategy_lease(self, *, strategy_id, owner_id, lease_seconds):
+        del strategy_id, owner_id, lease_seconds
+        return 1
 
 
 def _command(command_type: str) -> StrategyCommand:
@@ -68,3 +76,26 @@ def test_failed_command_is_retried_with_backoff(monkeypatch):
     worker._execute(_command("start"))
 
     assert repository.failed == [(1, "boom", 1)]
+
+
+def test_restore_renews_ownership_around_each_strategy_without_stopping_desired_state(monkeypatch):
+    class FakeStrategyService:
+        status_updates = []
+
+        def get_running_strategies_with_type(self):
+            return [{"id": 10}, {"id": 20}]
+
+        def update_strategy_status(self, strategy_id, status):
+            self.status_updates.append((strategy_id, status))
+
+    monkeypatch.setattr("app.services.strategy.StrategyService", FakeStrategyService)
+    repository = FakeRepository()
+    worker = TradingWorker(FakeExecutor(), repository)
+    maintenance_calls = []
+    monkeypatch.setattr(worker, "_maintain_ownership", lambda: maintenance_calls.append(True))
+
+    worker.restore_desired_strategies()
+
+    assert len(maintenance_calls) == 4
+    assert repository.released == [(10, worker.worker_id), (20, worker.worker_id)]
+    assert FakeStrategyService.status_updates == []
