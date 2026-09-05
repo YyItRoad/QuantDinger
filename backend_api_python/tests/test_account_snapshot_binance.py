@@ -122,3 +122,80 @@ def test_target_snapshot_preserves_exchange_failure(monkeypatch):
     assert snapshot["swap_positions"] == []
     assert "request timeout" in snapshot["error"]
     assert snapshot["warnings"] == [snapshot["error"]]
+
+
+def test_managed_positions_snapshot_fetches_both_markets_without_orders(monkeypatch):
+    calls = []
+
+    def fetch_target(**kwargs):
+        calls.append(kwargs)
+        if kwargs["market_type"] == "swap":
+            return {
+                "swap_positions": [{"symbol": "BTC/USDT", "size": 1}],
+                "spot_positions": [],
+                "warnings": [],
+                "error": "",
+                "exchange_id": "binance",
+            }
+        return {
+            "swap_positions": [],
+            "spot_positions": [{"symbol": "ETH/USDT", "size": 2}],
+            "warnings": [],
+            "error": "",
+            "exchange_id": "binance",
+        }
+
+    monkeypatch.setattr(account_snapshot, "fetch_target_position_snapshot", fetch_target)
+
+    snapshot = account_snapshot.fetch_managed_positions_snapshot(
+        user_id=3,
+        credential_id=7,
+    )
+
+    assert calls == [
+        {
+            "user_id": 3,
+            "credential_id": 7,
+            "market_type": "swap",
+            "request_timeout_sec": 6.0,
+        },
+        {
+            "user_id": 3,
+            "credential_id": 7,
+            "market_type": "spot",
+            "request_timeout_sec": 6.0,
+        },
+    ]
+    assert snapshot["swap_positions"] == [{"symbol": "BTC/USDT", "size": 1}]
+    assert snapshot["spot_positions"] == [{"symbol": "ETH/USDT", "size": 2}]
+    assert snapshot["open_orders"] == []
+    assert snapshot["warnings"] == []
+    assert snapshot["error"] == ""
+
+
+def test_target_snapshot_caps_request_timeout(monkeypatch):
+    class Client:
+        timeout_sec = 15.0
+
+    client = Client()
+    observed = []
+    monkeypatch.setattr(
+        account_snapshot,
+        "resolve_exchange_config",
+        lambda *_args, **_kwargs: {"exchange_id": "binance"},
+    )
+    monkeypatch.setattr(account_snapshot, "create_client", lambda *_args, **_kwargs: client)
+    monkeypatch.setattr(
+        account_snapshot,
+        "_fetch_swap_positions_snapshot",
+        lambda actual_client, *_args: observed.append(actual_client.timeout_sec) or [],
+    )
+
+    account_snapshot.fetch_target_position_snapshot(
+        user_id=3,
+        credential_id=7,
+        market_type="swap",
+        request_timeout_sec=6.0,
+    )
+
+    assert observed == [6.0]

@@ -305,6 +305,7 @@ def fetch_target_position_snapshot(
     user_id: int,
     credential_id: int,
     market_type: str,
+    request_timeout_sec: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Fetch only the market bucket needed to confirm one managed position."""
     cred = int(credential_id or 0)
@@ -350,6 +351,14 @@ def fetch_target_position_snapshot(
             context=f"{exchange_id.upper()} {target_market} 连接",
         )
     else:
+        if request_timeout_sec is not None and hasattr(client, "timeout_sec"):
+            try:
+                client.timeout_sec = min(
+                    float(client.timeout_sec),
+                    max(0.1, float(request_timeout_sec)),
+                )
+            except (TypeError, ValueError):
+                pass
         if target_market == "swap":
             swap_positions = _fetch_swap_positions_snapshot(client, exchange_id, errors)
         else:
@@ -378,6 +387,60 @@ def fetch_target_position_snapshot(
         "warnings": uniq_errors,
         "partial": bool(uniq_errors) and bool(rows),
         "error": uniq_errors[0] if uniq_errors and not rows else "",
+    }
+
+
+def fetch_managed_positions_snapshot(
+    *,
+    user_id: int,
+    credential_id: int,
+    request_timeout_sec: float = 6.0,
+) -> Dict[str, Any]:
+    """Fetch swap and spot positions without the full snapshot's open-order calls."""
+    swap_snapshot = fetch_target_position_snapshot(
+        user_id=int(user_id),
+        credential_id=int(credential_id),
+        market_type="swap",
+        request_timeout_sec=request_timeout_sec,
+    )
+    spot_snapshot = fetch_target_position_snapshot(
+        user_id=int(user_id),
+        credential_id=int(credential_id),
+        market_type="spot",
+        request_timeout_sec=request_timeout_sec,
+    )
+
+    swap_positions = list(swap_snapshot.get("swap_positions") or [])
+    spot_positions = list(spot_snapshot.get("spot_positions") or [])
+    warnings: List[str] = []
+    seen: set[str] = set()
+    for snapshot in (swap_snapshot, spot_snapshot):
+        lines = list(snapshot.get("warnings") or [])
+        if snapshot.get("error"):
+            lines.append(str(snapshot["error"]))
+        for line in lines:
+            message = str(line or "").strip()
+            if not message:
+                continue
+            fingerprint = _error_fingerprint(message)
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            warnings.append(message)
+
+    has_data = bool(swap_positions or spot_positions)
+    exchange_id = str(
+        swap_snapshot.get("exchange_id") or spot_snapshot.get("exchange_id") or ""
+    )
+    return {
+        "swap_positions": swap_positions,
+        "spot_positions": spot_positions,
+        "open_orders": [],
+        "fetched_at": int(time.time()),
+        "exchange_id": exchange_id,
+        "warnings": warnings,
+        "partial": bool(warnings) and has_data,
+        "error": warnings[0] if warnings and not has_data else "",
     }
 
 

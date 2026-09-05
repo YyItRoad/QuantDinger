@@ -119,3 +119,34 @@ def test_managed_positions_requires_credential_id():
         "msg": "Missing credential_id",
         "data": {"items": []},
     }
+
+
+def test_position_snapshot_uses_lightweight_management_service(monkeypatch):
+    app = Flask(__name__)
+    expected = {
+        "swap_positions": [{"symbol": "BTC/USDT", "size": 1}],
+        "spot_positions": [],
+        "open_orders": [],
+        "warnings": [],
+        "error": "",
+    }
+    calls = []
+
+    def fake_snapshot(*, user_id, credential_id):
+        calls.append((user_id, credential_id))
+        return expected
+
+    monkeypatch.setattr(
+        "app.services.live_trading.account_snapshot.fetch_managed_positions_snapshot",
+        fake_snapshot,
+    )
+    with app.test_request_context("/api/account/position-snapshot?credential_id=7"):
+        g.user_id = 3
+        response = inspect.unwrap(routes.get_managed_position_snapshot)()
+
+    assert calls == [(3, 7)]
+    assert response.get_json() == {
+        "code": 1,
+        "msg": "success",
+        "data": expected,
+    }

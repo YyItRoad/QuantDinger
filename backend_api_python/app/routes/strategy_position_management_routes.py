@@ -10,6 +10,39 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+@strategy_blp.route('/account/position-snapshot', methods=['GET'])
+@login_required
+def get_managed_position_snapshot():
+    """只读取持仓管理页面需要的现货和合约仓位，不查询挂单。"""
+    credential_id = request.args.get('credential_id', type=int)
+    if not credential_id:
+        return jsonify({
+            'code': 0,
+            'msg': 'Missing credential_id',
+            'data': {'swap_positions': [], 'spot_positions': [], 'open_orders': []},
+        }), 400
+    try:
+        from app.services.live_trading.account_snapshot import (
+            fetch_managed_positions_snapshot,
+        )
+
+        snap = fetch_managed_positions_snapshot(
+            user_id=int(g.user_id),
+            credential_id=int(credential_id),
+        )
+        msg = str(snap.get('error') or '')
+        if not msg and snap.get('warnings'):
+            msg = str(snap['warnings'][0])
+        return jsonify({'code': 1, 'msg': msg or 'success', 'data': snap})
+    except Exception:
+        logger.exception("get_managed_position_snapshot failed")
+        return jsonify({
+            'code': 0,
+            'msg': '同步交易所持仓失败',
+            'data': {'swap_positions': [], 'spot_positions': [], 'open_orders': []},
+        }), 500
+
+
 @strategy_blp.route('/account/managed-positions', methods=['GET'])
 @login_required
 def get_managed_account_positions():
