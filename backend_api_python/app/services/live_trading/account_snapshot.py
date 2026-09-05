@@ -6,6 +6,7 @@ Used by broker-accounts UI (not strategy L3 ledger).
 from __future__ import annotations
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.exchange_execution import resolve_exchange_config
@@ -397,18 +398,19 @@ def fetch_managed_positions_snapshot(
     request_timeout_sec: float = 6.0,
 ) -> Dict[str, Any]:
     """Fetch swap and spot positions without the full snapshot's open-order calls."""
-    swap_snapshot = fetch_target_position_snapshot(
-        user_id=int(user_id),
-        credential_id=int(credential_id),
-        market_type="swap",
-        request_timeout_sec=request_timeout_sec,
-    )
-    spot_snapshot = fetch_target_position_snapshot(
-        user_id=int(user_id),
-        credential_id=int(credential_id),
-        market_type="spot",
-        request_timeout_sec=request_timeout_sec,
-    )
+    def fetch_market(market_type: str) -> Dict[str, Any]:
+        return fetch_target_position_snapshot(
+            user_id=int(user_id),
+            credential_id=int(credential_id),
+            market_type=market_type,
+            request_timeout_sec=request_timeout_sec,
+        )
+
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="position-snapshot") as pool:
+        swap_future = pool.submit(fetch_market, "swap")
+        spot_future = pool.submit(fetch_market, "spot")
+        swap_snapshot = swap_future.result()
+        spot_snapshot = spot_future.result()
 
     swap_positions = list(swap_snapshot.get("swap_positions") or [])
     spot_positions = list(spot_snapshot.get("spot_positions") or [])

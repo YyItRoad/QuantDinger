@@ -152,17 +152,17 @@ def test_managed_positions_snapshot_fetches_both_markets_without_orders(monkeypa
         credential_id=7,
     )
 
-    assert calls == [
+    assert sorted(calls, key=lambda item: item["market_type"]) == [
         {
             "user_id": 3,
             "credential_id": 7,
-            "market_type": "swap",
+            "market_type": "spot",
             "request_timeout_sec": 6.0,
         },
         {
             "user_id": 3,
             "credential_id": 7,
-            "market_type": "spot",
+            "market_type": "swap",
             "request_timeout_sec": 6.0,
         },
     ]
