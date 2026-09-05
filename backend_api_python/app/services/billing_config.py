@@ -11,7 +11,6 @@ DEFAULT_BILLING_CONFIG = {
     "cost_ai_analysis": 10,
     "cost_ai_code_gen": 30,
     "cost_ai_indicator_to_strategy": 30,
-    "cost_ai_tuning": 50,
     "cost_ai_copilot_chat": 5,
     "cost_ai_copilot_image": 15,
     "cost_ai_copilot_radar": 20,
@@ -23,7 +22,6 @@ FEATURE_NAMES = {
     "ai_analysis": "AI Analysis",
     "ai_code_gen": "AI Code Generation",
     "ai_indicator_to_strategy": "AI Indicator to Strategy",
-    "ai_tuning": "AI Parameter Tuning",
     "ai_copilot_chat": "AI Copilot Chat",
     "ai_copilot_image": "AI Copilot Image Analysis",
     "ai_copilot_radar": "AI Copilot Opportunity Radar",
@@ -66,23 +64,42 @@ def _int_env(key: str, default: int) -> int:
 
 
 def load_membership_plans() -> Dict[str, Any]:
-    """Read membership plan settings configured through the Settings UI."""
+    """Legacy defaults used to seed the database-backed plan catalogue."""
     return {
         "monthly": {
             "plan": "monthly",
+            "name": "Monthly",
+            "description": "30 days of VIP access",
             "price_usd": _float_env("MEMBERSHIP_MONTHLY_PRICE_USD", 19.9),
             "credits_once": _int_env("MEMBERSHIP_MONTHLY_CREDITS", 500),
+            "credits_monthly": 0,
             "duration_days": 30,
+            "is_lifetime": False,
+            "is_popular": False,
+            "sort_order": 10,
         },
         "yearly": {
             "plan": "yearly",
+            "name": "Yearly",
+            "description": "365 days of VIP access",
             "price_usd": _float_env("MEMBERSHIP_YEARLY_PRICE_USD", 199.0),
             "credits_once": _int_env("MEMBERSHIP_YEARLY_CREDITS", 8000),
+            "credits_monthly": 0,
             "duration_days": 365,
+            "is_lifetime": False,
+            "is_popular": True,
+            "sort_order": 20,
         },
         "lifetime": {
             "plan": "lifetime",
+            "name": "Lifetime",
+            "description": "Lifetime VIP access",
             "price_usd": _float_env("MEMBERSHIP_LIFETIME_PRICE_USD", 499.0),
+            "credits_once": 0,
             "credits_monthly": _int_env("MEMBERSHIP_LIFETIME_MONTHLY_CREDITS", 800),
+            "duration_days": 0,
+            "is_lifetime": True,
+            "is_popular": False,
+            "sort_order": 30,
         },
     }
