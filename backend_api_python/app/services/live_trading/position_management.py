@@ -8,7 +8,7 @@ import json
 import uuid
 from typing import Any, Dict, Iterator
 
-from app.services.live_trading.account_snapshot import fetch_account_snapshot
+from app.services.live_trading.account_snapshot import fetch_target_position_snapshot
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
 from app.services.strategy import get_strategy_service
 from app.services.strategy_command_repository import StrategyCommandRepository
@@ -413,7 +413,11 @@ def create_managed_strategy(
 
     # Refresh exchange state before taking a DB-backed adoption lock. Network
     # latency must never occupy a connection from the application DB pool.
-    snapshot = fetch_account_snapshot(user_id=uid, credential_id=credential_id)
+    snapshot = fetch_target_position_snapshot(
+        user_id=uid,
+        credential_id=credential_id,
+        market_type=_market_type(position_ref.get("market_type")),
+    )
     fresh = _fresh_position(snapshot, position_ref)
     fresh = _complete_fresh_position_price(
         user_id=uid,
@@ -524,10 +528,48 @@ def _create_managed_strategy_locked(
         suffix = _cleanup_failure_suffix(cleaned=cleaned, strategy_id=strategy_id)
         raise PositionManagementError(f"创建策略后登记仓位失败{suffix}", status_code=500) from exc
 
-    return {
+    status = "stopped"
+    warning = ""
+    try:
+        if not service.update_strategy_status(strategy_id, "running", user_id=uid):
+            warning = "策略已创建并登记仓位，但自动启动失败，请手动启动"
+        else:
+            StrategyCommandRepository().enqueue(
+                strategy_id=strategy_id,
+                user_id=uid,
+                command_type="start",
+                idempotency_key=f"position-management:start:{strategy_id}",
+            )
+            status = "starting"
+    except Exception as exc:
+        logger.error(
+            "Failed to auto-start managed strategy %s: %s",
+            strategy_id,
+            exc,
+            exc_info=True,
+        )
+        try:
+            service.update_strategy_status(strategy_id, "stopped", user_id=uid)
+        except Exception:
+            logger.error(
+                "Failed to restore managed strategy %s to stopped state",
+                strategy_id,
+                exc_info=True,
+            )
+        warning = "策略已创建并登记仓位，但自动启动失败，请手动启动"
+
+    try:
+        if status == "starting":
+            append_strategy_log(strategy_id, "info", "持仓管理策略已创建，等待 Trading Worker 启动")
+        elif warning:
+            append_strategy_log(strategy_id, "error", warning)
+    except Exception:
+        logger.warning("Failed to append managed strategy startup log: strategy=%s", strategy_id)
+
+    result = {
         "strategy_id": strategy_id,
         "strategy_name": str(strategy.get("strategy_name") or payload.get("name") or ""),
-        "status": str(strategy.get("status") or "stopped"),
+        "status": status,
         "timeframe": str(strategy.get("timeframe") or ""),
         "symbol": symbol,
         "side": side,
@@ -536,3 +578,6 @@ def _create_managed_strategy_locked(
         "mark_price": str(fresh.get("mark_price") or "0"),
         "leverage": str(fresh.get("leverage") or "1"),
     }
+    if warning:
+        result["warning"] = warning
+    return result

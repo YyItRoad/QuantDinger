@@ -300,6 +300,87 @@ def _fetch_multi_crypto_snapshot(
     return swap_pos, spot_pos, orders
 
 
+def fetch_target_position_snapshot(
+    *,
+    user_id: int,
+    credential_id: int,
+    market_type: str,
+) -> Dict[str, Any]:
+    """Fetch only the market bucket needed to confirm one managed position."""
+    cred = int(credential_id or 0)
+    target_market = str(market_type or "swap").strip().lower()
+    if target_market in {"future", "futures", "perp", "perpetual"}:
+        target_market = "swap"
+    if target_market not in {"swap", "spot"}:
+        target_market = "swap"
+
+    errors: List[str] = []
+    swap_positions: List[Dict[str, Any]] = []
+    spot_positions: List[Dict[str, Any]] = []
+    if cred <= 0:
+        return {
+            "swap_positions": swap_positions,
+            "spot_positions": spot_positions,
+            "open_orders": [],
+            "fetched_at": int(time.time()),
+            "error": "missing_credential_id",
+            "warnings": ["缺少 credential_id"],
+            "partial": False,
+        }
+
+    exchange_config = resolve_exchange_config({"credential_id": cred}, user_id=int(user_id))
+    exchange_id = str(exchange_config.get("exchange_id") or "").strip().lower()
+    if not exchange_id:
+        return {
+            "swap_positions": swap_positions,
+            "spot_positions": spot_positions,
+            "open_orders": [],
+            "fetched_at": int(time.time()),
+            "error": "missing_exchange_id",
+            "warnings": ["凭证未配置 exchange_id"],
+            "partial": False,
+        }
+
+    try:
+        client = create_client(exchange_config, market_type=target_market)
+    except Exception as exc:
+        _append_snapshot_error(
+            errors,
+            exc,
+            context=f"{exchange_id.upper()} {target_market} 连接",
+        )
+    else:
+        if target_market == "swap":
+            swap_positions = _fetch_swap_positions_snapshot(client, exchange_id, errors)
+        else:
+            spot_positions = _fetch_spot_wallet(
+                client,
+                errors,
+                label=f"{exchange_id.upper()} 现货持仓",
+            )
+
+    rows = swap_positions if target_market == "swap" else spot_positions
+    uniq_errors: List[str] = []
+    seen: set[str] = set()
+    for line in errors:
+        fingerprint = _error_fingerprint(line)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        uniq_errors.append(line)
+
+    return {
+        "swap_positions": swap_positions,
+        "spot_positions": spot_positions,
+        "open_orders": [],
+        "fetched_at": int(time.time()),
+        "exchange_id": exchange_id,
+        "warnings": uniq_errors,
+        "partial": bool(uniq_errors) and bool(rows),
+        "error": uniq_errors[0] if uniq_errors and not rows else "",
+    }
+
+
 def _gate_symbol(raw: Any) -> str:
     native = str(raw or "").strip().upper()
     if not native:

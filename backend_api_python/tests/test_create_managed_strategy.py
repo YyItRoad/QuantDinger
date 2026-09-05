@@ -21,6 +21,13 @@ def _without_database_advisory_lock(monkeypatch):
 
     monkeypatch.setattr(position_management, "_management_leg_lock", unlocked)
 
+    class _CommandRepository:
+        def enqueue(self, **_kwargs):
+            return None
+
+    monkeypatch.setattr(position_management, "StrategyCommandRepository", _CommandRepository)
+    monkeypatch.setattr(position_management, "append_strategy_log", lambda *_args: None)
+
 
 def test_management_leg_lock_uses_short_lived_process_lease(monkeypatch):
     calls = []
@@ -112,7 +119,7 @@ def test_exchange_snapshot_is_fetched_before_management_lock(monkeypatch):
         events.append(("lock", kwargs))
         yield
 
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", snapshot)
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", snapshot)
     monkeypatch.setattr(position_management, "_management_leg_lock", lock)
     monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
     monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
@@ -143,7 +150,7 @@ def test_spot_ticker_is_fetched_before_management_lock(monkeypatch):
     service = _StrategyService()
     events = []
 
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: {
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: {
         "swap_positions": [],
         "spot_positions": [{
             "symbol": "ETH/USDT",
@@ -191,6 +198,7 @@ class _StrategyService:
     def __init__(self):
         self.created_payload = None
         self.deleted = []
+        self.status_updates = []
 
     def create_strategy(self, payload):
         self.created_payload = dict(payload)
@@ -208,6 +216,10 @@ class _StrategyService:
 
     def delete_strategy(self, strategy_id, user_id=None):
         self.deleted.append((strategy_id, user_id))
+        return True
+
+    def update_strategy_status(self, strategy_id, status, user_id=None):
+        self.status_updates.append((strategy_id, status, user_id))
         return True
 
 def payload_name(payload):
@@ -235,10 +247,18 @@ def _snapshot():
 def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
     service = _StrategyService()
     recorded = []
+    queued = []
+
+    class _CommandRepository:
+        def enqueue(self, **kwargs):
+            queued.append(kwargs)
+            return None
+
     monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: _snapshot())
     monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
     monkeypatch.setattr(position_management, "upsert_position", lambda **kwargs: recorded.append(kwargs))
+    monkeypatch.setattr(position_management, "StrategyCommandRepository", _CommandRepository)
 
     result = position_management.create_managed_strategy(
         user_id=3,
@@ -301,7 +321,7 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
     assert result == {
         "strategy_id": 44,
         "strategy_name": "[持仓] KAITO/USDC ATR趋势管理",
-        "status": "stopped",
+        "status": "starting",
         "timeframe": "1h",
         "symbol": "KAITO/USDC",
         "side": "long",
@@ -310,6 +330,76 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
         "mark_price": "0.3397",
         "leverage": "5",
     }
+    assert service.status_updates == [(44, "running", 3)]
+    assert queued == [{
+        "strategy_id": 44,
+        "user_id": 3,
+        "command_type": "start",
+        "idempotency_key": "position-management:start:44",
+    }]
+
+
+def test_create_managed_strategy_keeps_created_strategy_when_auto_start_fails(monkeypatch):
+    service = _StrategyService()
+
+    class _FailingCommandRepository:
+        def enqueue(self, **_kwargs):
+            raise RuntimeError("command queue unavailable")
+
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    monkeypatch.setattr(position_management, "upsert_position", lambda **_kwargs: None)
+    monkeypatch.setattr(position_management, "StrategyCommandRepository", _FailingCommandRepository)
+
+    result = position_management.create_managed_strategy(
+        user_id=3,
+        position_ref={
+            "credential_id": 7,
+            "symbol": "KAITO/USDC",
+            "side": "long",
+            "market_type": "swap",
+            "inst_id": "KAITOUSDC",
+        },
+        strategy_payload={"sourceId": 9, "name": "管理策略"},
+    )
+
+    assert service.deleted == []
+    assert service.status_updates == [
+        (44, "running", 3),
+        (44, "stopped", 3),
+    ]
+    assert result["status"] == "stopped"
+    assert result["warning"] == "策略已创建并登记仓位，但自动启动失败，请手动启动"
+
+
+def test_create_managed_strategy_does_not_queue_start_when_status_update_fails(monkeypatch):
+    service = _StrategyService()
+    service.update_strategy_status = lambda *_args, **_kwargs: False
+
+    class _UnexpectedCommandRepository:
+        def enqueue(self, **_kwargs):
+            raise AssertionError("状态更新失败后不应写入启动命令")
+
+    monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    monkeypatch.setattr(position_management, "upsert_position", lambda **_kwargs: None)
+    monkeypatch.setattr(position_management, "StrategyCommandRepository", _UnexpectedCommandRepository)
+
+    result = position_management.create_managed_strategy(
+        user_id=3,
+        position_ref={
+            "credential_id": 7,
+            "symbol": "KAITO/USDC",
+            "side": "long",
+            "market_type": "swap",
+        },
+        strategy_payload={"sourceId": 9, "name": "管理策略"},
+    )
+
+    assert result["status"] == "stopped"
+    assert result["warning"] == "策略已创建并登记仓位，但自动启动失败，请手动启动"
 
 
 def test_generic_position_manager_accepts_matching_direction():
@@ -353,7 +443,7 @@ def test_generic_position_manager_rejects_wrong_direction():
 def test_create_managed_strategy_rejects_position_already_registered(monkeypatch):
     service = _StrategyService()
     monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: _snapshot())
     monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [{
         "strategy_id": 12,
         "symbol": "KAITO/USDC",
@@ -379,7 +469,7 @@ def test_create_managed_strategy_rejects_position_already_registered(monkeypatch
 
 
 def test_create_managed_strategy_rejects_incomplete_snapshot(monkeypatch):
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: {
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: {
         "swap_positions": [],
         "spot_positions": [],
         "partial": True,
@@ -458,7 +548,7 @@ def test_create_spot_management_uses_takeover_price_when_cost_basis_missing(monk
     service = _StrategyService()
     recorded = []
     monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: {
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: {
         "swap_positions": [],
         "spot_positions": [{
             "symbol": "ETH/USDT",
@@ -498,7 +588,7 @@ def test_create_spot_management_falls_back_to_entry_when_ticker_is_unavailable(m
     service = _StrategyService()
     recorded = []
     monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: {
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: {
         "swap_positions": [],
         "spot_positions": [{
             "symbol": "ETH/USDT",
@@ -550,7 +640,7 @@ def test_create_managed_strategy_rejects_source_that_does_not_monitor_position(m
     }
     recorded = []
     monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: _snapshot())
     monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
     monkeypatch.setattr(position_management, "upsert_position", lambda **kwargs: recorded.append(kwargs))
 
@@ -583,7 +673,7 @@ def test_create_managed_strategy_reports_cleanup_failure(monkeypatch):
         },
     }
     monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: _snapshot())
     monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
 
     with pytest.raises(position_management.PositionManagementError, match="残留策略 ID：44") as exc:
@@ -622,7 +712,7 @@ def test_cleanup_exception_does_not_hide_original_creation_error(monkeypatch):
         },
     }
     monkeypatch.setattr(position_management, "get_strategy_service", lambda: service)
-    monkeypatch.setattr(position_management, "fetch_account_snapshot", lambda **_kwargs: _snapshot())
+    monkeypatch.setattr(position_management, "fetch_target_position_snapshot", lambda **_kwargs: _snapshot())
     monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
 
     with pytest.raises(position_management.PositionManagementError, match="策略源码没有订阅当前仓位品种") as exc:
