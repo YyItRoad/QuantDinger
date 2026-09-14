@@ -12,6 +12,7 @@ import re
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timezone
+from time import perf_counter
 from typing import Any
 
 from flask import Response, g, jsonify, request, stream_with_context
@@ -68,6 +69,7 @@ from app.services.ai_market_query import (
     snapshot_options_from_plan,
 )
 from app.services.ai_report_pdf import build_ai_report_pdf
+from app.services.ai_report_share import create_report_share, get_public_report_share
 from app.services.kline import KlineService
 from app.services.llm import LLMAPIError, LLMService
 from app.services.search import get_search_service
@@ -872,51 +874,65 @@ def _build_market_snapshot(context: dict) -> dict | None:
         "data_warnings": [],
     }
     snapshot["data_warnings"].append("Latest candle may be still forming; prefer prev_closed_volume_ratio_vs_avg20 for volume confirmation.")
-    if include_price:
-        try:
-            price = service.get_realtime_price(
-                market,
-                symbol,
-                force_refresh=force_price_refresh,
-                exchange_id=exchange_id or None,
-                market_type=market_type or None,
-            )
-            if price and _to_float(price.get("price")):
-                snapshot["price"] = {
-                    "last": _round_num(price.get("price"), 6),
-                    "change": _round_num(price.get("change"), 6),
-                    "change_percent": _round_num(price.get("changePercent"), 2),
-                    "high": _round_num(price.get("high"), 6),
-                    "low": _round_num(price.get("low"), 6),
-                    "open": _round_num(price.get("open"), 6),
-                    "source": price.get("source"),
-                }
-        except Exception as e:
-            snapshot["data_warnings"].append(f"price unavailable: {e}")
 
-    for timeframe in ([] if skip_klines else snapshot_timeframes):
-        try:
-            klines = service.get_kline(
-                market,
-                symbol,
+    def fetch_price():
+        price = service.get_realtime_price(
+            market,
+            symbol,
+            force_refresh=force_price_refresh,
+            exchange_id=exchange_id or None,
+            market_type=market_type or None,
+        )
+        if price and _to_float(price.get("price")):
+            return {
+                "last": _round_num(price.get("price"), 6),
+                "change": _round_num(price.get("change"), 6),
+                "change_percent": _round_num(price.get("changePercent"), 2),
+                "high": _round_num(price.get("high"), 6),
+                "low": _round_num(price.get("low"), 6),
+                "open": _round_num(price.get("open"), 6),
+                "source": price.get("source"),
+            }
+        return None
+
+    def fetch_timeframe(timeframe):
+        klines = service.get_kline(
+            market,
+            symbol,
+            timeframe,
+            snapshot_limit,
+            exchange_id=exchange_id or None,
+            market_type=market_type or None,
+        )
+        summary = _summarize_klines(klines, timeframe)
+        if market_query_plan:
+            summary["technical"] = compute_technical_evidence(
+                klines,
                 timeframe,
-                snapshot_limit,
-                exchange_id=exchange_id or None,
-                market_type=market_type or None,
+                market_query_plan.get("metrics") or [],
+                closed_candle_only=bool(market_query_plan.get("closed_candle_only", True)),
+                parameters=market_query_plan.get("parameters") or {},
+                market=market,
             )
-            summary = _summarize_klines(klines, timeframe)
-            if market_query_plan:
-                summary["technical"] = compute_technical_evidence(
-                    klines,
-                    timeframe,
-                    market_query_plan.get("metrics") or [],
-                    closed_candle_only=bool(market_query_plan.get("closed_candle_only", True)),
-                    parameters=market_query_plan.get("parameters") or {},
-                    market=market,
-                )
-            snapshot["timeframes"][timeframe] = summary
-        except Exception as e:
-            snapshot["timeframes"][timeframe] = {"timeframe": timeframe, "available": False, "error": str(e)}
+        return summary
+
+    tasks = [("price", fetch_price, ())] if include_price else []
+    tasks.extend((timeframe, fetch_timeframe, (timeframe,)) for timeframe in ([] if skip_klines else snapshot_timeframes))
+    if tasks:
+        with ThreadPoolExecutor(max_workers=min(4, len(tasks))) as executor:
+            futures = [(key, executor.submit(function, *args)) for key, function, args in tasks]
+            for key, future in futures:
+                try:
+                    value = future.result()
+                    if key == "price":
+                        snapshot["price"] = value
+                    else:
+                        snapshot["timeframes"][key] = value
+                except Exception as exc:
+                    if key == "price":
+                        snapshot["data_warnings"].append(f"price unavailable: {exc}")
+                    else:
+                        snapshot["timeframes"][key] = {"timeframe": key, "available": False, "error": str(exc)}
 
     return snapshot
 
@@ -2976,7 +2992,11 @@ def agent_intent():
         return jsonify({"code": 0, "msg": str(e), "data": None}), 400
     if not message and not attachments:
         return jsonify({"code": 0, "msg": "Missing message", "data": None}), 400
-    plan = _classify_agent_intent(message, attachments, context, language)
+    started_at = perf_counter()
+    try:
+        plan = _classify_agent_intent(message, attachments, context, language)
+    finally:
+        logger.info("Copilot intent timing seconds=%.4f", perf_counter() - started_at)
     return jsonify({"code": 1, "msg": "success", "data": plan})
 
 
@@ -3320,16 +3340,15 @@ def chat_message_stream():
     if not message and not attachments:
         return jsonify({"code": 0, "msg": "Missing message", "data": None}), 400
 
-    agent_plan = _get_or_classify_agent_intent(message, attachments, context, language)
-    intent = str(agent_plan.get("intent") or _detect_intent(message, bool(attachments)))
-    context["user_message"] = message
-    context["intent"] = intent
-    context["agent_intent"] = agent_plan
-    context["language"] = language
-    context = _enrich_context(context, has_image=bool(attachments))
+    intent = _detect_intent(message, bool(attachments))
+    context.update(user_message=message, intent=intent, language=language)
+    agent_plan = {}
 
     @stream_with_context
     def generate():
+        nonlocal context, agent_plan, intent
+        started_at = perf_counter()
+        timings = {}
         sid = None
         costs = {}
         chunks: list[str] = []
@@ -3341,7 +3360,7 @@ def chat_message_stream():
         context_usage: dict = {}
         context_meta: dict = {}
         request_usage_id: int | None = None
-        usage_action = _agent_usage_action(agent_plan, context, language)
+        usage_action = None
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
@@ -3360,22 +3379,40 @@ def chat_message_stream():
                     attachments=attachments,
                     intent=intent,
                 )
-                _record_research_tool_calls(cur, sid, user_id, context)
                 cur.execute("UPDATE qd_ai_copilot_sessions SET updated_at = NOW() WHERE id = ?", (sid,))
                 db.commit()
 
-                # Mark the request as accepted before billing/provider work so clients
-                # never submit the same user message again after an SSE disconnect.
-                yield _sse("accepted", {
-                    "session_id": sid,
-                    "user_message_id": user_message_id,
-                })
+                cur.close()
 
-                charged, charge_msg, costs = _charge(user_id, bool(attachments), f"copilot:{sid}:{user_message_id}")
-                if not charged:
-                    yield _sse("error", {"msg": charge_msg, "costs": costs})
-                    return
+            # Mark the request as accepted before billing/provider work so clients
+            # never submit the same user message again after an SSE disconnect.
+            timings["accepted_seconds"] = perf_counter() - started_at
+            yield _sse("accepted", {
+                "session_id": sid,
+                "user_message_id": user_message_id,
+            })
 
+            charged, charge_msg, costs = _charge(user_id, bool(attachments), f"copilot:{sid}:{user_message_id}")
+            if not charged:
+                yield _sse("error", {"msg": charge_msg, "costs": costs})
+                return
+
+            timings["billing_ready_seconds"] = perf_counter() - started_at
+            agent_plan = _get_or_classify_agent_intent(message, attachments, context, language)
+            timings["routing_ready_seconds"] = perf_counter() - started_at
+            intent = str(agent_plan.get("intent") or _detect_intent(message, bool(attachments)))
+            context["user_message"] = message
+            context["intent"] = intent
+            context["agent_intent"] = agent_plan
+            context["language"] = language
+            context = _enrich_context(context, has_image=bool(attachments))
+
+            timings["context_ready_seconds"] = perf_counter() - started_at
+            usage_action = _agent_usage_action(agent_plan, context, language)
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute("UPDATE qd_ai_copilot_messages SET intent = ? WHERE id = ? AND user_id = ?", (intent, user_message_id, user_id))
+                _record_research_tool_calls(cur, sid, user_id, context)
                 history = _load_recent_messages(cur, sid, limit=20)
                 prepared_context, context_meta = _prepare_server_context(
                     cur,
@@ -3417,33 +3454,40 @@ def chat_message_stream():
                     finish_reason="accepted",
                 )
                 db.commit()
-                yield _sse("meta", {
-                    "session_id": sid,
-                    "user_message_id": user_message_id,
-                    "intent": intent,
-                    "agent_intent": agent_plan,
-                    "agent_usage": usage_action.get("payload") if usage_action else None,
-                    "actions": [usage_action] if usage_action else [],
-                    "costs": costs,
-                    "context_usage": {**context_usage, **context_meta},
-                })
-                for stream_event, stream_payload in _stream_llm_with_recovery(llm_messages, temperature=0.35):
-                    if stream_event == "replace":
-                        text = str(stream_payload.get("text") or "")
-                        chunks = [text]
-                        stream_result["recovered"] = True
-                        yield _sse("replace", stream_payload)
-                    elif stream_event == "warning":
-                        stream_result["truncated"] = bool(stream_payload.get("truncated"))
-                        stream_result["finish_reason"] = str(
-                            stream_payload.get("finish_reason") or "length"
-                        )
-                        yield _sse("warning", stream_payload)
-                    else:
-                        text = str(stream_payload.get("text") or "")
-                        chunks.append(text)
-                        yield _sse("delta", stream_payload)
+                cur.close()
 
+            yield _sse("meta", {
+                "session_id": sid,
+                "user_message_id": user_message_id,
+                "intent": intent,
+                "agent_intent": agent_plan,
+                "agent_usage": usage_action.get("payload") if usage_action else None,
+                "actions": [usage_action] if usage_action else [],
+                "costs": costs,
+                "context_usage": {**context_usage, **context_meta},
+            })
+            timings["prompt_ready_seconds"] = perf_counter() - started_at
+            for stream_event, stream_payload in _stream_llm_with_recovery(llm_messages, temperature=0.35):
+                if stream_payload.get("text"):
+                    timings.setdefault("first_text_seconds", perf_counter() - started_at)
+                if stream_event == "replace":
+                    text = str(stream_payload.get("text") or "")
+                    chunks = [text]
+                    stream_result["recovered"] = True
+                    yield _sse("replace", stream_payload)
+                elif stream_event == "warning":
+                    stream_result["truncated"] = bool(stream_payload.get("truncated"))
+                    stream_result["finish_reason"] = str(
+                        stream_payload.get("finish_reason") or "length"
+                    )
+                    yield _sse("warning", stream_payload)
+                else:
+                    text = str(stream_payload.get("text") or "")
+                    chunks.append(text)
+                    yield _sse("delta", stream_payload)
+
+            with get_db_connection() as db:
+                cur = db.cursor()
                 answer = "".join(chunks).strip() or "The model did not return a usable answer."
                 assistant_id = _insert_message(
                     cur,
@@ -3468,18 +3512,18 @@ def chat_message_stream():
                 )
                 db.commit()
                 cur.close()
-                yield _sse("done", {
-                    "session_id": sid,
-                    "message_id": assistant_id,
-                    "intent": intent,
-                    "confidence": 50,
-                    "agent_usage": usage_action.get("payload") if usage_action else None,
-                    "actions": [usage_action] if usage_action else [],
-                    "costs": costs,
-                    "memory_candidates": _detect_memory_candidates(message, language),
-                    "context_usage": {**context_usage, **context_meta},
-                    **stream_result,
-                })
+            yield _sse("done", {
+                "session_id": sid,
+                "message_id": assistant_id,
+                "intent": intent,
+                "confidence": 50,
+                "agent_usage": usage_action.get("payload") if usage_action else None,
+                "actions": [usage_action] if usage_action else [],
+                "costs": costs,
+                "memory_candidates": _detect_memory_candidates(message, language),
+                "context_usage": {**context_usage, **context_meta},
+                **stream_result,
+            })
         except Exception as e:
             logger.error(f"chat_message_stream failed: {e}", exc_info=True)
             yield _sse("error", {
@@ -3492,6 +3536,10 @@ def chat_message_stream():
                 "request_id": str(getattr(e, "request_id", "") or ""),
                 "generation_id": str(getattr(e, "generation_id", "") or ""),
             })
+
+        finally:
+            timings["total_seconds"] = perf_counter() - started_at
+            logger.info("Copilot stream timing session_id=%s intent=%s seconds=%s", sid, intent, {key: round(value, 4) for key, value in timings.items()})
 
     return Response(generate(), mimetype="text/event-stream", headers={
         "Cache-Control": "no-cache, no-transform",
@@ -3956,7 +4004,20 @@ def export_chat_report_pdf():
         logger.error(f"export_chat_report_pdf failed: {e}", exc_info=True)
         return jsonify({"code": 0, "msg": str(e), "data": None}), 500
 
-    symbol = re.sub(r"[^A-Za-z0-9._-]+", "_", _plain_text(report.get("symbol") or target.get("symbol") or "report")).strip("_")
+    artifact = report.get("report") or report.get("professional_report") or report
+    instrument = artifact.get("instrument") if isinstance(artifact, dict) else {}
+    instrument = instrument if isinstance(instrument, dict) else {}
+    symbol = re.sub(
+        r"[^A-Za-z0-9._-]+",
+        "_",
+        _plain_text(
+            instrument.get("canonical_symbol")
+            or instrument.get("symbol")
+            or report.get("symbol")
+            or target.get("symbol")
+            or "report"
+        ),
+    ).strip("_")
     filename = f"QuantDinger_{symbol or 'report'}_{_now_utc().strftime('%Y%m%d')}.pdf"
     return Response(
         pdf_bytes,
@@ -3966,6 +4027,58 @@ def export_chat_report_pdf():
             "Content-Length": str(len(pdf_bytes)),
         },
     )
+
+
+@ai_chat_blp.route("/chat/report/share", methods=["POST"])
+@login_required
+def create_chat_report_share():
+    """Create a public, read-only snapshot link for a report owned by the user."""
+    user_id = int(getattr(g, "user_id", 0) or 0)
+    data = request.get_json(silent=True) or {}
+    try:
+        message_id = int(data.get("message_id") or 0)
+    except (TypeError, ValueError):
+        message_id = 0
+    if message_id <= 0:
+        return jsonify({"code": 0, "msg": "Missing report message id", "data": None}), 400
+    language = str(data.get("language") or request.headers.get("X-App-Lang") or "en-US")
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            share = create_report_share(
+                cur,
+                owner_user_id=user_id,
+                source_message_id=message_id,
+                language=language,
+            )
+            db.commit()
+            cur.close()
+    except LookupError:
+        return jsonify({"code": 0, "msg": "Professional report not found", "data": None}), 404
+    except ValueError as exc:
+        return jsonify({"code": 0, "msg": str(exc), "data": None}), 400
+    except Exception as exc:
+        logger.error("create_chat_report_share failed: %s", exc, exc_info=True)
+        return jsonify({"code": 0, "msg": "Unable to create share link", "data": None}), 500
+    return jsonify({"code": 1, "msg": "success", "data": share})
+
+
+@ai_chat_blp.route("/chat/report/share/<token>", methods=["GET"])
+def get_chat_report_share(token: str):
+    """Public endpoint for a capability-linked report snapshot; no login required."""
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            share = get_public_report_share(cur, token)
+            if share:
+                db.commit()
+            cur.close()
+    except Exception as exc:
+        logger.error("get_chat_report_share failed: %s", exc, exc_info=True)
+        return jsonify({"code": 0, "msg": "Unable to load shared report", "data": None}), 500
+    if not share:
+        return jsonify({"code": 0, "msg": "Shared report not found", "data": None}), 404
+    return jsonify({"code": 1, "msg": "success", "data": share})
 
 
 @ai_chat_blp.route("/chat/history/save", methods=["POST"])

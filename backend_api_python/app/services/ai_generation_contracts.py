@@ -26,6 +26,8 @@ Return Python source only. Do not use markdown fences or explanatory prose.
 - Optional lifecycle handlers are `before_trading_start(context, data)` and `after_trading_end(context, data)`.
 - Store per-run state on the global `g` namespace.
 - Confirm decisions from visible completed data only. Never read future rows, use negative shifts, or otherwise introduce look-ahead bias.
+- `initialize` runs during manifest discovery. Use it only for declarations and initial `g` values; never request market data, read live positions, or place orders there.
+- Scheduled callbacks see the previous completed bar and may submit for the current open. `handle_data` sees the newly completed bar and its orders execute from the next bar open.
 
 ## Parameters and metadata
 - Declare tunable strategy knobs with `# @param <name> <int|float|bool|str> <default> <description>` and keep every declared default identical to the fallback used in code.
@@ -33,12 +35,15 @@ Return Python source only. Do not use markdown fences or explanatory prose.
 - Parameters may control signal periods, thresholds, target weights, stops, take profit, trailing protection, cooldowns, and bounded layer counts.
 - Do not disguise universe, symbol, market type, frequency, leverage permission, initial capital, date range, commission, or slippage as ordinary strategy parameters.
 - Use `context.set_metadata(...)` in `initialize` for stable descriptive metadata such as direction mode and strategy family, passing keyword arguments such as `context.set_metadata(direction_mode="long_only", strategy_family="trend")`. Metadata is not a substitute for executable risk logic.
+- `direction_mode` accepts exactly `long_only`, `short_only`, `both`, or `neutral`. Requests for long-and-short, both directions, bidirectional trading, `多空双向`, or `双向/多空` map to `direction_mode="both"`; never invent another direction-mode literal.
+- Keep direction metadata consistent with executable order behavior. A `both` strategy must implement genuine long and short entries/exits; changing only the metadata does not make a long-only strategy bidirectional.
 
 ## Data and factors
 - Historical-bar signatures are exact: `get_history(count, frequency=None, field=None, security_list=None)` and the default form `data.history(symbols, count, fields=None)`. Multi-timeframe data views add the optional keyword `frequency=None` to `data.history`.
 - Read the current scalar field with `data.current(symbol, field="close")`; multi-timeframe code may add the optional keyword `frequency=None`. There is no `get_current_data` API and `data.current(...)` does not return an object with a `.close` attribute.
 - In `get_history(...)`, `count` is always the first argument and must be an integer. In `data.history(...)`, symbols are first and the integer count is second. Prefer explicit keywords when using `data.history`, for example `data.history(symbol, count=60, fields=["close"])`.
 - A history request for one symbol returns a pandas `DataFrame` directly. Use `bars["close"]`; never index the result again with `bars[symbol]`. Multiple-symbol requests return a dictionary keyed by canonical symbol.
+- Never use a pandas DataFrame or Series directly as a boolean condition. Test `len(...)`, `.empty`, `.any()`, or `.all()` explicitly.
 - Use `indicator(name, symbol, **params)`, `factor(name, symbol, **params)`, or `get_factors(symbols, names, **params)` for technical factors.
 - TA-Lib indicators and factors are available through the registered 129-function adapter; use canonical TA-Lib names and valid parameters.
 - Use `get_fundamentals(fields, symbols)` only for real point-in-time fundamental fields supported by the platform. Do not invent fields or use future reports.
@@ -54,11 +59,12 @@ Return Python source only. Do not use markdown fences or explanatory prose.
 ## Orders and positions
 - Order-helper signatures are exact: `order(symbol, amount)`, `order_value(symbol, value)`, `order_target(symbol, amount)`, `order_target_value(symbol, value)`, and `order_target_percent(symbol, percent)`.
 - These are runtime-bound global helpers. Never pass `context` as their first argument. Optional execution and protection values must be keyword arguments after the two required arguments.
-- `get_position(symbol)` returns a `Position` object. Read `position.amount`, `position.avg_cost`, and `position.last_price` directly; never use dictionary membership, subscripting, `.get(...)`, or `getattr(...)` on it.
+- `get_position(symbol)` returns a `Position` object; swap code adds the optional keyword `position_side`. Read `position.amount`, `position.avg_cost`, and `position.last_price` directly; never use dictionary membership, subscripting, `.get(...)`, or `getattr(...)` on it.
 - A `Position` has no `.quantity` or `.cost_basis`; use `.amount` and `.avg_cost`.
 - Use `get_positions(...)` when a dictionary of multiple positions is required.
 - Values passed to value-based order APIs are quote-currency exposure targets. Keep sizing bounded by available capital and explicit allocation rules.
 - Keep long entry, long exit, short entry, and short exit conditions independent. A bearish long exit is not automatically a short entry.
+- Give every order a stable, non-empty `reason` for auditability.
 - Spot and all non-crypto markets are long-only for now.
 
 ## Contract leverage
@@ -141,7 +147,7 @@ SCRIPT_STRATEGY_REPAIR_REQUIREMENTS = """# Strategy API V2 repair requirements
 - Enforce exact history signatures: `get_history(count, frequency, field, security_list)` and `data.history(symbols, count, fields, frequency=None)`. A single-symbol result is already a DataFrame.
 - Use `data.current(symbol, field="close", frequency=None)` for a current scalar field. Replace every `get_current_data` call; that API does not exist.
 - Enforce exact order signatures such as `order_target_percent(symbol, percent)` and never pass `context` to a global order helper.
-- Treat `get_position(symbol)` as a `Position` object with direct `.amount`, `.avg_cost`, and `.last_price` attributes. Never treat it as a dictionary or use `getattr`.
+- Treat `get_position(symbol)` as a `Position` object with direct `.amount`, `.avg_cost`, and `.last_price` attributes; swap code adds `position_side` as a keyword. Never treat it as a dictionary or use `getattr`.
 - Replace legacy `.quantity` and `.cost_basis` position access with `.amount` and `.avg_cost`.
 - Preserve completed-data-only execution and remove look-ahead.
 - Preserve native multi-timeframe subscriptions when requested: keep every user-requested timeframe, subscribe every used timeframe, let the fastest timeframe drive execution, and never expose a higher-timeframe bar before its close.
@@ -151,7 +157,12 @@ SCRIPT_STRATEGY_REPAIR_REQUIREMENTS = """# Strategy API V2 repair requirements
 - Keep symbol, market, frequency, schedule, and universe in source code.
 - Permit user-adjustable leverage only for Crypto `@swap` instruments and only after `context.allow_leverage(max_leverage=N)`.
 - Reject leverage for Crypto spot and every non-Crypto market.
+- `direction_mode` accepts exactly `long_only`, `short_only`, `both`, or `neutral`. Map long-and-short, both directions, bidirectional trading, `多空双向`, and `双向/多空` to `context.set_metadata(direction_mode="both")`; never preserve or invent any other literal while repairing.
+- Keep direction metadata consistent with executable order behavior. Repair a requested `both` strategy so that it contains real long and short entry/exit behavior rather than changing metadata alone.
 - Keep long exits separate from short entries and do not invent reversals.
+- Give every order a stable, non-empty `reason`.
+- Never use a pandas DataFrame or Series directly as a boolean condition; use an explicit size, emptiness, `.any()`, or `.all()` check.
+- Keep market-data reads, position reads, and orders out of `initialize`; it is executed during manifest discovery.
 - Do not use unsafe file, network, reflection, dynamic execution, or process APIs.
 """
 

@@ -72,6 +72,14 @@ def test_strategy_generation_prompt_documents_parameter_discovery_boundary():
     assert "initial capital, date range, commission, or slippage" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
 
 
+def test_strategy_generation_prompt_maps_bidirectional_requests_to_the_canonical_direction_mode():
+    for prompt in (SCRIPT_STRATEGY_SYSTEM_PROMPT, SCRIPT_STRATEGY_REPAIR_REQUIREMENTS):
+        assert "`long_only`, `short_only`, `both`, or `neutral`" in prompt
+        assert "多空双向" in prompt
+        assert 'direction_mode="both"' in prompt
+        assert "changing only the metadata" in prompt or "changing metadata alone" in prompt
+
+
 def test_strategy_generation_prompt_preserves_native_multi_timeframes():
     for frequency in ("5m", "15m", "30m", "1h", "4h", "1d", "1w"):
         assert f"`{frequency}`" in SCRIPT_STRATEGY_SYSTEM_PROMPT
@@ -159,7 +167,7 @@ def test_strategy_generator_repairs_invalid_model_output_once(monkeypatch):
     monkeypatch.setattr(strategy_route, "compile_strategy_v2", fake_compile)
     llm = FakeLLM()
 
-    code, program = strategy_route._compile_or_repair_generated_strategy(
+    code, program, behavior = strategy_route._compile_or_repair_generated_strategy(
         llm,
         "Build a moving-average strategy",
         "invalid source",
@@ -167,7 +175,95 @@ def test_strategy_generator_repairs_invalid_model_output_once(monkeypatch):
 
     assert code == "repaired source"
     assert isinstance(program, FakeProgram)
+    assert behavior["executed"] is False
     assert compile_calls == ["invalid source", "repaired source"]
     assert len(llm.calls) == 1
     assert llm.calls[0]["temperature"] == 0.15
     assert SCRIPT_STRATEGY_REPAIR_REQUIREMENTS in llm.calls[0]["messages"][1]["content"]
+
+
+def test_strategy_generator_uses_a_bounded_second_error_directed_repair(monkeypatch):
+    from app.routes import strategy as strategy_route
+
+    compile_calls = []
+
+    class FakeManifest:
+        strategy_type = "cta"
+
+    class FakeProgram:
+        manifest = FakeManifest()
+
+    def fake_compile(code):
+        compile_calls.append(code)
+        if code != "valid source":
+            raise ValueError(f"invalid:{code}")
+        return FakeProgram()
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def call_llm_api(self, **kwargs):
+            self.calls.append(kwargs)
+            return "still invalid" if len(self.calls) == 1 else "valid source"
+
+        def get_code_generation_model(self):
+            return "test-model"
+
+    monkeypatch.setattr(strategy_route, "compile_strategy_v2", fake_compile)
+    llm = FakeLLM()
+
+    code, _program, _behavior = strategy_route._compile_or_repair_generated_strategy(
+        llm,
+        "Build a moving-average strategy",
+        "first invalid",
+    )
+
+    assert code == "valid source"
+    assert compile_calls == ["first invalid", "still invalid", "valid source"]
+    assert len(llm.calls) == 2
+    assert "invalid:still invalid" in llm.calls[1]["messages"][1]["content"]
+
+
+def test_strategy_generator_repairs_runtime_behavior_failures(monkeypatch):
+    from app.routes import strategy as strategy_route
+
+    class FakeManifest:
+        strategy_type = "cta"
+
+    class FakeProgram:
+        manifest = FakeManifest()
+
+    behavior_calls = []
+
+    def fake_behavior(code, _manifest, _intent):
+        behavior_calls.append(code)
+        if code == "static-only candidate":
+            raise ValueError("strategyV2.aiBehaviorOpenLegMissing:long,short")
+        return {"executed": True}
+
+    class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
+        def call_llm_api(self, **kwargs):
+            self.calls.append(kwargs)
+            return "runtime-valid candidate"
+
+        def get_code_generation_model(self):
+            return "test-model"
+
+    monkeypatch.setattr(strategy_route, "compile_strategy_v2", lambda _code: FakeProgram())
+    monkeypatch.setattr(strategy_route, "validate_strategy_ai_behavior", fake_behavior)
+    llm = FakeLLM()
+
+    code, _program, behavior = strategy_route._compile_or_repair_generated_strategy(
+        llm,
+        "Build a bidirectional Supertrend strategy",
+        "static-only candidate",
+    )
+
+    assert code == "runtime-valid candidate"
+    assert behavior == {"executed": True}
+    assert behavior_calls == ["static-only candidate", "runtime-valid candidate"]
+    assert "aiBehaviorOpenLegMissing" in llm.calls[0]["messages"][1]["content"]

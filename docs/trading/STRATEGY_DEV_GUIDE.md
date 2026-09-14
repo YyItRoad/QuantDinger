@@ -573,7 +573,7 @@ order_target_percent(
 )
 ~~~
 
-Or set defaults for later entries:
+Or set defaults inside an executable handler/scheduled callback before later entries (do not call this in <code>initialize</code>; manifest discovery does not retain runtime protection state):
 
 ~~~python
 set_default_protection(
@@ -987,6 +987,13 @@ Martingale rules:
 - Martingale is a high-tail-risk sizing method. Always cap total deployed capital, levels, leverage, stop loss, and restart-after-stop behavior.
 
 ---
+
+## Backtest drawdown and insolvency semantics
+
+- Total return compares final equity with initial capital. Drawdown compares each equity observation with the highest equity reached so far, including initial capital. For example, 100 → 135.68 → 94.52 means approximately -5.48% total return and -30.34% maximum drawdown.
+- Strategy API V2 reports drawdowns as negative percentages. The summary and per-point drawdowns use the full recorded equity curve. History compaction preserves the maximum-drawdown peak/trough, equity extrema, and the first non-positive observation with its predecessor.
+- Insolvency is a simplified bar-close model: when marked equity is non-positive, the simulator force-closes positions, records any absorbed deficit in <code>liquidationAdjustment</code>, and stops further strategy orders. Zero final equity means -100% drawdown. This does not model an exchange-specific maintenance-margin tier or intrabar liquidation price; do not interpret the result as such.
+- Previously saved, uniformly sampled histories can already be missing critical chart points. Re-run those backtests to save curves using the new sampling policy; existing stored results are not rewritten automatically.
 
 ## 21. Pre-publication checklist
 

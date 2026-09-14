@@ -60,10 +60,18 @@ def test_grid_defaults_to_fill_ledger_without_explicit_flag():
     )
 
 
-def test_explicit_position_ledger_overrides_grid_default():
-    assert not strategy_uses_fill_ledger(
+def test_grid_cannot_disable_fill_ledger_ownership():
+    assert strategy_uses_fill_ledger(
         {
             "bot_type": "grid",
             "trading_config": {"position_ledger": "exchange"},
         }
     )
+def test_alpaca_stock_and_crypto_fills_share_spot_bucket_with_unique_instruments():
+    from app.services.live_trading.leg_context import resolve_leg_context, inst_id_for_symbol
+    for symbol, asset_class in [("NVDA", "USStock"), ("AAPL", "USStock"), ("BTC/USD", "crypto")]:
+        leg = resolve_leg_context(strategy_id=1, symbol=symbol, market_type=asset_class,
+                                  exchange_config={"exchange_id": "alpaca", "credential_id": 33})
+        assert leg.market_type == "spot"
+        assert leg.inst_id == symbol
+        assert inst_id_for_symbol(symbol, "spot", "alpaca") == symbol

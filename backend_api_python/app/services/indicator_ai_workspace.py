@@ -22,7 +22,7 @@ WORKSPACE_MESSAGE_LIMIT = 60
 
 _MUTATION_RE = re.compile(
     r"(?:生成|创建|新增|添加|加入|删除|移除|替换|重构|修复|优化|调整|实现|改进|增强|"
-    r"降低|提高|减少|增加|改成|修改|改一下|做一个|画出|标记|"
+    r"降低|提高|减少|增加|改成|修改|改一下|改(?:代码|源码|掉|吧|啊|呀)?|做一个|画出|标记|"
     r"generate|create|add|remove|delete|replace|refactor|fix|optimi[sz]e|"
     r"adjust|implement|improve|change|modify|update)",
     re.IGNORECASE,
@@ -35,9 +35,16 @@ _QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_CHANGE_RE = re.compile(
-    r"(?:帮我|请(?:直接)?|把|将|需要你|替我|直接)(?:.{0,18})"
+    r"(?:帮我|请(?:直接)?|把|将|需要你|替我|我让你|给我|"
+    r"不要(?:再)?.{0,8}解释|按(?:上面|刚才).{0,8})(?:.{0,24})"
     r"(?:生成|创建|新增|添加|加入|删除|移除|替换|重构|修复|优化|调整|实现|改成|修改|"
+    r"改(?:代码|源码|掉|吧|啊|呀)?|写入|应用|执行|"
     r"generate|create|add|remove|delete|replace|refactor|fix|optimi[sz]e|adjust|implement|change|modify|update)",
+    re.IGNORECASE,
+)
+_DIRECT_CHANGE_RE = re.compile(
+    r"^\s*(?:直接|现在就|马上)(?:.{0,12})"
+    r"(?:改(?:代码|源码|掉|吧|啊|呀)?|修改|写入|应用|执行|change|modify|update)",
     re.IGNORECASE,
 )
 
@@ -58,7 +65,7 @@ def classify_indicator_ai_intent(prompt: str, requested_mode: str = "auto") -> s
     text = re.sub(r"\s+", " ", str(prompt or "").strip())
     if not text:
         return "discussion"
-    if _EXPLICIT_CHANGE_RE.search(text):
+    if _EXPLICIT_CHANGE_RE.search(text) or _DIRECT_CHANGE_RE.search(text):
         return "modify"
     if _QUESTION_RE.search(text):
         return "discussion"

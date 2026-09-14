@@ -1,21 +1,21 @@
-"""Account-leg ownership, protected manual inventory, and drift controls.
+"""Account-leg ownership and allocation shortfall controls.
 
 The exchange exposes one aggregate position per account instrument leg.  This
 module keeps the missing ownership layer between the L1 exchange mirror and L3
 strategy ledgers:
 
-    account quantity = strategy allocations + protected manual quantity
+    account quantity >= strategy allocations
 
-Strict mode is the default.  Advanced coexistence is enabled explicitly by a
-user repair action and records the currently unallocated quantity as protected
-manual inventory.  A negative or unexplained delta blocks new entries on that
-leg, while reduce-only exits remain available and are capped so they cannot
-consume the protected quantity.
+Any account surplus is user-owned inventory and never blocks strategy entries.
+Only a material account shortfall blocks new entries on that leg. Reduce-only
+exits remain capped by the strategy ledger, the exchange position, and other
+strategy allocations.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 from typing import Any, Dict, Iterable, List, Tuple
 
 from app.services.live_trading.records import normalize_strategy_symbol
@@ -33,6 +33,18 @@ CRYPTO_COEXISTENCE_EXCHANGES = frozenset({
 })
 DEFAULT_DRIFT_RELATIVE_TOLERANCE = 0.001
 DEFAULT_SHORTFALL_RELATIVE_TOLERANCE = 0.005
+DEFAULT_DRIFT_QUOTE_TOLERANCE = 10.0
+
+
+def quote_drift_tolerance(symbol: str, price: float, quote_limit: float = DEFAULT_DRIFT_QUOTE_TOLERANCE) -> float:
+    symbol = canonical_symbol(symbol).split("@", 1)[0]
+    price = float(price or 0.0)
+    if not symbol.endswith(("/USDT", "/USDC", "/USD")) or not math.isfinite(price) or price <= 0:
+        return 0.0
+    limit = float(quote_limit)
+    if not math.isfinite(limit):
+        limit = DEFAULT_DRIFT_QUOTE_TOLERANCE
+    return min(DEFAULT_DRIFT_QUOTE_TOLERANCE, max(0.0, limit)) / price
 
 
 def normalize_market_type(value: str) -> str:
@@ -43,11 +55,13 @@ def normalize_market_type(value: str) -> str:
 
 
 def supports_position_coexistence(value: str, exchange_id: str = "") -> bool:
-    """Return whether account/strategy inventory can share one Crypto market leg."""
+    """Return whether execution enforces account allocation coverage for this venue."""
     market = normalize_market_type(value)
+    exchange = str(exchange_id or "").strip().lower()
+    if exchange == "alpaca":
+        return market in {"spot", "usstock", "crypto"}
     if market not in COEXISTENCE_MARKET_TYPES:
         return False
-    exchange = str(exchange_id or "").strip().lower()
     return market == "swap" or not exchange or exchange in CRYPTO_COEXISTENCE_EXCHANGES
 
 
@@ -92,24 +106,26 @@ def calculate_position_ownership(
     previous_reason: str = "",
     absolute_tolerance: float = 0.0,
     shortfall_relative_tolerance: float = DEFAULT_SHORTFALL_RELATIVE_TOLERANCE,
+    reference_price: float = 0.0,
 ) -> OwnershipSnapshot:
     """Pure ownership calculation used by execution, APIs, and tests."""
     account = max(0.0, float(account_qty or 0.0))
     strategy = max(0.0, float(strategy_qty or 0.0))
-    protected = max(0.0, float(protected_qty or 0.0))
+    # ``protected_qty`` and coexistence mode remain accepted for API and stored
+    # row compatibility. Protection is now derived from the live surplus so a
+    # stale manual baseline cannot stop entries or consume strategy inventory.
+    protected = max(0.0, account - strategy)
     mode = ADVANCED_MODE if str(coexistence_mode or "").lower() == ADVANCED_MODE else STRICT_MODE
-    if mode == STRICT_MODE:
-        # A stale protected value must never silently weaken strict mode.
-        protected = 0.0
-    expected = strategy + protected
-    unknown = account - expected
-    # Extra inventory is not explained by trading fees, so keep the original
-    # strict 0.1% boundary.  A small account shortfall, however, is expected
-    # after base-asset fees and exchange lot rounding; tolerate up to 0.5% by
-    # default.  The quote-denominated absolute tolerance covers tiny positions
-    # where a percentage alone would be smaller than exchange dust.
-    relative_tolerance = DEFAULT_DRIFT_RELATIVE_TOLERANCE
-    if unknown < 0:
+    expected = strategy
+    unknown = account - strategy
+    # Base-asset fees and exchange lot rounding can leave a small shortfall.
+    # The quote-denominated tolerance covers small positions where a percentage
+    # alone would be smaller than exchange dust. Account surplus is always safe.
+    stable_quote = canonical_symbol(symbol).split("@", 1)[0].endswith(
+        ("/USDT", "/USDC", "/USD")
+    )
+    relative_tolerance = 0.0
+    if stable_quote:
         relative_tolerance = min(
             0.02,
             max(
@@ -121,18 +137,15 @@ def calculate_position_ownership(
         1e-8,
         expected * relative_tolerance,
         max(0.0, float(absolute_tolerance or 0.0)),
+        quote_drift_tolerance(symbol, reference_price),
     )
-    if abs(unknown) <= tolerance:
+    if unknown >= -(tolerance + 1e-12):
         status = STATUS_OK
         reason = ""
         allowed = True
-    elif unknown > 0:
-        status = STATUS_BLOCKED
-        reason = "unallocated_account_position"
-        allowed = False
     else:
         status = STATUS_BLOCKED
-        reason = "account_below_protected_allocation"
+        reason = "account_below_strategy_allocation"
         allowed = False
     should_log = status == STATUS_BLOCKED and (
         str(previous_status or "") != STATUS_BLOCKED
@@ -283,7 +296,15 @@ def is_position_leg_blocked(
         symbol=symbol,
         side=side,
     )
-    return str(row.get("status") or "") == STATUS_BLOCKED
+    if str(row.get("status") or "") != STATUS_BLOCKED:
+        return False
+    # Older releases persisted account surplus as an unallocated-position
+    # block. That state is obsolete under automatic user ownership and must not
+    # prevent the order worker from refreshing the live allocation snapshot.
+    return str(row.get("drift_reason") or "") in {
+        "account_below_strategy_allocation",
+        "account_below_protected_allocation",
+    }
 
 
 def protected_quantity(
@@ -294,6 +315,7 @@ def protected_quantity(
     symbol: str,
     side: str,
 ) -> float:
+    """Return the last observed account surplus for compatibility and display."""
     row = _fetch_reservation(
         user_id=user_id,
         credential_id=credential_id,
@@ -301,9 +323,11 @@ def protected_quantity(
         symbol=symbol,
         side=side,
     )
-    if str(row.get("coexistence_mode") or STRICT_MODE) != ADVANCED_MODE:
-        return 0.0
-    return max(0.0, float(row.get("manual_reserved_qty") or 0.0))
+    return max(
+        0.0,
+        float(row.get("observed_account_qty") or 0.0)
+        - float(row.get("allocated_qty") or 0.0),
+    )
 
 
 def repair_position_ownership(
@@ -318,12 +342,17 @@ def repair_position_ownership(
     strategy_qty: float,
     action: str,
     inst_id: str = "",
+    reference_price: float = 0.0,
 ) -> OwnershipSnapshot:
     """Apply an explicit user repair action and return the resulting snapshot."""
+    if not all(math.isfinite(float(value or 0)) for value in (account_qty, strategy_qty, reference_price)):
+        raise ValueError("positionOwnership.snapshotUnavailable")
+    if str(exchange_id or "").lower() == "alpaca":
+        market_type = "spot"
     action_name = str(action or "").strip().lower()
-    if action_name not in {"protect_manual", "strict_mode", "recheck"}:
+    if action_name not in {"protect_manual", "reset_protection", "strict_mode", "recheck"}:
         raise ValueError("positionOwnership.invalidRepairAction")
-    if action_name == "protect_manual" and not supports_position_coexistence(
+    if action_name in {"protect_manual", "reset_protection"} and not supports_position_coexistence(
         market_type, exchange_id
     ):
         raise ValueError("positionOwnership.coexistenceMarketUnsupported")
@@ -335,15 +364,15 @@ def repair_position_ownership(
         side=side,
     )
     mode = str(existing.get("coexistence_mode") or STRICT_MODE)
-    manual = max(0.0, float(existing.get("manual_reserved_qty") or 0.0))
-    if action_name == "protect_manual":
+    manual = max(0.0, float(account_qty or 0.0) - float(strategy_qty or 0.0))
+    if action_name in {"protect_manual", "reset_protection"}:
+        if action_name == "reset_protection" and mode != ADVANCED_MODE:
+            raise ValueError("positionOwnership.invalidRepairAction")
         if float(account_qty or 0.0) + 1e-8 < float(strategy_qty or 0.0):
             raise ValueError("positionOwnership.accountBelowStrategyAllocation")
         mode = ADVANCED_MODE
-        manual = max(0.0, float(account_qty or 0.0) - float(strategy_qty or 0.0))
     elif action_name == "strict_mode":
         mode = STRICT_MODE
-        manual = 0.0
 
     snapshot = calculate_position_ownership(
         symbol=symbol,
@@ -352,6 +381,7 @@ def repair_position_ownership(
         strategy_qty=strategy_qty,
         protected_qty=manual,
         coexistence_mode=mode,
+        reference_price=reference_price,
     )
     with get_db_connection() as db:
         cur = db.cursor()
@@ -424,6 +454,13 @@ def build_ownership_rows(
             values[key] = values.get(key, 0.0) + max(0.0, float(row.get("size") or 0.0))
         return values
 
+    account_rows = list(account_rows)
+    allocated_rows = list(allocated_rows)
+    prices = {}
+    for row in account_rows + allocated_rows:
+        price = float(row.get("mark_price") or row.get("current_price") or 0.0)
+        if math.isfinite(price) and price > 0:
+            prices[canonical_symbol(row.get("symbol") or "")] = price
     account = aggregate(account_rows)
     allocated = aggregate(allocated_rows)
     reservations = {
@@ -438,10 +475,23 @@ def build_ownership_rows(
             strategy_qty=allocated.get(key, 0.0),
             protected_qty=float(row.get("manual_reserved_qty") or 0.0),
             coexistence_mode=str(row.get("coexistence_mode") or STRICT_MODE),
+            reference_price=prices.get(key[0], 0.0),
         )
         item = snap.metadata()
         item["inst_id"] = str(row.get("inst_id") or "")
         item["updated_at"] = row.get("updated_at")
+        item["reference_price"] = prices.get(key[0], 0.0)
+        item["difference_quote"] = snap.unknown_qty * prices[key[0]] if key[0] in prices else None
+        item["repair_kind"] = (
+            "none" if snap.allowed else "allocation_shortfall"
+        )
+        item["allocations"] = [
+            {"strategy_id": allocation.get("strategy_id"), "strategy_name": allocation.get("strategy_name"),
+             "status": allocation.get("status"), "quantity": float(allocation.get("size") or 0.0)}
+            for allocation in allocated_rows
+            if canonical_symbol(allocation.get("symbol") or "") == key[0]
+            and normalize_side(allocation.get("side") or "") == key[1]
+        ]
         output.append(item)
     return output
 

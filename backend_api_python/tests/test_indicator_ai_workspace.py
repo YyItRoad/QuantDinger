@@ -39,9 +39,19 @@ def test_indicator_ai_intent_routes_only_explicit_changes_to_code_generation():
         "把 ATR 周期改成 20",
         "请减少重复信号并优化事件标记",
         "修复重复买入标记",
+        "我让你直接在代码里改啊",
+        "我让你改啊",
+        "不要再解释，直接改代码",
+        "按上面说的改吧",
         "Add a configurable RSI filter",
     ):
         assert classify_indicator_ai_intent(prompt) == "modify"
+
+    for prompt in (
+        "为什么不能直接改代码？",
+        "你能直接改代码吗？",
+    ):
+        assert classify_indicator_ai_intent(prompt) == "discussion"
 
     assert classify_indicator_ai_intent("解释指标", "modify") == "modify"
     assert classify_indicator_ai_intent("优化配色", "discussion") == "discussion"

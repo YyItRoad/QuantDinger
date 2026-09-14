@@ -35,6 +35,7 @@ class GridMarketOrderExecution:
     commission_ccy: str = ""
     commission_quote: Optional[float] = None
     fees_by_ccy: Dict[str, float] = field(default_factory=dict)
+    fee_status: str = "pending"
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def __iter__(self):
@@ -479,6 +480,11 @@ def wait_grid_market_fill(
             if details is not None and isinstance(q, dict):
                 details.update(q)
             return float(q.get("filled") or 0), float(q.get("avg_price") or 0)
+        if isinstance(client, GateSpotClient):
+            q = client.wait_for_fill(order_id=ex_oid, symbol=str(symbol), max_wait_sec=max_wait_sec)
+            if details is not None and isinstance(q, dict):
+                details.update(q)
+            return float(q.get("filled") or 0), float(q.get("avg_price") or 0)
         if isinstance(client, GateUsdtFuturesClient) and hasattr(client, "wait_for_fill"):
             contract = to_gate_currency_pair(str(symbol))
             q = client.wait_for_fill(
@@ -636,6 +642,10 @@ def execute_grid_market_order(
         commission_ccy=commission_ccy,
         commission_quote=commission_quote,
         fees_by_ccy=fees,
+        fee_status=str(
+            details.get("fee_status")
+            or ("actual" if fees else "pending")
+        ),
         raw=details,
     )
 
@@ -651,6 +661,14 @@ def cancel_grid_order(
 ) -> None:
     mt = str(market_type or "swap").strip().lower()
     ex_cfg = exchange_config if isinstance(exchange_config, dict) else {}
+    if isinstance(client, (GateSpotClient, GateUsdtFuturesClient)):
+        if not exchange_order_id:
+            raise LiveTradingError("Gate cancellation requires a confirmed exchange order ID")
+        if isinstance(client, GateSpotClient):
+            client.cancel_order(order_id=str(exchange_order_id), symbol=str(symbol))
+        else:
+            client.cancel_order(order_id=str(exchange_order_id))
+        return
     if isinstance(client, OkxClient):
         client.cancel_order(
             market_type=mt,
@@ -813,6 +831,11 @@ def _parse_grid_order_fill(data: Dict[str, Any]) -> Tuple[float, float, str]:
     if not data:
         return 0.0, 0.0, "unknown"
     from app.services.grid.fill_units import order_status_from_data
+    from app.services.live_trading.gate_spot_fill import parse_gate_spot_fill
+
+    if "filled_amount" in data:
+        filled, avg = parse_gate_spot_fill(data)
+        return filled, avg, order_status_from_data(data)
 
     filled = float(
         data.get("baseVolume")
@@ -881,6 +904,8 @@ def _fetch_grid_client_order(
     if isinstance(client, (GateSpotClient, GateUsdtFuturesClient)):
         if not oid:
             return {}
+        if isinstance(client, GateSpotClient):
+            return _unwrap_client_order_payload(client.get_order(order_id=oid, symbol=str(symbol)))
         return _unwrap_client_order_payload(client.get_order(order_id=oid))
     if isinstance(client, HtxClient):
         return client.get_order(symbol=str(symbol), order_id=oid, client_order_id=coid)

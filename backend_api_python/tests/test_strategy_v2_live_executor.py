@@ -1,6 +1,7 @@
 import inspect
 
 import pandas as pd
+import pytest
 import app.services.trading_executor as trading_executor
 
 from app.services.strategy_v2 import OrderIntent
@@ -110,6 +111,41 @@ def test_target_percent_opens_position_with_explicit_quantity():
     assert captured["market_type"] == "swap"
     assert captured["price_exchange_id"] == "okx"
     assert captured["strategy_run_id"] == 42
+
+
+def test_live_target_percent_compounds_with_strategy_equity():
+    executor = TradingExecutor.__new__(TradingExecutor)
+    executor._get_current_positions = lambda *_args: []
+    captured = {}
+
+    def execute_signal(**kwargs):
+        captured.update(kwargs)
+        return True
+
+    executor._execute_signal = execute_signal
+    intent = OrderIntent(symbol=_member()["key"], kind="target_percent", value=0.25)
+
+    result = executor._execute_strategy_v2_intent(
+        strategy_id=7,
+        strategy_name="V2 CTA",
+        intent=intent,
+        frames={_member()["key"]: _frame()},
+        candidates=[_member()],
+        initial_capital=10_000.0,
+        strategy_equity=12_000.0,
+        leverage=2.0,
+        execution_mode="live",
+        notification_config={},
+        trading_config={},
+        exchange_config={},
+        signal_ts=1,
+        strategy_run_id=42,
+    )
+
+    assert result is True
+    assert captured["script_base_qty"] == 60.0
+    assert captured["initial_capital"] == 10_000.0
+    assert captured["strategy_equity"] == 12_000.0
 
 
 def test_spot_target_percent_does_not_expand_with_leverage():
@@ -347,8 +383,15 @@ def test_target_rebalance_skips_sub_dollar_dust_order():
     assert calls == []
 
 
-def test_live_order_carries_run_sizing_diagnostics():
-    executor = TradingExecutor.__new__(TradingExecutor)
+@pytest.mark.parametrize("lease_owned", [None, True, False])
+def test_live_order_carries_run_sizing_diagnostics(lease_owned):
+    executor = TradingExecutor()
+    guard_calls = []
+    if lease_owned is not None:
+        def guard(strategy_id):
+            guard_calls.append(strategy_id)
+            return lease_owned
+        executor.runtime_guard = guard
     executor._load_strategy = lambda _strategy_id: {"user_id": 12}
     captured = {}
 
@@ -373,6 +416,10 @@ def test_live_order_carries_run_sizing_diagnostics():
     )
 
     assert result is False
+    assert guard_calls == ([] if lease_owned is None else [7])
+    if lease_owned is False:
+        assert captured == {}
+        return
     assert captured["request"].sizing == {
         "initial_capital": 100.0,
         "entry_pct": 30.0,
@@ -450,7 +497,7 @@ def test_stopped_live_strategy_does_not_queue_remaining_callback_orders():
 
 
 def test_limit_queue_log_identifies_grid_level_order(monkeypatch):
-    executor = TradingExecutor.__new__(TradingExecutor)
+    executor = TradingExecutor()
     executor._load_strategy = lambda _strategy_id: {
         "user_id": 12,
         "status": "running",

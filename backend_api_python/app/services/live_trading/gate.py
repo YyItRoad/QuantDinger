@@ -23,6 +23,7 @@ from urllib.parse import urlencode
 
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
 from app.services.live_trading.symbols import to_gate_currency_pair
+from app.services.live_trading.gate_spot_fill import parse_gate_spot_fill
 from app.utils.numeric_precision import floor_decimal_to_step
 
 logger = logging.getLogger(__name__)
@@ -236,15 +237,21 @@ class GateSpotClient(_GateBase):
         oid = str(raw.get("id") or "") if isinstance(raw, dict) else ""
         return LiveOrderResult(exchange_id="gate", exchange_order_id=oid, filled=0.0, avg_price=0.0, raw=raw if isinstance(raw, dict) else {"raw": raw})
 
-    def cancel_order(self, *, order_id: str) -> Any:
+    def cancel_order(self, *, order_id: str, symbol: str) -> Any:
         if not order_id:
             raise LiveTradingError("Gate spot cancel_order requires order_id")
-        return self._signed_request("DELETE", f"/api/v4/spot/orders/{str(order_id)}")
+        if not str(symbol or "").strip():
+            raise LiveTradingError("Gate spot cancel_order requires symbol")
+        return self._signed_request("DELETE", f"/api/v4/spot/orders/{str(order_id)}",
+                                    params={"currency_pair": to_gate_currency_pair(symbol)})
 
-    def get_order(self, *, order_id: str) -> Any:
+    def get_order(self, *, order_id: str, symbol: str) -> Any:
         if not order_id:
             raise LiveTradingError("Gate spot get_order requires order_id")
-        return self._signed_request("GET", f"/api/v4/spot/orders/{str(order_id)}")
+        if not str(symbol or "").strip():
+            raise LiveTradingError("Gate spot get_order requires symbol")
+        return self._signed_request("GET", f"/api/v4/spot/orders/{str(order_id)}",
+                                    params={"currency_pair": to_gate_currency_pair(symbol)})
 
     def get_spot_trades_for_order(self, *, order_id: str, currency_pair: str) -> Tuple[float, str]:
         """Aggregate the actual fee from Gate spot fill history for a given order.
@@ -283,13 +290,13 @@ class GateSpotClient(_GateBase):
                     ccy = str(t.get("fee_currency") or "").strip()
         return total, ccy
 
-    def wait_for_fill(self, *, order_id: str, max_wait_sec: float = 10.0, poll_interval_sec: float = 0.5) -> Dict[str, Any]:
+    def wait_for_fill(self, *, order_id: str, symbol: str, max_wait_sec: float = 10.0, poll_interval_sec: float = 0.5) -> Dict[str, Any]:
         end_ts = time.time() + float(max_wait_sec or 0.0)
         last: Dict[str, Any] = {}
         while True:
             timed_out = time.time() >= end_ts
             try:
-                resp = self.get_order(order_id=str(order_id))
+                resp = self.get_order(order_id=str(order_id), symbol=symbol)
                 last = resp if isinstance(resp, dict) else {"raw": resp}
             except Exception:
                 last = last or {}
@@ -298,16 +305,7 @@ class GateSpotClient(_GateBase):
             avg_price = 0.0
             fee = 0.0
             fee_ccy = ""
-            try:
-                filled = float(last.get("filled_amount") or 0.0)
-            except Exception:
-                filled = 0.0
-            try:
-                filled_total = float(last.get("filled_total") or 0.0)
-                if filled > 0 and filled_total > 0:
-                    avg_price = filled_total / filled
-            except Exception:
-                avg_price = 0.0
+            filled, avg_price = parse_gate_spot_fill(last)
             # Extract fee from Gate API
             try:
                 fee = abs(float(last.get("fee") or 0.0))
@@ -565,12 +563,12 @@ class GateUsdtFuturesClient(_GateBase):
         return None
 
     def get_positions(self) -> Any:
-        mode = self.get_position_mode()
-        path = (
-            "/api/v4/futures/usdt/dual_comp/positions"
-            if mode == "dual"
-            else "/api/v4/futures/usdt/positions"
-        )
+        # Gate exposes one collection endpoint for every supported position
+        # mode.  In dual mode the response contains separate ``dual_long`` and
+        # ``dual_short`` rows.  ``dual_comp/positions`` is not a collection
+        # endpoint: Gate only defines ``dual_comp/positions/{contract}``, so
+        # routing a dual account there without a contract produces a bare 404.
+        path = "/api/v4/futures/usdt/positions"
         return self._signed_request(
             "GET", path,
             extra_headers={"X-Gate-Size-Decimal": "1"},

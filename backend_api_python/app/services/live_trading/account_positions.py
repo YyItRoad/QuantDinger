@@ -209,13 +209,14 @@ def reconcile_strategy_vs_account(
     allocated_rows: Optional[List[Dict[str, Any]]] = None,
     protected_rows: Optional[List[Dict[str, Any]]] = None,
     eps: float = 1e-8,
-    size_tolerance_ratio: float = 0.01,
+    size_tolerance_ratio: float = 0.005,
 ) -> Dict[str, Any]:
     """
     Compare L3 strategy snapshot vs L1 account mirror for the same symbols.
 
+    Account surplus is user-owned inventory and therefore reconciles as ``ok``.
     Returns ``{status, notes}`` where status is one of:
-    ok | account_only | strategy_only | mismatch
+    ok | strategy_only | mismatch
     """
     def aggregate(rows: List[Dict[str, Any]]) -> Dict[tuple, float]:
         output: Dict[tuple, float] = {}
@@ -238,32 +239,31 @@ def reconcile_strategy_vs_account(
         allocated_rows if allocated_rows is not None else (local_rows or [])
     )
     include_ownership = protected_rows is not None
-    protected: Dict[tuple, float] = {}
-    for row in protected_rows or []:
-        if str(row.get("coexistence_mode") or "strict") != "advanced":
-            continue
-        sym = normalize_strategy_symbol(
-            str(row.get("symbol_canonical") or row.get("symbol") or "")
-        ).upper()
-        side = str(row.get("side") or "").strip().lower()
-        if not sym or side not in ("long", "short"):
-            continue
-        try:
-            qty = max(0.0, float(row.get("manual_reserved_qty") or 0.0))
-        except Exception:
-            qty = 0.0
-        if qty > eps:
-            protected[(sym, side)] = protected.get((sym, side), 0.0) + qty
     acct: Dict[tuple, float] = aggregate(account_rows or [])
+    from app.services.live_trading.position_ownership import quote_drift_tolerance
+
+    prices = {}
+    for row in (account_rows or []) + (local_rows or []):
+        price = float(row.get("mark_price") or row.get("current_price") or 0.0)
+        if price > 0:
+            prices[normalize_strategy_symbol(str(row.get("symbol") or "")).upper()] = price
 
     notes: List[str] = []
     status = "ok"
-    for key in set(allocations.keys()) | set(protected.keys()) | set(acct.keys()):
+    for key in set(allocations.keys()) | set(acct.keys()):
         allocated_size = float(allocations.get(key, 0.0))
-        protected_size = float(protected.get(key, 0.0))
-        expected_size = allocated_size + protected_size
         account_size = float(acct.get(key, 0.0))
+        protected_size = max(0.0, account_size - allocated_size)
+        expected_size = allocated_size
         sym, side = key
+        stable_quote = sym.split("@", 1)[0].endswith(("/USDT", "/USDC", "/USD"))
+        tol = max(
+            eps,
+            expected_size * size_tolerance_ratio if stable_quote else 0.0,
+            quote_drift_tolerance(sym, prices.get(sym, 0.0)),
+        )
+        if account_size >= expected_size or expected_size - account_size <= tol:
+            continue
         if expected_size <= eps and account_size <= eps:
             continue
         if expected_size > eps and account_size <= eps:
@@ -275,15 +275,8 @@ def reconcile_strategy_vs_account(
                 )
             notes.append(note)
             status = "strategy_only" if status == "ok" else "mismatch"
-        elif expected_size <= eps and account_size > eps:
-            note = f"account_only:{sym}:{side}:account={account_size}"
-            if include_ownership:
-                note += ":strategy=0:protected=0"
-            notes.append(note)
-            status = "account_only" if status == "ok" else "mismatch"
         else:
-            tol = max(eps, expected_size * size_tolerance_ratio)
-            if abs(expected_size - account_size) > tol:
+            if expected_size - account_size > tol:
                 note = f"size_mismatch:{sym}:{side}:allocated={allocated_size}:account={account_size}"
                 if include_ownership:
                     note = (
@@ -297,8 +290,8 @@ def reconcile_strategy_vs_account(
     for key, local_size in sorted(local.items()):
         sym, side = key
         allocated_size = float(allocations.get(key, 0.0))
-        protected_size = float(protected.get(key, 0.0))
         account_size = float(acct.get(key, 0.0))
+        protected_size = max(0.0, account_size - allocated_size)
         share = {
             "symbol": sym,
             "side": side,
@@ -323,23 +316,31 @@ def list_strategy_allocations_for_account(
     credential_id: int,
     market_type: str,
     allowed_symbols: Optional[set] = None,
+    exchange_id: str = "",
 ) -> List[Dict[str, Any]]:
     """List all strategy-owned legs for one credential and market."""
     mt = str(market_type or "swap").strip().lower()
     if mt in ("future", "futures", "perp", "perpetual"):
         mt = "swap"
+    market_types = [mt]
+    if str(exchange_id).lower() == "alpaca":
+        # Historical Alpaca fills used asset classes instead of the spot bucket.
+        market_types = ["spot", "usstock", "crypto"]
     with get_db_connection() as db:
         cur = db.cursor()
         cur.execute(
             """
-            SELECT p.strategy_id, p.symbol, p.side, p.size
+            SELECT p.strategy_id, s.strategy_name, s.status, p.symbol, p.side, p.size
             FROM qd_strategy_positions p
             JOIN qd_strategies_trading s ON s.id = p.strategy_id
             WHERE s.user_id = %s AND s.execution_mode = 'live'
-              AND p.market_type = %s AND p.size > 0
-              AND (p.credential_id = %s OR %s = 0)
+              AND LOWER(p.market_type) = ANY(%s) AND p.size > 0
+              AND (p.credential_id = %s OR %s = 0
+                   OR (COALESCE(p.credential_id, 0) = 0
+                       AND COALESCE(NULLIF(s.exchange_config::jsonb->>'credential_id', ''),
+                                    s.exchange_config::jsonb->>'credentials_id') = %s))
             """,
-            (int(user_id), mt, int(credential_id or 0), int(credential_id or 0)),
+            (int(user_id), market_types, int(credential_id or 0), int(credential_id or 0), str(credential_id or 0)),
         )
         rows = [dict(row) for row in (cur.fetchall() or [])]
         cur.close()

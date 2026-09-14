@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
+from time import perf_counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any, Callable
@@ -19,14 +21,19 @@ from app.services.backtest_limits import (
 from app.services.fundamental_data import get_fundamental_data_service
 from app.services.instrument_rules import InstrumentRulesProvider, get_instrument_rules_provider
 from app.services.universe import UniverseService, get_universe_service
+from app.utils.logger import get_logger
 
 from .contract import StrategyV2ContractError, compile_strategy_v2
 from .factor_research import FactorResearchEngine
 from .models import InstrumentSpec, StrategyManifest
 from .market_data import load_strategy_frame
 from .runtime import StrategyV2BacktestRunner
+from .readiness import validate_universe_history, validate_warmup, validate_fundamentals
 from .snapshot import MarketDataSnapshotStore, canonical_frame_bytes
 from .storage import StrategyBacktestRepository
+
+
+logger = get_logger(__name__)
 
 
 class StrategyV2BacktestService:
@@ -85,7 +92,7 @@ class StrategyV2BacktestService:
             )
         frequency = manifest.driving_frequency
         warmup_bars = max(40, manifest.warmup_bars)
-        fetch_start = start_date - timedelta(days=backtest_warmup_calendar_days(frequency, warmup_bars))
+        fetch_start = start_date - timedelta(days=_warmup_calendar_days(frequency, warmup_bars, candidates))
         _enforce_backtest_range(
             candidates=candidates,
             timeframe=frequency,
@@ -143,6 +150,7 @@ class StrategyV2BacktestService:
         strategy_name: str = "",
         instrument_rules_snapshot_id: str = "",
     ) -> tuple[int | None, dict[str, Any]]:
+        started_at = perf_counter()
         program = compile_strategy_v2(code)
         manifest = program.manifest
         if end_date <= start_date:
@@ -162,7 +170,7 @@ class StrategyV2BacktestService:
         frequency = manifest.driving_frequency
         fetch_starts = {
             item: start_date
-            - timedelta(days=backtest_warmup_calendar_days(item, manifest.warmup_bars))
+            - timedelta(days=_warmup_calendar_days(item, manifest.warmup_bars, candidates))
             for item in manifest.frequencies
         }
         for item in manifest.frequencies:
@@ -174,6 +182,7 @@ class StrategyV2BacktestService:
                 warmup_bars=manifest.warmup_bars,
                 fetch_start=fetch_starts[item],
             )
+        data_at = perf_counter()
         frequency_frames, skipped = self.fetch_frequency_frames(
             candidates,
             manifest.frequencies,
@@ -183,6 +192,7 @@ class StrategyV2BacktestService:
         frames = frequency_frames.get(frequency, {})
         if not frames:
             raise StrategyV2ContractError("strategyV2.noMarketData")
+        validate_warmup(frequency_frames, manifest.warmup_bars, start_date, candidates)
         if manifest.fundamental_dependencies:
             enricher = self.fundamental_enricher or get_fundamental_data_service().enrich_panel
             frames = enricher(frames, candidates)
@@ -205,6 +215,7 @@ class StrategyV2BacktestService:
                 persist=self.data_kind == "market" and persist,
             )
 
+        replay_at = perf_counter()
         runner = StrategyV2BacktestRunner(
             code=code,
             frames=frames,
@@ -219,6 +230,7 @@ class StrategyV2BacktestService:
             instrument_rules=rules_snapshot,
         )
         result = runner.run(start_date=start_date, end_date=end_date)
+        report_at = perf_counter()
         result["reviewCandles"] = _build_review_candle_snapshots(
             frames,
             result.get("closedTrades") or [],
@@ -321,12 +333,15 @@ class StrategyV2BacktestService:
             "leverage": float(leverage if leverage_enabled else 1.0),
             "commission": float(commission),
             "slippage": float(slippage),
+            "cryptoRebalanceToleranceQuote": 10.0,
+            "subLotClosePolicy": "reconcile_up_to_10_quote_with_cash_and_fees",
             "fundingMode": "not_modeled",
             "drivingFrequency": frequency,
             "frequencies": list(manifest.frequencies),
             "higherTimeframePolicy": "completed_before_driving_bar_close",
         }
 
+        persistence_at = perf_counter()
         run_id = None
         if persist:
             if self.data_kind != "market":
@@ -350,6 +365,15 @@ class StrategyV2BacktestService:
                 result=result,
                 code=code,
             )
+        completed_at = perf_counter()
+        logger.info("Strategy V2 backtest timing run_id=%s symbols=%s frequency=%s seconds=%s", run_id, len(frames), frequency, {
+            "prepare": round(data_at - started_at, 6),
+            "market_data_and_rules": round(replay_at - data_at, 6),
+            "simulation": round(report_at - replay_at, 6),
+            "report_and_snapshots": round(persistence_at - report_at, 6),
+            "persistence": round(completed_at - persistence_at, 6),
+            "total": round(completed_at - started_at, 6),
+        })
         return run_id, result
 
     def resolve_candidates(
@@ -367,6 +391,7 @@ class StrategyV2BacktestService:
         universe = next((item for item in self.universe_service.list_universes(user_id) if _universe_matches(item, reference)), None)
         if not universe:
             raise StrategyV2ContractError(f"strategyV2.universeNotFound:{reference}")
+        validate_universe_history(universe, start_date)
         universe_id = int(universe.get("id") or 0)
         members = self.universe_service.candidate_members(
             user_id,
@@ -500,12 +525,7 @@ class StrategyV2BacktestService:
     @staticmethod
     def validate_fundamental_dependencies(frames: dict[str, pd.DataFrame], manifest: StrategyManifest) -> None:
         required = {_normalize_field(item) for item in manifest.fundamental_dependencies}
-        available = set()
-        for frame in frames.values():
-            available.update(str(column).strip().lower() for column in frame.columns)
-        missing = sorted(required - available)
-        if missing:
-            raise StrategyV2ContractError(f"strategyV2.fundamentalDataMissing:{','.join(missing)}")
+        validate_fundamentals(frames, required)
 
 
 def _enforce_backtest_range(
@@ -550,9 +570,22 @@ def _instrument_member(item: InstrumentSpec) -> dict[str, Any]:
     }
 
 
-def _warmup_calendar_days(frequency: str, warmup_bars: int) -> int:
+def _validate_warmup_history(frequency_frames, warmup_bars: int, start_date: datetime) -> None:
+    validate_warmup(frequency_frames, warmup_bars, start_date)
+
+
+def _warmup_calendar_days(frequency: str, warmup_bars: int, candidates=()) -> int:
     """Keep the legacy helper available for internal callers and tests."""
-    return backtest_warmup_calendar_days(frequency, warmup_bars)
+    days = backtest_warmup_calendar_days(frequency, warmup_bars)
+    normalized = str(frequency).lower()
+    if warmup_bars > 0 and normalized.endswith(("m", "h")) and any(
+        item.get("market") in {"USStock", "HKStock", "AStock"} for item in candidates
+    ):
+        hours = float(normalized[:-1]) / (60 if normalized.endswith("m") else 1)
+        # Four trading hours per session also covers the shortest stock market
+        # in a mixed universe; allow weekends and a holiday safety margin.
+        days = max(days, 7, math.ceil(warmup_bars * hours / 4 * 7 / 5 * 1.5))
+    return days
 
 
 def _benchmark_for_manifest(manifest: StrategyManifest) -> InstrumentSpec | None:

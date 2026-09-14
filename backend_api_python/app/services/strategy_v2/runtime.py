@@ -6,6 +6,7 @@ import inspect
 import math
 import calendar
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from typing import Any, Iterable, Mapping
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -32,12 +33,16 @@ from .protection import ProtectionDecision, ProtectionEngine, ProtectionSpec, Pr
 
 def _backtest_time_iso(value: Any) -> str:
     """Serialize the UTC-naive market index as an unambiguous UTC instant."""
-    timestamp = pd.Timestamp(value)
+    return _cached_backtest_time_iso(pd.Timestamp(value))
+
+
+@lru_cache(maxsize=8192)
+def _cached_backtest_time_iso(timestamp: pd.Timestamp) -> str:
     if timestamp.tzinfo is None:
         timestamp = timestamp.tz_localize("UTC")
     else:
         timestamp = timestamp.tz_convert("UTC")
-    return timestamp.floor("s").isoformat().replace("+00:00", "Z")
+    return timestamp.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 @dataclass
@@ -212,11 +217,38 @@ class StrategyRuntimeContext:
         self._logs: list[str] = []
         self._default_protection: ProtectionSpec | None = None
         self._indicator_cache: dict[tuple[Any, ...], pd.Series | pd.DataFrame] = {}
+        self._handler_shapes: dict[str, tuple[Any, int | None]] = {}
         self._order_sequence = 0
         self._order_statuses: dict[str, dict[str, Any]] = {}
         self._cancelled_order_ids: set[str] = set()
+        self.live_order_cancellation = False
         self._last_exit_reasons: dict[str, str] = {}
         self.logger = StrategyRuntimeLogger(self.log)
+
+    def invoke_handler(self, name: str, handler: Any, args: tuple[Any, ...]) -> Any:
+        cached = self._handler_shapes.get(name)
+        if cached is None or cached[0] is not handler:
+            parameters = tuple(inspect.signature(handler).parameters.values())
+            count = None if any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in parameters) else sum(
+                item.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+                for item in parameters
+            )
+            cached = (handler, count)
+            self._handler_shapes[name] = cached
+        return handler(*args if cached[1] is None else args[:cached[1]])
+
+    def refresh_portal(self, portal: MultiAssetDataPortal) -> None:
+        if self._indicator_cache:
+            for frequency, frames in self.portal.frames_by_frequency.items():
+                updated = portal.frames_by_frequency.get(frequency, {})
+                if any(
+                    key not in updated or not frame.equals(updated[key].iloc[:len(frame)])
+                    for key, frame in frames.items()
+                ):
+                    self._indicator_cache.clear()
+                    break
+        self.portal = portal
+        self.data = StrategyDataView(portal)
 
     def set_default_protection(self, **values: Any) -> None:
         self._default_protection = ProtectionSpec.from_value(values)
@@ -253,9 +285,12 @@ class StrategyRuntimeContext:
         current = dict(self._order_statuses.get(reference) or {})
         if str(current.get("status") or "").strip().lower() == "filled":
             return False
+        queued = any(order.client_order_id == reference for order in self._orders)
+        if queued:
+            self._orders = [order for order in self._orders if order.client_order_id != reference]
         current.update({
             "client_order_id": reference,
-            "status": "cancelled",
+            "status": "cancel_pending" if self.live_order_cancellation and not queued else "cancelled",
             "reason": "cancelled_by_strategy",
         })
         self._order_statuses[reference] = current
@@ -609,7 +644,7 @@ def _builtin_indicator_contract(
     aliases: dict[str, str] = {}
     outputs: tuple[tuple[str, str], ...] = ((name, ""),)
     factor_id = name
-    if name in {"atr", "rsi", "adx"}:
+    if name in {"sma", "atr", "rsi", "adx"}:
         aliases = {"timeperiod": "period"}
     elif name == "macd":
         aliases = {
@@ -744,9 +779,23 @@ class MultiAssetSimulationBroker:
                 and abs(target_qty) <= 1e-12
                 and abs(current.amount) > 1e-12
             )
-            reconciles_swap_remainder = (
-                closes_position and self._is_crypto_swap_symbol(order.symbol)
+            reconciles_swap_remainder = closes_position and (
+                self._is_crypto_swap_symbol(order.symbol)
+                or str(order.symbol).lower().startswith("crypto:")
+                and str(order.symbol).split("@", 1)[0].upper().endswith(("/USDT", "/USDC", "/USD"))
             )
+            if (
+                str(order.symbol).lower().startswith("crypto:")
+                and str(order.symbol).split("@", 1)[0].upper().endswith(("/USDT", "/USDC", "/USD"))
+                and order.kind.startswith("target_")
+                and current.amount * target_qty > 0
+                and abs(delta * sizing_price) <= 10.0 + 1e-9
+            ):
+                batch_event_indexes.append(self._append_order_event(self._order_event(
+                    order_id, order, timestamp, "rejected", "target_already_met",
+                    requested_quantity=0.0,
+                )))
+                continue
             if abs(delta) <= 1e-12 or (abs(delta * sizing_price) < 0.01 and not closes_position):
                 batch_event_indexes.append(self._append_order_event(self._order_event(
                     order_id, order, timestamp, "rejected", "target_already_met",
@@ -803,7 +852,7 @@ class MultiAssetSimulationBroker:
             lot_size = self._lot_size(order.symbol, rules)
             delta = self._round_to_lot(delta, lot_size)
             exact_close_remainder = False
-            if reconciles_swap_remainder and abs(delta) < lot_size - 1e-12:
+            if reconciles_swap_remainder and abs(delta) < lot_size - 1e-12 and abs(current.amount * fill_price) <= 10.0:
                 # A simulated position may contain a sub-lot numerical residue.
                 # A target-zero order reconciles that residue exactly instead of
                 # leaving an uncloseable position or silently writing it off.
@@ -818,9 +867,14 @@ class MultiAssetSimulationBroker:
             liquidity_cap = None if forced_liquidation else self._liquidity_cap(bar, lot_size)
             if liquidity_cap is not None and abs(delta) > liquidity_cap:
                 delta = math.copysign(liquidity_cap, delta)
+                exact_close_remainder = False
             if reconciles_swap_remainder and current.amount * delta < 0:
                 residual = current.amount + delta
-                if 0 < abs(residual) < lot_size - 1e-12:
+                if (
+                    0 < abs(residual) < lot_size - 1e-12
+                    and abs(residual * fill_price) <= 10.0
+                    and (liquidity_cap is None or abs(current.amount) <= liquidity_cap)
+                ):
                     delta = -current.amount
                     exact_close_remainder = True
             if forced_liquidation or exact_close_remainder:
@@ -856,6 +910,7 @@ class MultiAssetSimulationBroker:
                 and abs(delta) + 1e-12 < min_amount
                 and not forced_liquidation
                 and not swap_reduction
+                and not exact_close_remainder
             ):
                 batch_event_indexes.append(self._append_order_event(self._order_event(
                     order_id, order, timestamp, "rejected", "minimum_trade_unit",
@@ -867,6 +922,7 @@ class MultiAssetSimulationBroker:
                 and fill_price > 0
                 and not forced_liquidation
                 and not swap_reduction
+                and not exact_close_remainder
                 and abs(delta * fill_price) < min_notional
             ):
                 batch_event_indexes.append(self._append_order_event(self._order_event(
@@ -945,6 +1001,7 @@ class MultiAssetSimulationBroker:
                 "limit_price": float(order.limit_price or 0.0) if is_limit_order else 0.0,
                 "status": execution_status,
                 "requested_quantity": abs(requested_delta),
+                "sub_lot_reconciled": exact_close_remainder,
             }
             self.executions.append(execution)
             reason = "margin_liquidation" if forced_liquidation else "filled"
@@ -1159,7 +1216,11 @@ class MultiAssetSimulationBroker:
     def _round_to_lot(value: float, lot_size: float) -> float:
         if lot_size <= 0:
             return value
-        units = math.floor(abs(value) / lot_size + 1e-12)
+        ratio = abs(value) / lot_size
+        nearest = round(ratio)
+        # Recover an integral lot count lost to binary arithmetic, without
+        # rounding genuine fractional lots up to a larger order.
+        units = nearest if abs(ratio - nearest) <= max(1e-12, 4 * math.ulp(ratio)) else math.floor(ratio)
         return math.copysign(units * lot_size, value) if units else 0.0
 
     @staticmethod
@@ -1823,14 +1884,7 @@ class StrategyV2BacktestRunner:
         if not callable(handler):
             return None
         try:
-            signature = inspect.signature(handler)
-            positional = [
-                item for item in signature.parameters.values()
-                if item.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-            ]
-            if any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in signature.parameters.values()):
-                return handler(*args)
-            return handler(*args[:len(positional)])
+            return self.context.invoke_handler(handler_name, handler, args)
         except StrategyV2ContractError:
             raise
         except Exception as exc:
@@ -2195,6 +2249,7 @@ class StrategyV2LiveSession:
         )
         self.portfolio = PortfolioState(initial_capital, initial_capital, total_value=initial_capital)
         self.context = StrategyRuntimeContext(portal=self.portal, portfolio=self.portfolio, params=params)
+        self.context.live_order_cancellation = True
         self.persist_strategy_state = (
             _truthy(self.program.namespace.get("PERSIST_RUNTIME_STATE"))
             or _truthy(self.context.params.get("persist_runtime_state"))
@@ -2228,8 +2283,7 @@ class StrategyV2LiveSession:
         bar_advanced = self.last_processed is None or timestamp > self.last_processed
 
         self.portal = portal
-        self.context.portal = portal
-        self.context.data = StrategyDataView(portal)
+        self.context.refresh_portal(portal)
         self.context.previous_trading_date = self.last_processed
         portal.set_clock(timestamp, include_current=True)
 
@@ -2470,6 +2524,8 @@ class StrategyV2LiveSession:
             "version": 3,
             "protection": self.protection_snapshot(),
         }
+        if self.context._cancelled_order_ids:
+            snapshot["cancelRequests"] = sorted(self.context._cancelled_order_ids)
         if self.persist_strategy_state:
             snapshot.update({
                 "strategyState": _snapshot_state_value(
@@ -2494,6 +2550,7 @@ class StrategyV2LiveSession:
         raw = dict(values or {})
         if not raw:
             return
+        self.context._cancelled_order_ids.update(str(ref) for ref in raw.get("cancelRequests", []))
         protection = raw.get("protection")
         if isinstance(protection, Mapping):
             self.restore_protection_snapshot(protection)
@@ -2591,14 +2648,7 @@ class StrategyV2LiveSession:
         if not callable(handler):
             return None
         try:
-            signature = inspect.signature(handler)
-            positional = [
-                item for item in signature.parameters.values()
-                if item.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
-            ]
-            if any(item.kind == inspect.Parameter.VAR_POSITIONAL for item in signature.parameters.values()):
-                return handler(*args)
-            return handler(*args[:len(positional)])
+            return self.context.invoke_handler(handler_name, handler, args)
         except StrategyV2ContractError:
             raise
         except Exception as exc:

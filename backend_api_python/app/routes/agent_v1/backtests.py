@@ -9,11 +9,12 @@ import os
 from typing import Any
 
 from app.services.strategy_v2 import StrategyV2BacktestService
+from app.services.billing_service import BillingError
 from app.utils.agent_auth import (
     SCOPE_B, agent_required, current_token, current_user_id,
     instrument_allowed, market_allowed, with_idempotency,
 )
-from app.utils.agent_jobs import count_active_jobs, submit_job
+from app.utils.agent_jobs import _job_receipt, count_active_jobs, submit_job
 from app.utils.logger import get_logger
 from flask import request
 
@@ -154,7 +155,7 @@ def _run_backtest(payload: dict, on_progress=None) -> Any:
     leverage = float(payload.get("leverage") or 1) if leverage_enabled else 1.0
     if on_progress:
         on_progress({"phase": "running_backtest", "percent": 25})
-    _, result = _backtest.run(
+    run_id, result = _backtest.run(
         user_id=int(payload.get("__user_id") or 1),
         code=code,
         start_date=start_date,
@@ -168,11 +169,11 @@ def _run_backtest(payload: dict, on_progress=None) -> Any:
         instrument_rules_snapshot_id=str(
             payload.get("instrumentRulesSnapshotId") or ""
         ).strip(),
-        persist=False,
+        persist=True,
     )
     if on_progress:
         on_progress({"phase": "finalizing", "percent": 95})
-    return result
+    return {**result, "runId": run_id}
 
 
 @agent_v1_bp.route("/backtest/run", methods=["POST"])
@@ -186,6 +187,10 @@ def create_backtest():
     _, validation_error = _validate_request(body)
     if validation_error:
         return validation_error
+
+    with with_idempotency("backtest") as existing:
+        if existing:
+            return envelope(_job_receipt(existing, duplicate=True), message="idempotent replay")
 
     token_id = int(current_token().get("id") or 0)
     tenant_cap = max(1, int(os.getenv("AGENT_MAX_CONCURRENT_JOBS_PER_TENANT", "4")))
@@ -207,22 +212,23 @@ def create_backtest():
             http=429,
         )
 
-    with with_idempotency("backtest") as existing:
-        if existing:
-            return envelope({
-                "job_id": existing["job_id"],
-                "status": existing["status"],
-                "duplicate": True,
-            }, message="idempotent replay")
-
     payload = dict(body)
     payload["__user_id"] = current_user_id()
-    job = submit_job(
-        user_id=current_user_id(),
-        agent_token_id=token_id,
-        kind="backtest",
-        request_payload=payload,
-        runner=_run_backtest,
-        idempotency_key=request.headers.get("Idempotency-Key"),
-    )
+    try:
+        job = submit_job(
+            user_id=current_user_id(),
+            agent_token_id=token_id,
+            kind="backtest",
+            request_payload=payload,
+            runner=_run_backtest,
+            idempotency_key=request.headers.get("Idempotency-Key"),
+        )
+    except BillingError as exc:
+        return error(exc.status, exc.code, details={"error_type": exc.code, **exc.details},
+                     retriable=exc.status >= 500, http=exc.status)
+    except Exception:
+        logger.exception("Agent backtest submission failed")
+        return error(503, "BILLING_OR_JOB_UNAVAILABLE", retriable=True, http=503)
+    if job["status"] == "failed":
+        return error(503, "AGENT_JOB_DISPATCH_FAILED", details=job, http=503)
     return envelope(job, message="queued", status=202)

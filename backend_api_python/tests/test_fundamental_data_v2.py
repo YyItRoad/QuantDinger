@@ -4,12 +4,12 @@ import types
 import pandas as pd
 import pytest
 
-from app.services.fundamental_data import FundamentalDataService
+from app.services.fundamental_data import FUNDAMENTAL_FIELDS, FundamentalDataService, _availability_date
 
 
 def _install_collector(monkeypatch, payload):
     class FakeMarketDataCollector:
-        def _get_fundamental(self, *_args):
+        def _fetch_fundamental_uncached(self, *_args):
             return payload
 
     module = types.ModuleType("app.services.market_data_collector")
@@ -47,6 +47,7 @@ def test_sync_current_persists_real_provider_values(monkeypatch):
     assert result["revenue"] == 1000.0
     assert result["net_income"] == 250.0
     assert result["shareholder_equity"] == 400.0
+    assert result["metadata"]["analysisPayload"]["financial_statements"] == provider_payload["financial_statements"]
     assert persisted == result
 
 
@@ -119,7 +120,50 @@ def test_sync_history_persists_reported_quarters_with_point_in_time_dates(monkey
     result = service.sync_history(market="USStock", symbol="aapl")
 
     assert result["observations"] == 5
-    assert persisted[0]["available_at"].isoformat() == "2025-05-01"
+    assert persisted[0]["available_at"].isoformat() == "2025-05-02"
     assert persisted[-1]["market_cap"] == 700.0
     assert persisted[-1]["revenue_growth"] == pytest.approx(0.4)
+    assert persisted[2]["net_income_ttm"] is None
+    assert persisted[3]["net_income_ttm"] == 46
+    assert persisted[4]["net_income_ttm"] == 50
+    assert persisted[-1]["pe_ratio"] == pytest.approx(14)
+    assert persisted[-1]["pb_ratio"] == pytest.approx(700 / 240)
+    assert set(FUNDAMENTAL_FIELDS).issubset(persisted[-1])
     assert persisted[-1]["metadata"]["pointInTime"] is True
+
+
+def test_sync_history_uses_safe_fallback_when_earnings_calendar_is_unavailable(monkeypatch):
+    period = pd.Timestamp("2026-03-31")
+
+    class FakeTicker:
+        quarterly_income_stmt = pd.DataFrame([[100], [10]], index=["Total Revenue", "Net Income"], columns=[period])
+        quarterly_balance_sheet = pd.DataFrame([[50], [10]], index=["Stockholders Equity", "Ordinary Shares Number"], columns=[period])
+        quarterly_cash_flow = pd.DataFrame([[8]], index=["Free Cash Flow"], columns=[period])
+
+        @staticmethod
+        def get_earnings_dates(limit=32):
+            del limit
+            return pd.DataFrame()
+
+        @staticmethod
+        def history(**_kwargs):
+            return pd.DataFrame({"Close": [20]}, index=pd.to_datetime(["2026-07-01"]))
+
+    yfinance_module = types.ModuleType("yfinance")
+    yfinance_module.Ticker = lambda _symbol: FakeTicker()
+    monkeypatch.setitem(sys.modules, "yfinance", yfinance_module)
+    persisted = []
+    service = FundamentalDataService()
+    monkeypatch.setattr(service, "upsert", lambda payload: persisted.append(payload))
+
+    result = service.sync_history(market="USStock", symbol="TEST")
+
+    assert result["observations"] == 1
+    assert persisted[0]["available_at"].isoformat() == "2026-06-30"
+    assert persisted[0]["metadata"]["availabilitySource"] == "conservative_91_day_lag"
+
+
+def test_recent_report_without_calendar_uses_observation_date():
+    available_at, source = _availability_date(pd.Timestamp.today().normalize() - pd.Timedelta(days=10), [])
+    assert available_at == pd.Timestamp.today().date()
+    assert source == "observed_at_sync"

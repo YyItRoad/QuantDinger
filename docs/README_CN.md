@@ -10,6 +10,12 @@ QuantDinger 是一套可自托管的 AI 量化交易平台，覆盖行情研究�
 > 启用实盘后，系统可以提交真实订单。请先使用模拟盘，为交易凭据设置最小权限，
 > 并确认所在地区的法律、合规与运营要求。QuantDinger 不提供投资建议。
 
+## 观看 QuantDinger 宣传视频
+
+<p align="center">
+  <img src="screenshots/quantdinger-v5-2x.gif" alt="QuantDinger 完整宣传片，2 倍速动态演示" width="800">
+</p>
+
 ## 按目标开始
 
 | 你的目标 | 首先阅读 | 接下来阅读 |

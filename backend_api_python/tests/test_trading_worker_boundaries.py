@@ -42,6 +42,10 @@ class FakeRepository:
         del strategy_id, owner_id, lease_seconds
         return 1
 
+    def has_pending_stop(self, strategy_id):
+        del strategy_id
+        return False
+
 
 def _command(command_type: str) -> StrategyCommand:
     return StrategyCommand(
@@ -84,6 +88,9 @@ def test_restore_renews_ownership_around_each_strategy_without_stopping_desired_
 
         def get_running_strategies_with_type(self):
             return [{"id": 10}, {"id": 20}]
+
+        def get_strategy(self, strategy_id):
+            return {"id": strategy_id, "status": "running"}
 
         def update_strategy_status(self, strategy_id, status):
             self.status_updates.append((strategy_id, status))

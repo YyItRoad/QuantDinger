@@ -13,6 +13,7 @@ from app.services.grid.exchange_orders import (
     make_grid_initial_client_order_id,
     normalize_grid_order_quantity,
     place_grid_limit_order,
+    query_grid_order_fill,
     wait_grid_market_fill,
 )
 from app.services.grid.fill_handler import record_grid_market_fill
@@ -49,6 +50,7 @@ class GridEngine:
         self.cfg = GridBotConfig.from_trading_config(self.trading_config)
         self._create_client = create_client_fn
         self._enqueue_market = enqueue_market
+        self.order_guard = None
         self._orders = GridRestingOrderRepository()
         self._cells = GridCellRepository()
         self._bootstrapped = False
@@ -83,6 +85,9 @@ class GridEngine:
         self._last_entry_order_ts = 0.0
         self._entry_ownership_cache: Dict[str, Tuple[float, bool, Dict[str, Any]]] = {}
         self._ownership_check_errors: set[str] = set()
+        self._exchange_open_orders_cache: Optional[Tuple[float, List[Dict[str, Any]]]] = None
+        self._exchange_reservation_logged: set[str] = set()
+        self._last_reduce_only_conflict_ts = 0.0
 
     @property
     def stop_requested(self) -> bool:
@@ -102,7 +107,17 @@ class GridEngine:
             purpose,
             msg,
         )
-        append_strategy_log(self.strategy_id, "error", f"Grid limit failed {purpose}: {msg}")
+        from app.services.strategy_lifecycle import is_recoverable_position_error
+
+        recoverable = is_recoverable_position_error(msg)
+        lower_msg = msg.lower()
+        if "-2022" in lower_msg or "reduceonly order is rejected" in lower_msg:
+            self._exchange_open_orders_cache = None
+            self._last_reduce_only_conflict_ts = time.time()
+        append_strategy_log(self.strategy_id, "warning" if recoverable else "error", f"Grid limit failed {purpose}: {msg}")
+        if recoverable:
+            self._consecutive_order_errors = 0
+            return
         self._consecutive_order_errors += 1
         try:
             from app.services.strategy_lifecycle import maybe_auto_stop_on_exchange_error
@@ -348,6 +363,74 @@ class GridEngine:
             self._entry_ownership_cache[side] = (now, False, metadata)
             return False, metadata
 
+    @staticmethod
+    def _truthy_exchange_flag(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+    def _binance_reserved_exit_quantity(self, client: Any, pos_side: str) -> Optional[float]:
+        """Return quantity already reserved by Binance orders for this position leg."""
+        exchange_id = str(self.exchange_config.get("exchange_id") or "").strip().lower()
+        market_type = str(self.cfg.market_type or "swap").strip().lower()
+        if exchange_id != "binance" or market_type == "spot" or not hasattr(client, "get_open_orders"):
+            return None
+
+        now = time.time()
+        cached = self._exchange_open_orders_cache
+        rows: List[Dict[str, Any]]
+        if cached and now - float(cached[0] or 0.0) <= 2.0:
+            rows = cached[1]
+        else:
+            try:
+                raw = client.get_open_orders(symbol=self.symbol)
+                if isinstance(raw, dict):
+                    raw = raw.get("raw") or raw.get("data") or []
+                rows = [dict(row) for row in (raw or []) if isinstance(row, dict)]
+                self._exchange_open_orders_cache = (now, rows)
+                self._ownership_check_errors.discard("binance_open_orders")
+            except Exception as exc:
+                if "binance_open_orders" not in self._ownership_check_errors:
+                    logger.warning(
+                        "Binance open-order sync unavailable sid=%s symbol=%s: %s",
+                        self.strategy_id,
+                        self.symbol,
+                        exc,
+                    )
+                    self._ownership_check_errors.add("binance_open_orders")
+                return None
+
+        wanted_position = "LONG" if str(pos_side or "").lower() == "long" else "SHORT"
+        wanted_side = "SELL" if wanted_position == "LONG" else "BUY"
+        wanted_symbol = self.symbol.replace("/", "").replace("-", "").upper()
+        reserved = 0.0
+        for row in rows:
+            symbol = str(row.get("symbol") or "").replace("/", "").replace("-", "").upper()
+            if symbol and symbol != wanted_symbol:
+                continue
+            if str(row.get("side") or "").upper() != wanted_side:
+                continue
+            status = str(row.get("status") or "NEW").upper()
+            if status not in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}:
+                continue
+            position_side = str(row.get("positionSide") or "BOTH").upper()
+            reduce_only = self._truthy_exchange_flag(row.get("reduceOnly"))
+            if position_side in {"LONG", "SHORT"}:
+                if position_side != wanted_position:
+                    continue
+            elif not reduce_only:
+                continue
+            try:
+                remaining = max(
+                    0.0,
+                    float(row.get("origQty") or row.get("quantity") or 0.0)
+                    - float(row.get("executedQty") or row.get("filled") or 0.0),
+                )
+            except (TypeError, ValueError):
+                continue
+            reserved += remaining
+        return reserved
+
     def _resolve_grid_exit_quantity(
         self,
         client: Any,
@@ -389,7 +472,8 @@ class GridEngine:
             )
 
             # Existing resting exits already reserve part of the safe strategy
-            # quantity.  New exits may only use the unreserved remainder.
+            # quantity. Binance may also retain orders that were placed before
+            # a worker restart but were not committed locally.
             existing = 0.0
             try:
                 for order in self._orders.list_open(self.strategy_id):
@@ -409,7 +493,20 @@ class GridEngine:
             elif float(meta.get("exchange_size") or 0.0) > 0:
                 budgets.append(max(0.0, float(meta.get("exchange_size") or 0.0)))
             safe_total = min(budgets) if budgets else 0.0
-            amount = min(max(0.0, float(resolved or 0.0)), max(0.0, safe_total - existing))
+            exchange_reserved = self._binance_reserved_exit_quantity(client, pos_side)
+            reserved = max(existing, float(exchange_reserved or 0.0)) if exchange_reserved is not None else existing
+            if exchange_reserved is not None and exchange_reserved > existing + 1e-10:
+                log_key = f"binance_reservation:{pos_side}"
+                if log_key not in self._exchange_reservation_logged:
+                    logger.info(
+                        "Binance open exits synchronized sid=%s symbol=%s side=%s reserved=%.8f",
+                        self.strategy_id,
+                        self.symbol,
+                        pos_side,
+                        exchange_reserved,
+                    )
+                    self._exchange_reservation_logged.add(log_key)
+            amount = min(max(0.0, float(resolved or 0.0)), max(0.0, safe_total - reserved))
 
             if market_type == "spot" and amount > 0:
                 from app.services.live_trading.spot_sizing import clamp_spot_close_quantity
@@ -534,7 +631,10 @@ class GridEngine:
             client_order_id=coid,
             exchange_id=str(self.exchange_config.get("exchange_id") or ""),
             user_id=self.user_id,
-            fee_status="actual" if fees else "pending",
+            fee_status=str(
+                details.get("fee_status")
+                or ("actual" if fees else "pending")
+            ),
             fee_source="rest",
         )
         append_strategy_log(
@@ -629,6 +729,8 @@ class GridEngine:
             logger.debug("grid initial pre-place probe sid=%s: %s", self.strategy_id, e)
         try:
             client = self._create_client()
+            if self.order_guard and not self.order_guard():
+                return False
             execution = execute_grid_market_order(
                 client,
                 symbol=self.symbol,
@@ -669,11 +771,7 @@ class GridEngine:
             client_order_id=str(getattr(execution, "client_order_id", coid) or coid),
             exchange_id=str(self.exchange_config.get("exchange_id") or ""),
             user_id=self.user_id,
-            fee_status=(
-                "actual"
-                if getattr(execution, "fees_by_ccy", None)
-                else "pending"
-            ),
+            fee_status=str(getattr(execution, "fee_status", "pending") or "pending"),
             fee_source="rest",
         )
         append_strategy_log(
@@ -873,6 +971,7 @@ class GridEngine:
                 self.cancel_entry_orders_on_exchange(pos_side=pos_side)
                 if str(metadata.get("reason") or "") in {
                     "account_below_protected_allocation",
+                    "account_below_strategy_allocation",
                     "position_ownership_snapshot_failed",
                     "position_ownership_credential_missing",
                 }:
@@ -1112,34 +1211,18 @@ class GridEngine:
             return True
 
         # A later partial entry can increase the held quantity. Replace the
-        # prior child exit atomically from the local engine's point of view so
-        # all confirmed inventory remains reduce-only covered.
+        # prior child exit only after its cancellation and fills are reconciled.
         client = None
         try:
             client = self._create_client()
         except Exception as exc:
             logger.warning("grid exit coverage client sid=%s: %s", self.strategy_id, exc)
+            return False
+        if client is None:
+            return False
         for item in open_orders:
-            if client:
-                try:
-                    cancel_grid_order(
-                        client,
-                        symbol=self.symbol,
-                        market_type=self.cfg.market_type,
-                        exchange_order_id=item.exchange_order_id,
-                        client_order_id=item.client_order_id,
-                        exchange_config=self.exchange_config,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "grid exit coverage cancel sid=%s cell=%s: %s",
-                        self.strategy_id,
-                        cell.index,
-                        exc,
-                    )
-                    return False
-            if item.id:
-                self._orders.update_status(int(item.id), status="cancelled")
+            if not self._cancel_confirmed_order(client, item):
+                return False
         return self._place_limit(
             cell,
             purpose,
@@ -1149,6 +1232,41 @@ class GridEngine:
             pos_side=pos_side,
             quantity=desired,
         )
+
+    def _cancel_confirmed_order(self, client: Any, order: GridRestingOrder) -> bool:
+        """Retain uncertain orders for polling; never discard unprocessed fills."""
+        if client is None or not order.id:
+            return False
+        try:
+            cancel_grid_order(
+                client,
+                symbol=self.symbol,
+                market_type=self.cfg.market_type,
+                exchange_order_id=order.exchange_order_id,
+                client_order_id=order.client_order_id,
+                exchange_config=self.exchange_config,
+            )
+        except Exception as exc:
+            logger.warning("grid cancel request unconfirmed sid=%s oid=%s: %s", self.strategy_id, order.id, exc)
+        try:
+            filled, _, status = query_grid_order_fill(
+                client,
+                symbol=self.symbol,
+                market_type=self.cfg.market_type,
+                exchange_order_id=order.exchange_order_id,
+                client_order_id=order.client_order_id,
+                exchange_config=self.exchange_config,
+            )
+            # A cancel acknowledgement is not a terminal order snapshot. The
+            # poller must post any racing fill before coverage is recalculated.
+            if status != "cancelled":
+                return False
+            if max(float(filled or 0.0), float(order.filled_quantity or 0.0)) > float(order.processed_fill_qty or 0.0) + 1e-12:
+                return False
+            return self._orders.update_status(int(order.id), status="cancelled") is True
+        except Exception as exc:
+            logger.warning("grid cancel unconfirmed sid=%s oid=%s: %s", self.strategy_id, order.id, exc)
+            return False
 
     def _normalize_grid_base_qty(self, qty: float, price: float) -> float:
         """Floor to exchange lot/min; return 0 when below tradable minimum."""
@@ -1185,18 +1303,11 @@ class GridEngine:
             for extra in orders[1:]:
                 try:
                     client = self._create_client()
-                    cancel_grid_order(
-                        client,
-                        symbol=self.symbol,
-                        market_type=self.cfg.market_type,
-                        exchange_order_id=extra.exchange_order_id,
-                        client_order_id=extra.client_order_id,
-                        exchange_config=self.exchange_config,
-                    )
                 except Exception as e:
                     logger.debug("grid entry dedupe cancel sid=%s cell=%s: %s", self.strategy_id, cell_idx, e)
-                if extra.id:
-                    self._orders.update_status(int(extra.id), status="cancelled")
+                    continue
+                if not self._cancel_confirmed_order(client, extra):
+                    continue
                 append_strategy_log(
                     self.strategy_id,
                     "warning",
@@ -1221,18 +1332,11 @@ class GridEngine:
             for extra in orders[1:]:
                 try:
                     client = self._create_client()
-                    cancel_grid_order(
-                        client,
-                        symbol=self.symbol,
-                        market_type=self.cfg.market_type,
-                        exchange_order_id=extra.exchange_order_id,
-                        client_order_id=extra.client_order_id,
-                        exchange_config=self.exchange_config,
-                    )
                 except Exception as e:
                     logger.debug("grid dedupe cancel sid=%s cell=%s: %s", self.strategy_id, cell_idx, e)
-                if extra.id:
-                    self._orders.update_status(int(extra.id), status="cancelled")
+                    continue
+                if not self._cancel_confirmed_order(client, extra):
+                    continue
                 append_strategy_log(
                     self.strategy_id,
                     "warning",
@@ -1264,6 +1368,10 @@ class GridEngine:
                 continue
             if direction in ("long", "neutral") and st == GridCellState.LONG_HELD:
                 if self._orders.has_open_for_cell(self.strategy_id, cell_idx, "long_exit"):
+                    self._ensure_cell_exit_coverage(
+                        spec, purpose="long_exit", side="sell", price=spec.upper_price,
+                        pos_side="long", quantity=float(cell.leg_size or 0.0),
+                    )
                     continue
                 leg = float(cell.leg_size or 0.0)
                 qty = self._normalize_grid_base_qty(leg, float(spec.upper_price or 0))
@@ -1281,6 +1389,10 @@ class GridEngine:
                     placed += 1
             elif direction in ("short", "neutral") and st == GridCellState.SHORT_HELD:
                 if self._orders.has_open_for_cell(self.strategy_id, cell_idx, "short_exit"):
+                    self._ensure_cell_exit_coverage(
+                        spec, purpose="short_exit", side="buy", price=spec.lower_price,
+                        pos_side="short", quantity=float(cell.leg_size or 0.0),
+                    )
                     continue
                 leg = float(cell.leg_size or 0.0)
                 qty = self._normalize_grid_base_qty(leg, float(spec.lower_price or 0))
@@ -1420,6 +1532,8 @@ class GridEngine:
         px = float(price or 0)
         if px <= 0:
             return False
+        if reduce_only and time.time() - float(self._last_reduce_only_conflict_ts or 0.0) < 5.0:
+            return False
         usdt = self._grid_budget_usdt()
         qty = float(quantity) if quantity is not None else self._qty_from_usdt(usdt, px)
         qty = self._normalize_grid_base_qty(qty, px)
@@ -1438,6 +1552,7 @@ class GridEngine:
                     self.cancel_entry_orders_on_exchange(pos_side=pos_side)
                     if str(metadata.get("reason") or "") in {
                         "account_below_protected_allocation",
+                        "account_below_strategy_allocation",
                         "position_ownership_snapshot_failed",
                         "position_ownership_credential_missing",
                     }:
@@ -1457,6 +1572,8 @@ class GridEngine:
                 not reduce_only
                 and self.cfg.order_mode in ("maker", "limit", "limit_first", "maker_then_market")
             )
+            if self.order_guard and not self.order_guard():
+                return False
             res = place_grid_limit_order(
                 client,
                 symbol=self.symbol,
@@ -1789,25 +1906,7 @@ class GridEngine:
                 continue
             if not client:
                 continue
-            try:
-                cancel_grid_order(
-                    client,
-                    symbol=self.symbol,
-                    market_type=self.cfg.market_type,
-                    exchange_order_id=o.exchange_order_id,
-                    client_order_id=o.client_order_id,
-                    exchange_config=self.exchange_config,
-                )
-            except Exception as e:
-                logger.warning(
-                    "cancel grid ownership order failed sid=%s oid=%s: %s",
-                    self.strategy_id,
-                    o.exchange_order_id or o.client_order_id,
-                    e,
-                )
-                continue
-            if o.id:
-                self._orders.update_status(int(o.id), status="cancelled")
+            self._cancel_confirmed_order(client, o)
 
     def cancel_entry_orders_on_exchange(self, *, pos_side: str = "") -> None:
         self._cancel_position_orders_on_exchange(pos_side=pos_side, exits=False)
@@ -1817,6 +1916,8 @@ class GridEngine:
 
     def cancel_all_orders_on_exchange(self) -> None:
         open_orders = self._orders.list_open(self.strategy_id)
+        if not open_orders:
+            return
         try:
             client = self._create_client()
         except Exception as e:
@@ -1832,24 +1933,10 @@ class GridEngine:
             )
             client = None
         for o in open_orders:
-            if client:
-                try:
-                    cancel_grid_order(
-                        client,
-                        symbol=self.symbol,
-                        market_type=self.cfg.market_type,
-                        exchange_order_id=o.exchange_order_id,
-                        client_order_id=o.client_order_id,
-                        exchange_config=self.exchange_config,
-                    )
-                except Exception as e:
-                    logger.debug("cancel grid order: %s", e)
-            if o.id:
-                self._orders.update_status(int(o.id), status="cancelled")
+            self._cancel_confirmed_order(client, o)
 
     def shutdown(self) -> None:
         self.cancel_all_orders_on_exchange()
-        self._orders.cancel_all(self.strategy_id, self.symbol)
         released = self._cells.release_cancelled_working_orders(self.strategy_id, self.symbol)
         if released:
             append_strategy_log(self.strategy_id, "info", f"Grid released {released} local cell working state(s)")

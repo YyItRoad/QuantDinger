@@ -54,6 +54,10 @@ def _gate_call_assert(kw: Dict[str, Any]) -> None:
     assert kw.get("order_id") == "oid-1"
 
 
+def _gate_spot_call_assert(kw: Dict[str, Any]) -> None:
+    assert kw == {"order_id": "oid-1", "symbol": "BTC/USDT"}
+
+
 FILL_CONTRACT_CASES: Tuple[FillContractCase, ...] = (
     FillContractCase(
         "binance_futures_filled",
@@ -141,9 +145,10 @@ FILL_CONTRACT_CASES: Tuple[FillContractCase, ...] = (
     FillContractCase(
         "gate_spot_filled",
         GateSpotClient,
-        {"status": "closed", "filled_amount": "0.02", "filled_total": "1300.4"},
+        {"status": "closed", "filled_amount": "0.02", "filled_total": "1300.4",
+         "fill_price": "1300.4", "avg_deal_price": "65020", "price": "66000"},
         (0.02, 65020.0, "filled"),
-        call_assert=_gate_call_assert,
+        call_assert=_gate_spot_call_assert,
     ),
     FillContractCase(
         "gate_futures_finished",

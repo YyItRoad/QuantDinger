@@ -24,7 +24,7 @@
     ·
     <a href="https://www.quantdinger.com"><strong>Website</strong></a>
     ·
-    <a href="https://www.youtube.com/watch?v=tNAZ9uMiUUw"><strong>Video Demo</strong></a>
+    <a href="#watch-quantdinger-in-action"><strong>Video Demo</strong></a>
     ·
     <a href="mailto:support@quantdinger.com"><strong>Official Support Email</strong></a>
   </p>
@@ -67,6 +67,12 @@
 > Start with paper trading, use restricted API keys, and review the risk and
 > compliance requirements for your jurisdiction. This project does not provide
 > investment advice.
+
+## Watch QuantDinger in action
+
+<p align="center">
+  <img src="docs/screenshots/quantdinger-v5-2x.gif" alt="QuantDinger product demo at 2× speed" width="800">
+</p>
 
 ## What QuantDinger is
 

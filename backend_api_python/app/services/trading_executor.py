@@ -21,6 +21,8 @@ from app.services.strategy_runtime.health import record_runtime_heartbeat
 from app.services.strategy_runtime.identity import ensure_strategy_run, finish_strategy_run
 from app.services.strategy_runtime.order_intents import OrderIntentService
 from app.services.strategy_runtime.state import RuntimeStateStore
+from app.services.strategy_runtime.live_portfolio import refresh_members, positions_by_symbol, available_strategy_cash, pricing_members
+from app.services.strategy_runtime.cancellations import persist_cancellations
 from app.services.strategy_runtime.timeframes import (
     completed_bar_token,
     live_history_days,
@@ -66,6 +68,7 @@ class TradingExecutor:
         self.order_gateway = StrategyV2OrderGateway()
         self._last_start_failure = ""
         self._last_exit_reason: dict[int, str] = {}
+        self.runtime_guard = None
 
     def start_strategy(self, strategy_id: int) -> bool:
         strategy_id = int(strategy_id)
@@ -83,6 +86,9 @@ class TradingExecutor:
             except Exception as exc:
                 self._last_start_failure = str(exc or "strategyV2.livePreflightFailed")
                 logger.warning("Strategy %s live preflight rejected: %s", strategy_id, exc)
+                return False
+            if self.runtime_guard and not self.runtime_guard(strategy_id):
+                self._last_start_failure = "strategyRuntime.leaseLost"
                 return False
             thread = threading.Thread(
                 target=self._run_strategy_loop,
@@ -358,7 +364,7 @@ class TradingExecutor:
                 lambda: service.resolve_candidates(
                     user_id=user_id,
                     manifest=program.manifest,
-                    start_date=now - timedelta(days=7),
+                    start_date=now,
                     end_date=now,
                 ),
             )
@@ -374,6 +380,7 @@ class TradingExecutor:
             frequency = program.manifest.driving_frequency
 
             def fetch_runtime_frames() -> dict[str, dict[str, pd.DataFrame]]:
+                refresh_members(service, candidates, program.manifest, user_id, strategy_id, datetime.now(timezone.utc), account_exchange)
                 return load_live_frequency_frames(
                     service=service,
                     candidates=candidates,
@@ -401,11 +408,13 @@ class TradingExecutor:
             frames = frequency_frames[frequency]
             runtime_price_client: Dict[str, Any] = {}
 
+            positions = {}
             def runtime_prices() -> dict[str, float]:
+                priced = pricing_members(candidates, positions)
                 if execution_mode != "live":
-                    return self._live_prices(candidates)
+                    return self._live_prices(priced)
                 return self._execution_account_prices(
-                    candidates,
+                    priced,
                     exchange_config,
                     runtime_price_client,
                 )
@@ -575,6 +584,7 @@ class TradingExecutor:
                         session.context.update_order_statuses(
                             order_intent_service.statuses_by_client_order_ids(references)
                         )
+                    persist_cancellations(session.context, order_intent_service)
                     positions = self._positions_by_symbol(
                         strategy_id,
                         candidates,
@@ -627,6 +637,7 @@ class TradingExecutor:
                     session.synchronize_positions(
                         positions,
                         total_value=current_equity,
+                        available_cash=available_strategy_cash(current_equity, positions, candidates, leverage, active_prices),
                     )
                     risk_timestamp = pd.Timestamp.now(tz="UTC")
                     equity_intents, equity_messages, equity_stop_reason = (
@@ -645,6 +656,7 @@ class TradingExecutor:
                             frames=frames,
                             candidates=candidates,
                             initial_capital=initial_capital,
+                            strategy_equity=current_equity,
                             leverage=leverage,
                             execution_mode=execution_mode,
                             notification_config=notification_config,
@@ -703,6 +715,7 @@ class TradingExecutor:
                             frames=frames,
                             candidates=candidates,
                             initial_capital=initial_capital,
+                            strategy_equity=current_equity,
                             leverage=leverage,
                             execution_mode=execution_mode,
                             notification_config=notification_config,
@@ -767,6 +780,7 @@ class TradingExecutor:
                                 frames=frames,
                                 candidates=candidates,
                                 initial_capital=initial_capital,
+                                strategy_equity=current_equity,
                                 leverage=leverage,
                                 execution_mode=execution_mode,
                                 notification_config=notification_config,
@@ -833,6 +847,7 @@ class TradingExecutor:
                                         frames=frames,
                                         candidates=candidates,
                                         initial_capital=initial_capital,
+                                        strategy_equity=current_equity,
                                         leverage=leverage,
                                         execution_mode=execution_mode,
                                         notification_config=notification_config,
@@ -988,6 +1003,7 @@ class TradingExecutor:
         strategy_run_id: int = 0,
         current_price_override: float | None = None,
         direction_mode: str = "",
+        strategy_equity: float | None = None,
     ) -> bool:
         member = next(
             (item for item in candidates if str(item.get("key") or "") == str(intent.symbol)),
@@ -1016,10 +1032,14 @@ class TradingExecutor:
             for item in positions
         )
         market_type = str(member.get("market_type") or "spot").lower()
+        sizing_capital = max(
+            0.0,
+            float(initial_capital if strategy_equity is None else strategy_equity),
+        )
         target_amount = self._target_amount(
             intent,
             current_amount,
-            initial_capital,
+            sizing_capital,
             price,
             leverage=leverage,
             market_type=market_type,
@@ -1033,6 +1053,14 @@ class TradingExecutor:
             raise RuntimeError("strategyV2.spotShortUnsupported")
 
         closes_position = abs(target_amount) <= 1e-12 and abs(current_amount) > 1e-12
+        if (
+            str(member.get("market") or "") == "Crypto"
+            and symbol.upper().endswith(("/USDT", "/USDC", "/USD"))
+            and intent.kind.startswith("target_")
+            and current_amount * target_amount > 0
+            and abs(target_amount - current_amount) * price <= 10.0 + 1e-9
+        ):
+            return False
         if abs(target_amount - current_amount) * price < MIN_LIVE_ORDER_NOTIONAL and not closes_position:
             return False
 
@@ -1058,6 +1086,7 @@ class TradingExecutor:
                 current_positions=positions,
                 leverage=leverage,
                 initial_capital=initial_capital,
+                strategy_equity=sizing_capital,
                 market_type=market_type,
                 market_category=str(member.get("market") or ""),
                 execution_mode=execution_mode,
@@ -1141,8 +1170,12 @@ class TradingExecutor:
         quantity = float(values.get("script_base_qty") or 0)
         reference_price = float(values.get("current_price") or 0)
         initial_capital = float(values.get("initial_capital") or 0)
+        strategy_equity = max(
+            0.0,
+            float(values.get("strategy_equity") if values.get("strategy_equity") is not None else initial_capital),
+        )
         leverage = float(values.get("leverage") or 1)
-        nominal_capacity = initial_capital * max(1.0, leverage)
+        nominal_capacity = strategy_equity * max(1.0, leverage)
         entry_pct = ((quantity * reference_price) / nominal_capacity * 100.0) if nominal_capacity > 0 else 0.0
         from app.services.pending_orders.order_budget import strategy_order_budget_snapshot
 
@@ -1150,7 +1183,7 @@ class TradingExecutor:
             action=str(values.get("signal_type") or ""),
             quantity=quantity,
             price=reference_price,
-            initial_capital=initial_capital,
+            initial_capital=strategy_equity,
             leverage=leverage,
             market_type=str(values.get("market_type") or "spot"),
             current_positions=values.get("current_positions") or (),
@@ -1197,6 +1230,11 @@ class TradingExecutor:
                 "entry_pct": entry_pct,
                 "leverage": leverage,
                 "source": "strategy_v2",
+                **(
+                    {"current_equity": strategy_equity}
+                    if values.get("strategy_equity") is not None
+                    else {}
+                ),
             },
         )
         inflight_check = getattr(self.order_gateway, "has_inflight", None)
@@ -1205,6 +1243,8 @@ class TradingExecutor:
             and callable(inflight_check)
             and inflight_check(request)
         ):
+            return False
+        if self.runtime_guard and not self.runtime_guard(strategy_id):
             return False
         pending_id = self.order_gateway.submit(request)
         if pending_id:
@@ -1269,6 +1309,8 @@ class TradingExecutor:
             return client
 
         def enqueue_market(signal_type: str, quantity: float, price: float, reason: str) -> bool:
+            if self.runtime_guard and not self.runtime_guard(strategy_id):
+                return False
             return self._execute_signal(
                 strategy_id=strategy_id,
                 strategy_name=strategy_name,
@@ -1332,6 +1374,7 @@ class TradingExecutor:
             create_client_fn=create_grid_client,
             risk_exit_fn=evaluate_grid_risk,
         )
+        runner.engine.order_guard = lambda: self.runtime_guard is None or self.runtime_guard(strategy_id)
         ok, message = runner.startup(initial_price, bars_df=frame)
         if not ok:
             raise RuntimeError(f"grid.startupFailed:{message}")
@@ -1817,10 +1860,21 @@ class TradingExecutor:
                 cur = db.cursor()
                 cur.execute(
                     """
-                    SELECT COALESCE(SUM(COALESCE(profit, 0) - COALESCE(commission_quote, 0)), 0) AS realized_pnl
-                    FROM qd_strategy_trades WHERE strategy_id = %s
+                    SELECT
+                      COALESCE((
+                        SELECT SUM(COALESCE(profit, 0) - COALESCE(commission_quote, commission, 0))
+                        FROM qd_strategy_trades WHERE strategy_id = %s
+                      ), 0)
+                      + COALESCE((
+                        SELECT SUM(COALESCE(amount, 0))
+                        FROM qd_strategy_funding_fees WHERE strategy_id = %s
+                      ), 0)
+                      + COALESCE((
+                        SELECT SUM(COALESCE(amount, 0))
+                        FROM qd_strategy_broker_activities WHERE strategy_id = %s
+                      ), 0) AS realized_pnl
                     """,
-                    (strategy_id,),
+                    (strategy_id, strategy_id, strategy_id),
                 )
                 realized = float((cur.fetchone() or {}).get("realized_pnl") or 0)
                 cur.close()
@@ -1988,6 +2042,9 @@ class TradingExecutor:
         return source_id, code
 
     def _is_strategy_running(self, strategy_id: int, thread: threading.Thread) -> bool:
+        if self.runtime_guard and not self.runtime_guard(strategy_id):
+            self._last_exit_reason[strategy_id] = "strategyRuntime.leaseLost"
+            return False
         with self.lock:
             if self.running_strategies.get(strategy_id) is not thread:
                 return False
@@ -2020,9 +2077,9 @@ class TradingExecutor:
                 SELECT id, symbol, side, size, entry_price, current_price,
                        highest_price, lowest_price, updated_at
                 FROM qd_strategy_positions
-                WHERE strategy_id = %s AND split_part(symbol, ':', 1) = split_part(%s, ':', 1)
+                WHERE strategy_id = %s AND (%s::text IS NULL OR split_part(symbol, ':', 1) = split_part(%s, ':', 1))
                 """,
-                (strategy_id, symbol),
+                (strategy_id, symbol, symbol),
             )
             rows = cur.fetchall() or []
             cur.close()
@@ -2035,30 +2092,7 @@ class TradingExecutor:
         *,
         strategy: dict[str, Any] | None = None,
     ) -> dict[str, dict[str, Any]]:
-        from app.services.strategy_live_guard import resolve_strategy_direction_mode
-
-        output: dict[str, dict[str, Any]] = {}
-        strategy_row = strategy if isinstance(strategy, dict) else (self._load_strategy(strategy_id) or {})
-        owns_both_legs = resolve_strategy_direction_mode(strategy_row) in {"both", "neutral"}
-        for member in candidates:
-            key = str(member.get("key") or "")
-            rows = self._get_current_positions(strategy_id, str(member.get("symbol") or ""))
-            if not rows:
-                continue
-            selected_rows = rows if owns_both_legs else rows[:1]
-            for row in selected_rows:
-                side = str(row.get("side") or "long").strip().lower()
-                if side not in {"long", "short"}:
-                    side = "long"
-                position_key = f"{key}::{side}" if owns_both_legs else key
-                output[position_key] = {
-                    "amount": row.get("size") or 0,
-                    "side": side,
-                    "position_side": side if owns_both_legs else "",
-                    "avg_cost": row.get("entry_price") or 0,
-                    "last_price": row.get("current_price") or 0,
-                }
-        return output
+        return positions_by_symbol(self, strategy_id, candidates, strategy or self._load_strategy(strategy_id))
 
     @staticmethod
     def _live_prices(candidates: list[dict[str, Any]]) -> dict[str, float]:
