@@ -10,6 +10,41 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+@strategy_blp.route('/position-management/trade-history', methods=['GET'])
+@login_required
+def get_position_management_trade_history():
+    """分页返回当前账户的持仓管理交易历史。"""
+    credential_id = request.args.get('credential_id', type=int)
+    if not credential_id:
+        return jsonify({
+            'code': 0,
+            'msg': 'Missing credential_id',
+            'data': {'items': [], 'total': 0, 'page': 1, 'page_size': 20},
+        }), 400
+
+    page = max(1, request.args.get('page', default=1, type=int) or 1)
+    page_size = min(100, max(1, request.args.get('page_size', default=20, type=int) or 20))
+    try:
+        from app.services.live_trading.position_management_history import (
+            list_position_management_trade_history,
+        )
+
+        result = list_position_management_trade_history(
+            user_id=int(g.user_id),
+            credential_id=int(credential_id),
+            page=page,
+            page_size=page_size,
+        )
+        return jsonify({'code': 1, 'msg': 'success', 'data': result})
+    except Exception:
+        logger.exception("get_position_management_trade_history failed")
+        return jsonify({
+            'code': 0,
+            'msg': '加载交易历史失败',
+            'data': {'items': [], 'total': 0, 'page': page, 'page_size': page_size},
+        }), 500
+
+
 @strategy_blp.route('/account/position-snapshot', methods=['GET'])
 @login_required
 def get_managed_position_snapshot():

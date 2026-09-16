@@ -58,6 +58,7 @@ celery_app.conf.update(
         "quantdinger.tasks.fundamental_sync_tick": {"queue": "maintenance"},
         "quantdinger.tasks.worker_heartbeat": {"queue": "maintenance"},
         "quantdinger.tasks.cleanup_runtime_metadata": {"queue": "maintenance"},
+        "quantdinger.tasks.sync_position_management_history": {"queue": "maintenance"},
     },
     beat_schedule={
         "fundamental-sync": {
@@ -87,6 +88,10 @@ celery_app.conf.update(
         "runtime-metadata-cleanup": {
             "task": "quantdinger.tasks.cleanup_runtime_metadata",
             "schedule": 86400.0,
+        },
+        "position-management-history-sync": {
+            "task": "quantdinger.tasks.sync_position_management_history",
+            "schedule": 300.0,
         },
     },
 )

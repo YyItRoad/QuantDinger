@@ -20,6 +20,10 @@ def test_celery_beat_owns_periodic_maintenance():
     assert schedule["ai-calibration-cycle"]["task"] == "quantdinger.tasks.ai_calibration"
     assert schedule["market-catalog-sync"]["task"] == "quantdinger.tasks.market_catalog_sync"
     assert schedule["market-catalog-sync"]["schedule"] == 86400
+    history_sync = schedule["position-management-history-sync"]
+    assert history_sync["task"] == "quantdinger.tasks.sync_position_management_history"
+    assert history_sync["schedule"] == 300
+    assert celery_app.conf.task_routes[history_sync["task"]]["queue"] == "maintenance"
 
 
 def test_fast_analysis_dispatches_to_celery(monkeypatch):

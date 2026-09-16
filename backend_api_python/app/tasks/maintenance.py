@@ -33,6 +33,16 @@ def cleanup_runtime_metadata() -> dict:
     )
 
 
+@celery_app.task(name="quantdinger.tasks.sync_position_management_history")
+def sync_position_management_history() -> dict:
+    """定时同步已停止的持仓管理策略；当前阶段明确不自动删除。"""
+    from app.services.live_trading.position_management_history import (
+        sync_stopped_position_management_history,
+    )
+
+    return sync_stopped_position_management_history()
+
+
 @celery_app.task(
     bind=True,
     name="quantdinger.tasks.reflection",
