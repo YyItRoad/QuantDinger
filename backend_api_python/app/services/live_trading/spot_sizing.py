@@ -110,6 +110,23 @@ def get_spot_base_holding(
     base_u = base.upper()
 
     try:
+        from app.services.live_trading.gate import GateStockClient
+
+        if isinstance(client, GateStockClient):
+            raw = client.get_positions(symbol=base_u)
+            for row in client._rows(raw):
+                if str(row.get("symbol") or "").upper() != base_u:
+                    continue
+                total = _pick_free_from_row(row, "volume")
+                available = _pick_free_from_row(row, "available")
+                avg_cost = _pick_cost_from_row(row, "avg_cost_price", "diluted_cost_price")
+                return _spot_holding(total, available, avg_cost)
+    except Exception as e:
+        if strict:
+            raise
+        logger.warning("spot base holding (gate stock): %s", e)
+
+    try:
         from app.services.live_trading.binance_spot import BinanceSpotClient
 
         if isinstance(client, BinanceSpotClient):
@@ -228,13 +245,30 @@ def get_spot_base_holding(
         if isinstance(client, HtxClient) and getattr(client, "market_type", "") == "spot":
             balance = client.get_balance()
             items = (((balance.get("data") or {}).get("list")) if isinstance(balance, dict) else None) or []
+            # HTX splits one currency over several rows: ``trade`` is the
+            # sellable part, ``frozen`` is locked by resting orders and still
+            # owned.  Order is not guaranteed, so accumulate instead of
+            # returning on the first row that matches the base asset.
+            tradable = 0.0
+            frozen = 0.0
+            avail = 0.0
+            matched = False
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                if str(item.get("currency") or "").upper() == base_u:
-                    total = _pick_free_from_row(item, "balance")
-                    avail = _pick_free_from_row(item, "available", "balance")
-                    return _spot_holding(total, avail)
+                if str(item.get("currency") or "").upper() != base_u:
+                    continue
+                balance_type = str(item.get("type") or "").strip().lower()
+                if balance_type == "frozen":
+                    matched = True
+                    frozen += _pick_free_from_row(item, "balance")
+                elif balance_type == "trade":
+                    matched = True
+                    tradable += _pick_free_from_row(item, "balance")
+                    avail += _pick_free_from_row(item, "available", "balance")
+                # Other balance types are not part of this spot trading inventory.
+            if matched:
+                return _spot_holding(tradable + frozen, avail)
     except Exception as e:
         if strict:
             raise
