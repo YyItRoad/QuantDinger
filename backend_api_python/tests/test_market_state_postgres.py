@@ -238,3 +238,73 @@ def test_schedule_ignores_completed_noncrypto_and_stopped(postgres_repo):
     bar = datetime(2026, 9, 17, 0, tzinfo=timezone.utc)
     repo.save_result(1, a['id'], 1, bar, result_value())
     assert ScheduleRepository().reserve_due(bar + timedelta(minutes=1)) == []
+
+
+def test_celery_consumption_to_record_api_with_duplicate_delivery(postgres_repo, monkeypatch):
+    """真实 Celery 消费线程及 JSON 序列化，内存 Broker、真实测试数据库、假模型。"""
+    import json
+    from threading import Event
+    from celery.contrib.testing.worker import start_worker
+    from celery.signals import task_postrun
+    from flask import Flask
+    from flask_smorest import Api
+    from app.celery_app import celery_app, FlaskContextTask
+    from app.market_state import tasks
+    from app.market_state.routes import blp
+    from app.market_state.service import AnalysisService
+
+    repo, _ = postgres_repo
+    task = repo.create_task(1, {**task_value(), 'timeframe': '1h'})
+    now = datetime(2026, 9, 17, 0, 5, tzinfo=timezone.utc)
+    end = int(now.timestamp() // 3600) * 3600
+    bars = [dict(time=end - (180 - i) * 3600, open=100.0 + i, high=102.0 + i,
+                 low=99.0 + i, close=101.0 + i, volume=10.0) for i in range(181)]
+    calls = []
+    def model(messages):
+        calls.append(messages)
+        return json.dumps(dict(trend='UP', structure='CONTINUATION', ma_state='BULL_ALIGNED',
+                               position='HIGH', momentum='UP', phase='ADVANCE', confidence=4,
+                               reason='消费链路验证', evidence=['价格持续推进'], counter_evidence=[],
+                               fact_refs=['candles'])), {'requested_model': 'test-only'}
+
+    application = Flask('analysis-consumption-test')
+    application.config.update(TESTING=True, API_TITLE='test', API_VERSION='1', OPENAPI_VERSION='3.0.3')
+    Api(application).register_blueprint(blp, url_prefix='/api/market-state')
+    monkeypatch.setattr(FlaskContextTask, '_flask_app', application)
+    monkeypatch.setattr(tasks, 'utc_now', lambda: now)
+    monkeypatch.setattr(tasks, 'AnalysisService', lambda store: AnalysisService(
+        store, fetch=lambda *_: bars, model=model, clock=lambda: now))
+    monkeypatch.setattr('app.utils.auth.verify_token', lambda _: {'user_id': 1, '_verified_user_role': 'user'})
+    monkeypatch.setenv('MARKET_STATE_EXECUTION_ENABLED', 'true')
+    monkeypatch.delenv('MARKET_STATE_DEMO_ENABLED', raising=False)
+    monkeypatch.setitem(celery_app.conf, 'broker_url', 'memory://')
+    monkeypatch.setitem(celery_app.conf, 'result_backend', 'cache+memory://')
+    done = Event()
+    consumed = []
+    def completed(sender=None, kwargs=None, state=None, **unused):
+        if sender.name == 'quantdinger.tasks.market_state_execute':
+            consumed.append((kwargs, state))
+            done.set()
+    task_postrun.connect(completed, weak=False)
+    try:
+        with start_worker(celery_app, pool='solo', queues=['maintenance', 'ai'],
+                          perform_ping_check=False, shutdown_timeout=15):
+            tasks.dispatch_analysis.apply_async()
+            assert done.wait(15), '未消费分析任务'
+            assert consumed[0][1] == 'SUCCESS'
+            assert len(calls) == 1
+            record = repo.list('records', 1, 1, 10)['items'][0]
+            assert record['task_id'] == task['id']
+            client = application.test_client()
+            headers = {'Authorization': 'Bearer test'}
+            detail = client.get(f"/api/market-state/records/{record['id']}", headers=headers)
+            assert detail.status_code == 200 and detail.json['data']['details']['facts']['ma7']
+            assert client.get('/api/market-state/tasks', headers=headers).status_code == 200
+            done.clear()
+            tasks.execute_analysis.apply_async(kwargs=consumed[0][0])
+            assert done.wait(15), '未消费重复消息'
+            assert consumed[-1][1] == 'SUCCESS'
+            assert len(calls) == 1
+            assert repo.list('records', 1, 1, 10)['total'] == 1
+    finally:
+        task_postrun.disconnect(completed)
