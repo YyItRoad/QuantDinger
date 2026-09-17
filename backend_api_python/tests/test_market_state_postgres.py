@@ -20,6 +20,7 @@ def postgres_repo(monkeypatch):
         pytest.skip('需要显式配置专用 MARKET_STATE_TEST_DATABASE_URL')
     schema = 'analysis_test_' + uuid4().hex
     migration = (Path(__file__).parents[1] / 'migrations/20260917_market_state.sql').read_text()
+    schedule_migration = (Path(__file__).parents[1] / 'migrations/20260917_market_state_schedule.sql').read_text()
     with psycopg2.connect(url) as db:
         with db.cursor() as cur:
             cur.execute(f'CREATE SCHEMA {schema}')
@@ -28,6 +29,8 @@ def postgres_repo(monkeypatch):
             cur.execute('INSERT INTO qd_users VALUES (1), (2)')
             cur.execute(migration)
             cur.execute(migration)  # 迁移幂等。
+            cur.execute(schedule_migration)
+            cur.execute(schedule_migration)
 
     @contextmanager
     def transaction():
@@ -41,6 +44,7 @@ def postgres_repo(monkeypatch):
             connection.close()
 
     monkeypatch.setattr('app.market_state.repository.get_db_transaction', transaction)
+    monkeypatch.setattr('app.market_state.scheduling.get_db_transaction', transaction)
     yield AnalysisRepository(), transaction
     with psycopg2.connect(url) as db:
         with db.cursor() as cur:
@@ -177,3 +181,60 @@ def test_single_analysis_to_database_and_duplicate_reuse(postgres_repo):
     with pytest.raises(ValueError):
         service.run_once(1, task['id'])
     assert len(calls) == 1
+
+
+def test_schedule_reservation_concurrency_and_start_once(postgres_repo):
+    from app.market_state.scheduling import ScheduleRepository
+    repo, _ = postgres_repo
+    task = repo.create_task(1, {**task_value(), 'timeframe': '1h'})
+    schedule = ScheduleRepository()
+    now = datetime(2026, 9, 17, 0, 1, tzinfo=timezone.utc)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: schedule.reserve_due(now), range(4)))
+    items = [item for batch in results for item in batch]
+    assert len(items) == 1
+    item = items[0]
+    bar = datetime.fromisoformat(item['bar_close_at'])
+    def start(_):
+        return schedule.start_reserved(1, task['id'], 1, item['lease_token'], bar, now)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert sum(pool.map(start, range(4))) == 1
+    schedule.release_pending(1, task['id'], item['lease_token'], bar)
+    assert repo.get_task(1, task['id'])['lease_token'] is not None
+    schedule.release(1, task['id'], item['lease_token'])
+    assert schedule.reserve_due(now) == []
+    assert len(schedule.reserve_due(now + timedelta(hours=1))) == 1
+
+
+def test_schedule_grace_expiry_and_revision(postgres_repo):
+    from app.market_state.scheduling import ScheduleRepository
+    repo, _ = postgres_repo
+    task = repo.create_task(1, {**task_value(), 'timeframe': '1h'})
+    schedule = ScheduleRepository()
+    now = datetime(2026, 9, 17, 0, 0, 10, tzinfo=timezone.utc)
+    assert schedule.reserve_due(now) == []
+    now += timedelta(seconds=30)
+    item = schedule.reserve_due(now)[0]
+    bar = datetime.fromisoformat(item['bar_close_at'])
+    assert not schedule.start_reserved(2, task['id'], 1, item['lease_token'], bar, now)
+    assert schedule.reserve_due(now + timedelta(minutes=29)) == []
+    next_item = schedule.reserve_due(now + timedelta(minutes=31))[0]
+    assert next_item['lease_token'] != item['lease_token']
+    assert not schedule.start_reserved(1, task['id'], 1, item['lease_token'], bar, now + timedelta(minutes=31))
+    schedule.release(1, task['id'], item['lease_token'])
+    assert str(repo.get_task(1, task['id'])['lease_token']) == next_item['lease_token']
+    repo.change_task(1, task['id'], enabled=False)
+    repo.change_task(1, task['id'], enabled=True)
+    assert not schedule.start_reserved(1, task['id'], 1, next_item['lease_token'], bar, now + timedelta(minutes=31))
+
+
+def test_schedule_ignores_completed_noncrypto_and_stopped(postgres_repo):
+    from app.market_state.scheduling import ScheduleRepository
+    repo, _ = postgres_repo
+    a = repo.create_task(1, task_value())
+    b = repo.create_task(1, task_value('ETH/USDT'))
+    repo.create_task(1, {**task_value('AAPL'), 'market': 'USStock', 'exchange_id': ''})
+    repo.change_task(1, b['id'], enabled=False)
+    bar = datetime(2026, 9, 17, 0, tzinfo=timezone.utc)
+    repo.save_result(1, a['id'], 1, bar, result_value())
+    assert ScheduleRepository().reserve_due(bar + timedelta(minutes=1)) == []

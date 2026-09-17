@@ -140,11 +140,13 @@ class AnalysisService:
         self.fetch, self.indicator, self.execute, self.model = fetch, indicator, execute, model
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def run_once(self, user_id, task_id, recipe=None):
+    def run_once(self, user_id, task_id, recipe=None, *, expected_revision=None, expected_bar=None):
         recipe = deepcopy(recipe or default_recipe())
         task = self.repository.get_task(user_id, task_id)
         if not task or not task['enabled'] or task.get('deleted_at'):
             raise ValueError('分析任务不存在、已停止或已删除')
+        if expected_revision is not None and task['revision'] != expected_revision:
+            raise ValueError('排队期间分析任务已变更')
         if task['market'] != 'Crypto' or task['timeframe'] not in SECONDS:
             raise ValueError('单次执行首版仅支持 Crypto 的 1h、4h、1d；其他市场待交易日历接入')
         if not task.get('exchange_id') or task['market_type'] not in ('spot', 'swap'):
@@ -154,6 +156,8 @@ class AnalysisService:
         now = self.clock()
         bars = self.fetch(task, recipe.bars + 1)
         frame, close_at = closed_frame(bars, task['timeframe'], recipe.bars, now)
+        if expected_bar is not None and close_at != expected_bar:
+            raise ValueError('排队期间分析周期已过期')
         previous = self.repository.get_result_for_bar(user_id, task_id, close_at)
         if previous:
             return previous

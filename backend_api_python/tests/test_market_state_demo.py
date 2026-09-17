@@ -144,3 +144,4 @@ def test_schema_registered_after_base_schema(monkeypatch):
     monkeypatch.setattr(db, '_apply_migration_component', component)
     db._apply_init_sql(MagicMock(), strict=True)
     assert names.index('market-state') == names.index('schema-init') + 1
+    assert names.index('market-state-schedule') == names.index('market-state') + 1

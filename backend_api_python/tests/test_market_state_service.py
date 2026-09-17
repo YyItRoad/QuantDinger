@@ -99,6 +99,17 @@ def test_existing_result_skips_calculation_and_model(setup):
     model.assert_not_called()
 
 
+def test_queued_revision_and_bar_expiry_before_model(setup):
+    service, repo, fetch, _, _, model = setup
+    with pytest.raises(ValueError, match='任务已变更'):
+        service.run_once(1, 1, expected_revision=9)
+    fetch.assert_not_called()
+    with pytest.raises(ValueError, match='周期已过期'):
+        service.run_once(1, 1, expected_bar=datetime(2026, 9, 16, 23, tzinfo=timezone.utc))
+    model.assert_not_called()
+    repo.save_result.assert_not_called()
+
+
 @pytest.mark.parametrize('change', ['missing', 'stopped', 'noncrypto'])
 def test_task_checks_before_fetch(setup, change):
     service, repo, fetch, _, _, model = setup
