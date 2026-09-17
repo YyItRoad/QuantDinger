@@ -22,6 +22,18 @@ def public(row):
 
 
 class AnalysisRepository:
+    def get_task(self, user_id, task_id):
+        with get_db_transaction() as db, closing(db.cursor()) as cur:
+            cur.execute('SELECT * FROM qd_market_state_tasks WHERE user_id=%s AND id=%s AND deleted_at IS NULL',
+                        (user_id, task_id))
+            return public(cur.fetchone())
+
+    def get_result_for_bar(self, user_id, task_id, bar_close_at):
+        with get_db_transaction() as db, closing(db.cursor()) as cur:
+            cur.execute('SELECT * FROM qd_market_state_results WHERE user_id=%s AND task_id=%s AND bar_close_at=%s',
+                        (user_id, task_id, bar_close_at))
+            return public(cur.fetchone())
+
     def list(self, kind, user_id, page, page_size, symbol='', timeframe=''):
         if kind not in ('tasks', 'records'):
             raise ValueError('不支持的列表类型')

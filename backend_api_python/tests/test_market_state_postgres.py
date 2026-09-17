@@ -62,6 +62,8 @@ def test_lifecycle_scope_and_unique_identity(postgres_repo):
     repo, _ = postgres_repo
     assert repo.list('records', 1, 1, 10)['total'] == 0
     task = repo.create_task(1, task_value())
+    assert repo.get_task(1, task['id']) == task
+    assert repo.get_task(2, task['id']) is None
     assert repo.change_task(2, task['id'], delete=True) is None
     with pytest.raises(ValueError):
         repo.create_task(1, {**task_value(), 'instrument_id': 'BTCUSDT'})
@@ -69,6 +71,7 @@ def test_lifecycle_scope_and_unique_identity(postgres_repo):
     assert not stopped['enabled'] and stopped['revision'] == 2
     assert repo.change_task(1, task['id'], enabled=True)['revision'] == 3
     repo.change_task(1, task['id'], delete=True)
+    assert repo.get_task(1, task['id']) is None
     assert repo.list('tasks', 1, 1, 10)['total'] == 0
     assert repo.change_task(1, task['id'], enabled=True) is None
     assert repo.create_task(1, task_value())['id'] != task['id']
@@ -80,6 +83,8 @@ def test_results_snapshot_idempotency_pagination_and_retention(postgres_repo):
     sol = repo.create_task(1, task_value('SOL/USDT'))
     bar = datetime.now(timezone.utc) - timedelta(hours=4)
     first = repo.save_result(1, btc['id'], 1, bar, result_value())
+    assert repo.get_result_for_bar(1, btc['id'], bar) == first
+    assert repo.get_result_for_bar(2, btc['id'], bar) is None
     assert repo.save_result(1, btc['id'], 1, bar, {**result_value(), 'summary': '不可覆盖'})['summary'] == '集成测试结果'
     assert repo.get_record(2, first['id']) is None
     repo.save_result(1, sol['id'], 1, bar, result_value())
@@ -143,3 +148,32 @@ def test_routes_use_database_by_default(postgres_repo, monkeypatch):
     assert response.json['mode'] == 'database' and response.json['data']['total'] == 0
     assert client.post('/api/market-state/tasks', json=task_value(), headers=headers).status_code == 201
     assert client.get('/api/market-state/tasks', headers=headers).json['data']['total'] == 1
+
+
+def test_single_analysis_to_database_and_duplicate_reuse(postgres_repo):
+    import json
+    from app.market_state.service import AnalysisService
+    repo, _ = postgres_repo
+    task = repo.create_task(1, {**task_value(), 'timeframe': '1h'})
+    now = datetime(2026, 9, 17, 0, 5, tzinfo=timezone.utc)
+    end = int(now.timestamp() // 3600) * 3600
+    rows = [dict(time=end - (180 - i) * 3600, open=100.0 + i, high=102.0 + i,
+                 low=99.0 + i, close=101.0 + i, volume=10.0) for i in range(181)]
+    calls = []
+    def model(messages):
+        calls.append(messages)
+        return json.dumps(dict(trend='UP', structure='CONTINUATION', ma_state='BULL_ALIGNED',
+                               position='HIGH', momentum='UP', phase='ADVANCE', confidence=4,
+                               reason='集成测试', evidence=['均线向上'], counter_evidence=[], fact_refs=['ma7'])), {'requested_model': 'fake'}
+    service = AnalysisService(repo, fetch=lambda *_: rows, model=model, clock=lambda: now)
+    record = service.run_once(1, task['id'])
+    assert repo.get_record(1, record['id']) == record
+    assert len(record['details']['input']) == 180
+    assert service.run_once(1, task['id']) == record
+    assert len(calls) == 1
+    with pytest.raises(ValueError):
+        service.run_once(2, task['id'])
+    repo.change_task(1, task['id'], enabled=False)
+    with pytest.raises(ValueError):
+        service.run_once(1, task['id'])
+    assert len(calls) == 1
