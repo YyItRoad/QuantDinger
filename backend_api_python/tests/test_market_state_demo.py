@@ -81,7 +81,7 @@ def headers(user=1):
 
 def test_api_requires_login_and_explicit_demo_switch(api_client, monkeypatch):
     assert api_client.get('/api/market-state/records').status_code == 401
-    monkeypatch.delenv('MARKET_STATE_DEMO_ENABLED')
+    monkeypatch.delenv('MARKET_STATE_DEMO_DB')
     response = api_client.get('/api/market-state/records', headers=headers())
     assert response.status_code == 503
     assert response.json['mode'] == 'unavailable'
@@ -117,3 +117,30 @@ def test_api_task_lifecycle(api_client):
 @pytest.mark.parametrize('body', [[], {}, {'market': 'Crypto', 'symbol': 'BTC', 'timeframe': '5m'}])
 def test_api_rejects_invalid_creation(api_client, body):
     assert api_client.post('/api/market-state/tasks', json=body, headers=headers()).status_code == 400
+
+
+def test_database_failure_returns_unavailable_without_demo_fallback(api_client, monkeypatch):
+    from psycopg2 import OperationalError
+    from app.market_state.repository import AnalysisRepository
+    monkeypatch.delenv('MARKET_STATE_DEMO_ENABLED')
+    def fail(*args):
+        raise OperationalError('test database unavailable')
+    monkeypatch.setattr(AnalysisRepository, 'list', fail)
+    response = api_client.get('/api/market-state/records', headers=headers())
+    assert response.status_code == 503
+    assert response.json['mode'] == 'unavailable'
+    assert response.json['data'] is None
+
+
+def test_schema_registered_after_base_schema(monkeypatch):
+    from unittest.mock import MagicMock
+    from app.utils import db
+    names = []
+    monkeypatch.setattr(db, 'get_db_connection', MagicMock())
+    def component(*args, **kwargs):
+        names.append(kwargs['name'])
+        if kwargs['name'] == 'market-state':
+            assert kwargs['path'].is_file()
+    monkeypatch.setattr(db, '_apply_migration_component', component)
+    db._apply_init_sql(MagicMock(), strict=True)
+    assert names.index('market-state') == names.index('schema-init') + 1

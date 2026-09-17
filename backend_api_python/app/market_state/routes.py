@@ -3,11 +3,15 @@ import os
 from functools import lru_cache, wraps
 
 from flask import g, jsonify, request
+from psycopg2 import Error as DatabaseError
 from app.openapi.blueprint import HumanBlueprint
 from app.utils.auth import login_required
+from app.utils.logger import get_logger
 from .demo_repository import DemoRepository
+from .repository import AnalysisRepository
 
 blp = HumanBlueprint('market_state', __name__)
+logger = get_logger(__name__)
 
 
 @lru_cache(maxsize=4)
@@ -17,21 +21,30 @@ def repository(path):
 
 def reply(data=None, msg='success', status=200):
     return jsonify({'code': 1 if status < 400 else 0, 'msg': msg,
-                    'data': data, 'mode': 'demo' if status != 503 else 'unavailable'}), status
+                    'data': data, 'mode': getattr(g, 'market_state_mode', 'unavailable')}), status
 
 
-def demo_endpoint(fn):
+def analysis_endpoint(fn):
     @wraps(fn)
     def wrapped(*args, **kwargs):
         path = os.getenv('MARKET_STATE_DEMO_DB', '').strip()
-        if os.getenv('MARKET_STATE_DEMO_ENABLED', '').lower() != 'true' or not path:
-            return reply(msg='分析模块演示模式未开启，真实分析功能尚未接入', status=503)
-        g.market_state_repository = repository(path)
-        g.market_state_repository.seed(g.user_id)
+        if os.getenv('MARKET_STATE_DEMO_ENABLED', '').lower() == 'true':
+            if not path:
+                return reply(msg='演示存储路径未配置', status=503)
+            g.market_state_mode = 'demo'
+            g.market_state_repository = repository(path)
+            g.market_state_repository.seed(g.user_id)
+        else:
+            g.market_state_mode = 'database'
+            g.market_state_repository = AnalysisRepository()
         try:
             return fn(*args, **kwargs)
         except ValueError as exc:
             return reply(msg=str(exc), status=400)
+        except DatabaseError:
+            logger.exception('分析模块存储请求失败')
+            g.market_state_mode = 'unavailable'
+            return reply(msg='分析存储暂不可用，请确认数据库连接及迁移已完成', status=503)
     return login_required(wrapped)
 
 
@@ -55,26 +68,26 @@ def listing(kind):
 
 
 @blp.route('/records', methods=['GET'])
-@demo_endpoint
+@analysis_endpoint
 def list_records():
     return listing('records')
 
 
 @blp.route('/records/<int:record_id>', methods=['GET'])
-@demo_endpoint
+@analysis_endpoint
 def get_record(record_id):
     row = g.market_state_repository.get_record(g.user_id, record_id)
     return reply(row) if row else reply(msg='分析记录不存在', status=404)
 
 
 @blp.route('/tasks', methods=['GET'])
-@demo_endpoint
+@analysis_endpoint
 def list_tasks():
     return listing('tasks')
 
 
 @blp.route('/tasks', methods=['POST'])
-@demo_endpoint
+@analysis_endpoint
 def create_task():
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -105,7 +118,7 @@ def create_task():
 
 
 @blp.route('/tasks/<int:task_id>', methods=['PATCH', 'DELETE'])
-@demo_endpoint
+@analysis_endpoint
 def update_task(task_id):
     delete = request.method == 'DELETE'
     enabled = False

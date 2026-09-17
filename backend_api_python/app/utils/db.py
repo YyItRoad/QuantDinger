@@ -279,6 +279,12 @@ def _apply_init_sql(logger, *, strict: bool = False):
             _apply_migration_component(
                 conn,
                 logger,
+                name="market-state",
+                path=init_sql.parent / "20260917_market_state.sql",
+            )
+            _apply_migration_component(
+                conn,
+                logger,
                 name="market-symbols-master",
                 path=symbols_sql,
                 baseline_table="qd_market_symbols",
