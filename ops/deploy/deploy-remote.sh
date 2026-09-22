@@ -134,8 +134,11 @@ docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE" pull \
   celery-beat
 
 ###############################################################################
-# 7. Restart the 5 backend services together (workers hold the same code)   ##
+# 7. Run database migration (idempotent) and restart the 5 backend services ##
 ###############################################################################
+log "Running database migration (idempotent — re-running is safe)..."
+docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE" run --rm migration
+
 log "Restarting backend services..."
 docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE" up -d \
   backend \

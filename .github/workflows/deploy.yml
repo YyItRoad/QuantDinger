@@ -216,6 +216,10 @@ jobs:
           port: ${{ secrets.SERVER_PORT || 22 }}
           command_timeout: 10m
           command_stop: true
+          # appleboy/ssh-action: declare which step-level env vars to forward
+          # into the remote shell's environment. Without this, $DEPLOY_DIR et al.
+          # are unbound inside `set -u` and the script aborts.
+          envs: IMAGE_TAG,GHCR_IMAGE,DEPLOY_DIR,COMPOSE_FILE,PRUNE,REPO_OWNER
           script: |
             set -euo pipefail
             chmod +x "$DEPLOY_DIR/.deploy-remote.sh"
