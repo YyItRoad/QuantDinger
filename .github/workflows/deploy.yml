@@ -214,7 +214,7 @@ jobs:
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
-          command_timeout: 10m
+          command_timeout: 30m
           command_stop: true
           # appleboy/ssh-action: declare which step-level env vars to forward
           # into the remote shell's environment. Without this, $DEPLOY_DIR et al.
