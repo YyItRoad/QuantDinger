@@ -222,8 +222,19 @@ jobs:
           envs: IMAGE_TAG,GHCR_IMAGE,DEPLOY_DIR,COMPOSE_FILE,PRUNE,REPO_OWNER
           script: |
             set -euo pipefail
-            chmod +x "$DEPLOY_DIR/.deploy-remote.sh"
-            bash "$DEPLOY_DIR/.deploy-remote.sh"
+            # appleboy/scp-action@v1 quirk: with source being a relative path
+            # and target being a non-existent absolute file path, scp-action
+            # creates target as a directory and nests source's path inside.
+            # Normalize: if target is a dir, find the actual script inside.
+            target="$DEPLOY_DIR/.deploy-remote.sh"
+            if [ -d "$target" ]; then
+              script_path="$(find "$target" -name 'deploy-remote.sh' -type f | head -1 || true)"
+            else
+              script_path="$target"
+            fi
+            [ -f "$script_path" ] || { echo "::error::Cannot find deploy-remote.sh under $DEPLOY_DIR"; exit 1; }
+            chmod +x "$script_path"
+            bash "$script_path"
 
       - name: Post-deploy health probe
         if: "!inputs.dry_run"
