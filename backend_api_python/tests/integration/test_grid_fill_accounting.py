@@ -45,6 +45,7 @@ def ledger(monkeypatch):
         "qd_quick_trades",
         "qd_exchange_credentials",
         "qd_execution_events",
+        "qd_strategies_trading",
     )
     with admin.cursor() as cur:
         cur.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
