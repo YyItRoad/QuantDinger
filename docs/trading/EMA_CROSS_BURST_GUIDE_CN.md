@@ -226,12 +226,6 @@ min_body_rise_pct = 0.8
 
 详细接管流程见[持仓管理使用指南](POSITION_MANAGEMENT_GUIDE_CN.md)。
 
-## AiCoin 指标
-
-AiCoin 兼容脚本和完整使用说明见
-[AiCoin EMA 金叉爆发指标](../AiCoin_EMA金叉爆发指标.md)。该版本只画图和注册预警条件，
-不包含 `enterLong`、`enterShort` 等交易指令。
-
 ## 风险说明
 
 - 指标标记不是订单成交证明。

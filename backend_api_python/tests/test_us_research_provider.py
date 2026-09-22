@@ -40,7 +40,7 @@ def test_sec_research_normalizes_filings_and_does_not_infer_form4_direction(monk
     result = us_research.fetch_sec_research("AAPL", http_get=fake_get)
 
     assert result["identity"]["cik"] == "0000320193"
-    assert [item["form"] for item in result["sec_filings"]] == ["8-K", "10-Q"]
+    assert [item["form"] for item in result["sec_filings"]] == ["8-K", "4", "10-Q"]
     assert result["sec_filings"][0]["url"].endswith("/000032019326000001/a8k.htm")
     assert result["insider_activity"]["recent_form4_filing_count"] == 1
     assert result["insider_activity"]["scope"] == "form4_filing_activity_not_trade_direction"
@@ -64,6 +64,10 @@ class FakeTicker:
         "dateShortInterest": 1_788_739_200,
     }
     options = ("2026-09-18",)
+    institutional_holders = pd.DataFrame([
+        {"Date Reported": pd.Timestamp("2026-06-30"), "Holder": "Fund A", "pctHeld": 0.081, "Shares": 81_000, "Value": 16_200_000},
+        {"Date Reported": pd.Timestamp("2026-06-30"), "Holder": "Fund B", "pctHeld": 0.052, "Shares": 52_000, "Value": 10_400_000},
+    ])
 
     def option_chain(self, expiry):
         assert expiry == "2026-09-18"
@@ -94,6 +98,103 @@ def test_yahoo_research_labels_consensus_options_and_short_interest_scope():
     assert result["options"]["scope"] == "nearest_expiry_snapshot"
     assert result["short_interest"]["short_percent_of_float_pct"] == 1.25
     assert result["short_interest"]["scope"] == "reported_short_interest_not_daily_short_volume"
+    assert [item["name"] for item in result["ownership"]["top_institutional_holders"]] == ["Fund A", "Fund B"]
+    assert result["ownership"]["top_institutional_holders"][0]["pct_held"] == 8.1
+    assert result["ownership"]["top_holders_reported_pct"] == 13.3
+    assert result["ownership"]["other_shareholders_pct"] == 86.7
+    assert result["ownership"]["scope"] == "latest_available_reported_institutional_holders_not_realtime_ownership"
+
+
+def test_yahoo_ownership_lookup_does_not_require_quote_or_options_data():
+    class OwnershipOnlyTicker:
+        institutional_holders = FakeTicker.institutional_holders
+
+        @property
+        def info(self):
+            raise AssertionError("ownership lookup must not load quote info")
+
+        @property
+        def options(self):
+            raise AssertionError("ownership lookup must not load option chains")
+
+    class OwnershipOnlyYahoo:
+        @staticmethod
+        def Ticker(symbol):
+            assert symbol == "AAPL"
+            return OwnershipOnlyTicker()
+
+    result = us_research.fetch_yahoo_us_ownership("AAPL", yf_client=OwnershipOnlyYahoo)
+
+    assert result["ownership"]["top_institutional_holders"][0]["name"] == "Fund A"
+
+
+def test_nasdaq_ownership_normalizes_top_holders_and_percentages():
+    def fake_get(url, **kwargs):
+        assert url.endswith("/TSLA/institutional-holdings")
+        assert kwargs["params"]["limit"] == 10
+        return FakeResponse({
+            "data": {
+                "ownershipSummary": {
+                    "SharesOutstandingPCT": {"label": "Institutional Ownership", "value": "49.31%"},
+                    "ShareoutstandingTotal": {"label": "Total Shares Outstanding (millions)", "value": "4"},
+                },
+                "holdingsTransactions": {
+                    "table": {
+                        "rows": [
+                            {
+                                "ownerName": "Fund A",
+                                "date": "06/30/2026",
+                                "sharesHeld": "400,000",
+                                "marketValue": "$80,000",
+                            },
+                            {
+                                "ownerName": "Fund B",
+                                "date": "06/30/2026",
+                                "sharesHeld": "200,000",
+                                "marketValue": "$40,000",
+                            },
+                            {
+                                "ownerName": "Fund C",
+                                "date": "06/30/2026",
+                                "sharesHeld": "100,000",
+                                "marketValue": "$20,000",
+                            },
+                        ]
+                    }
+                },
+            }
+        })
+
+    result = us_research.fetch_nasdaq_us_ownership("TSLA", http_get=fake_get)
+    ownership = result["ownership"]
+
+    assert ownership["source"] == "nasdaq"
+    assert ownership["shares_outstanding"] == 4_000_000
+    assert ownership["institutional_ownership_pct"] == 49.31
+    assert ownership["top_institutional_holders"][0] == {
+        "name": "Fund A",
+        "shares": 400_000,
+        "value_usd": 80_000_000,
+        "pct_held": 10.0,
+        "report_date": "2026-06-30",
+    }
+    assert ownership["top_holders_reported_pct"] == 17.5
+    assert ownership["other_shareholders_pct"] == 82.5
+
+
+def test_collect_ownership_falls_back_to_yahoo_and_reports_nasdaq_error(monkeypatch):
+    monkeypatch.setattr(us_research, "get_cached", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(us_research, "set_cached", lambda *_args, **_kwargs: None)
+
+    def failed_nasdaq(*_args, **_kwargs):
+        raise RuntimeError("nasdaq unavailable")
+
+    monkeypatch.setattr(us_research, "fetch_nasdaq_us_ownership", failed_nasdaq)
+    result = us_research.collect_us_ownership("AAPL", yf_client=FakeYahoo)
+
+    assert result["ownership"]["source"] == "yahoo_finance"
+    assert result["_provider_status"]["attempted"] == ["nasdaq_ownership", "yahoo_ownership"]
+    assert "RuntimeError" in result["_provider_status"]["errors"]["nasdaq_ownership"]
 
 
 def test_nearest_atm_iv_ignores_yahoo_placeholder_values():

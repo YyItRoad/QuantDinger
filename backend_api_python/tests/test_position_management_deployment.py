@@ -56,6 +56,10 @@ class _Sources:
     def get_source(_source_id, user_id=None):
         return {"id": 9, "name": "Generic short manager", "code": GENERIC_SOURCE}
 
+    @staticmethod
+    def get_latest_version(_source_id, user_id=None):
+        return {"id": 19, "code": GENERIC_SOURCE, "metadata": {}}
+
 
 def test_deployment_persists_management_config_symbol_and_timeframe(monkeypatch):
     cursor = _Cursor()
@@ -76,7 +80,7 @@ def test_deployment_persists_management_config_symbol_and_timeframe(monkeypatch)
     }
 
     StrategyV2DeploymentService().save(user_id=7, payload=payload)
-    trading_config = json.loads(cursor.params[-1])
+    trading_config = json.loads(cursor.params[-2])
 
     assert cursor.params[5] == "M/USDT"
     assert cursor.params[9] == "swap"

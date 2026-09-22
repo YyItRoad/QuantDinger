@@ -243,6 +243,50 @@ def test_last_completed_bar_cutoff_is_aligned_to_the_previous_minute():
     assert cutoff == pd.Timestamp("2026-08-31 18:51:00")
 
 
+def test_future_window_is_capped_before_requesting_crypto_candles(monkeypatch):
+    cutoff = pd.Timestamp("2026-09-16 16:09:00")
+    captured = {}
+
+    def get_kline(**kwargs):
+        captured.update(kwargs)
+        return [
+            {
+                "time": int(timestamp.timestamp()),
+                "open": 100,
+                "high": 101,
+                "low": 99,
+                "close": 100,
+                "volume": 10,
+            }
+            for timestamp in pd.date_range(
+                "2026-09-16 16:00:00",
+                cutoff,
+                freq="1min",
+                tz="UTC",
+            )
+        ]
+
+    monkeypatch.setattr(market_data._cache, "get", lambda _key: None)
+    monkeypatch.setattr(market_data._cache, "put", lambda *_args: None)
+    monkeypatch.setattr(market_data, "_last_completed_bar_open", lambda _seconds, **_: cutoff)
+    monkeypatch.setattr(market_data.DataSourceFactory, "get_kline", get_kline)
+
+    frame = market_data._load_strategy_frame_uncached(
+        "Crypto",
+        "BTC/USDT",
+        "1m",
+        datetime(2026, 9, 16, 16, tzinfo=timezone.utc),
+        datetime(2026, 9, 16, 23, 59, 59, tzinfo=timezone.utc),
+        market_type="swap",
+    )
+
+    assert captured["before_time"] == int(
+        datetime(2026, 9, 16, 16, 10, tzinfo=timezone.utc).timestamp()
+    )
+    assert frame.index.max() == cutoff
+    assert len(frame) == 10
+
+
 def test_live_one_minute_cache_survives_one_missing_bar_and_keeps_refetching(
     monkeypatch,
 ):
@@ -272,7 +316,7 @@ def test_live_one_minute_cache_survives_one_missing_bar_and_keeps_refetching(
     monkeypatch.setattr(
         market_data,
         "_last_completed_bar_open",
-        lambda _seconds: cutoff[0],
+        lambda _seconds, **_: cutoff[0],
     )
     start = cutoff[0].to_pydatetime().replace(tzinfo=timezone.utc) - timedelta(minutes=99)
     first_end = cutoff[0].to_pydatetime().replace(tzinfo=timezone.utc)
@@ -332,7 +376,7 @@ def test_live_one_minute_cache_rejects_data_older_than_grace_window(monkeypatch)
     monkeypatch.setattr(
         market_data,
         "_last_completed_bar_open",
-        lambda _seconds: cutoff[0],
+        lambda _seconds, **_: cutoff[0],
     )
     start = cutoff[0].to_pydatetime().replace(tzinfo=timezone.utc) - timedelta(minutes=199)
     first_end = cutoff[0].to_pydatetime().replace(tzinfo=timezone.utc)
@@ -571,6 +615,10 @@ def test_bitget_reality_market_data_infers_catalog_contract(monkeypatch):
 
 
 def test_gate_hk_stock_shared_cache_uses_trading_calendar_coverage(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market.product_catalog.get_catalog_product",
+        lambda **_: {"api_family": "stock", "underlying_market": "HKStock", "underlying_symbol": "00700"},
+    )
     calls = []
     start = datetime(2026, 8, 3, tzinfo=timezone.utc)
     end = datetime(2026, 8, 7, 23, tzinfo=timezone.utc)

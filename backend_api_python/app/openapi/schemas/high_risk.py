@@ -132,6 +132,7 @@ class QuickTradeOrderRequestSchema(Schema):
     source = fields.String(load_default="manual", validate=validate.Length(max=64))
     margin_mode = fields.String(load_default="", validate=validate.Length(max=16))
     marginMode = fields.String(load_default="", validate=validate.Length(max=16))
+    ai_decision_filter = fields.Boolean(load_default=False)
 
     @pre_load
     def normalize_values(self, data, **kwargs):
@@ -174,6 +175,10 @@ class QuickTradeCloseRequestSchema(Schema):
             if key in normalized:
                 normalized[key] = str(normalized[key] or "").strip().lower()
         return normalized
+
+
+class QuickTradeCancelRequestSchema(Schema):
+    trade_id = fields.Integer(required=True, validate=validate.Range(min=1))
 
 
 class UserInfoSchema(Schema):

@@ -362,6 +362,7 @@ CREATE TABLE IF NOT EXISTS qd_strategies_trading (
     market_type VARCHAR(20) DEFAULT 'swap',
     exchange_config JSONB NOT NULL DEFAULT '{}'::jsonb,
     trading_config JSONB NOT NULL DEFAULT '{}'::jsonb,
+    source_version_id INTEGER,
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
@@ -411,6 +412,107 @@ CREATE INDEX IF NOT EXISTS idx_script_source_versions_source
 ON qd_script_source_versions(source_id, version_no DESC);
 CREATE INDEX IF NOT EXISTS idx_script_source_versions_user
 ON qd_script_source_versions(user_id);
+
+ALTER TABLE qd_strategies_trading
+ADD COLUMN IF NOT EXISTS source_version_id INTEGER;
+
+INSERT INTO qd_script_source_versions
+    (source_id, user_id, version_no, name, description, code,
+     template_key, param_schema, metadata, created_at)
+SELECT source.id,
+       source.user_id,
+       COALESCE(latest.version_no, 0) + 1,
+       source.name,
+       COALESCE(source.description, ''),
+       COALESCE(source.code, ''),
+       COALESCE(source.template_key, ''),
+       COALESCE(source.param_schema, '{}'::jsonb),
+       COALESCE(source.metadata, '{}'::jsonb),
+       NOW()
+FROM qd_script_sources AS source
+LEFT JOIN LATERAL (
+    SELECT version.id, version.version_no, version.name, version.description,
+           version.code, version.template_key, version.param_schema, version.metadata
+    FROM qd_script_source_versions AS version
+    WHERE version.source_id = source.id
+      AND version.user_id = source.user_id
+    ORDER BY version.version_no DESC
+    LIMIT 1
+) AS latest ON TRUE
+WHERE latest.id IS NULL
+   OR latest.name IS DISTINCT FROM source.name
+   OR latest.description IS DISTINCT FROM COALESCE(source.description, '')
+   OR latest.code IS DISTINCT FROM COALESCE(source.code, '')
+   OR latest.template_key IS DISTINCT FROM COALESCE(source.template_key, '')
+   OR latest.param_schema IS DISTINCT FROM COALESCE(source.param_schema, '{}'::jsonb)
+   OR latest.metadata IS DISTINCT FROM COALESCE(source.metadata, '{}'::jsonb)
+ON CONFLICT (source_id, version_no) DO NOTHING;
+
+WITH deployment_version AS (
+    SELECT deployment.id AS strategy_id,
+           COALESCE(
+               (
+                   SELECT version.id
+                   FROM qd_script_source_versions AS version
+                   WHERE version.source_id = deployment.source_id
+                     AND version.user_id = deployment.user_id
+                     AND version.created_at <= deployment.created_at
+                   ORDER BY version.created_at DESC, version.version_no DESC
+                   LIMIT 1
+               ),
+               (
+                   SELECT version.id
+                   FROM qd_script_source_versions AS version
+                   WHERE version.source_id = deployment.source_id
+                     AND version.user_id = deployment.user_id
+                   ORDER BY version.version_no DESC
+                   LIMIT 1
+               )
+           ) AS version_id
+    FROM (
+        SELECT strategy.id,
+               strategy.user_id,
+               strategy.created_at,
+               CASE
+                   WHEN COALESCE(strategy.trading_config->>'script_source_id', '') ~ '^[0-9]+$'
+                   THEN (strategy.trading_config->>'script_source_id')::INTEGER
+                   ELSE NULL
+               END AS source_id
+        FROM qd_strategies_trading AS strategy
+        WHERE strategy.source_version_id IS NULL
+    ) AS deployment
+    WHERE deployment.source_id IS NOT NULL
+)
+UPDATE qd_strategies_trading AS strategy
+SET source_version_id = deployment_version.version_id,
+    trading_config = jsonb_set(
+        COALESCE(strategy.trading_config, '{}'::jsonb),
+        '{script_source_version_id}',
+        to_jsonb(deployment_version.version_id),
+        TRUE
+    )
+FROM deployment_version
+WHERE strategy.id = deployment_version.strategy_id
+  AND deployment_version.version_id IS NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint
+        WHERE conname = 'fk_strategy_source_version'
+          AND conrelid = 'qd_strategies_trading'::regclass
+    ) THEN
+        ALTER TABLE qd_strategies_trading
+        ADD CONSTRAINT fk_strategy_source_version
+        FOREIGN KEY (source_version_id)
+        REFERENCES qd_script_source_versions(id)
+        ON DELETE RESTRICT;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_strategies_source_version
+ON qd_strategies_trading(source_version_id);
 
 CREATE TABLE IF NOT EXISTS qd_script_templates (
     id SERIAL PRIMARY KEY,
@@ -2570,6 +2672,38 @@ CREATE TABLE IF NOT EXISTS qd_quick_trades (
 CREATE INDEX IF NOT EXISTS idx_quick_trades_user    ON qd_quick_trades(user_id);
 CREATE INDEX IF NOT EXISTS idx_quick_trades_created ON qd_quick_trades(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS qd_ai_decisions (
+    id BIGSERIAL PRIMARY KEY,
+    decision_uid VARCHAR(64) NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL DEFAULT 0,
+    source_type VARCHAR(24) NOT NULL,
+    source_id BIGINT NOT NULL DEFAULT 0,
+    strategy_run_id BIGINT NOT NULL DEFAULT 0,
+    order_intent_id BIGINT NOT NULL DEFAULT 0,
+    symbol VARCHAR(80) NOT NULL DEFAULT '',
+    action VARCHAR(40) NOT NULL DEFAULT '',
+    market_type VARCHAR(24) NOT NULL DEFAULT '',
+    provider VARCHAR(24) NOT NULL DEFAULT 'none',
+    model VARCHAR(120) NOT NULL DEFAULT '',
+    decision VARCHAR(24) NOT NULL,
+    allowed BOOLEAN NOT NULL DEFAULT TRUE,
+    confidence DECIMAL(8, 6),
+    reason TEXT NOT NULL DEFAULT '',
+    fallback_reason TEXT NOT NULL DEFAULT '',
+    probabilities_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    checks_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    request_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    billing_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+ALTER TABLE qd_ai_decisions
+    ADD COLUMN IF NOT EXISTS billing_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_ai_decisions_strategy
+    ON qd_ai_decisions(source_type, source_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ai_decisions_user
+    ON qd_ai_decisions(user_id, created_at DESC);
+
 -- Migration: Add commission tracking columns to existing qd_quick_trades.
 -- (Introduced in v3.0.8. Pre-existing rows default to 0 / '' which is the
 
@@ -2610,7 +2744,7 @@ DROP TABLE IF EXISTS qd_polymarket_markets CASCADE;
 -- =============================================================================
 
 -- =============================================================================
--- These tables back the multi-agent runtime (see docs/agent/AI_INTEGRATION_DESIGN.md).
+-- These tables back the Agent Gateway runtime (see docs/agent/agent-openapi.json).
 -- They are tenant-scoped via user_id and stay isolated from human JWT sessions.
 
 CREATE TABLE IF NOT EXISTS qd_agent_tokens (
@@ -2789,3 +2923,16 @@ ALTER TABLE qd_fundamental_sync_jobs ADD COLUMN IF NOT EXISTS refresh_policy VAR
 ALTER TABLE qd_fundamental_sync_jobs ADD COLUMN IF NOT EXISTS skipped_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE qd_fundamental_sync_items ADD COLUMN IF NOT EXISTS error_detail VARCHAR(500) NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_fundamental_sync_symbol_check ON qd_fundamental_sync_items(market, symbol, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS qd_exchange_order_pnl (
+    credential_id INTEGER NOT NULL,
+    exchange_id VARCHAR(50) NOT NULL,
+    market_type VARCHAR(20) NOT NULL,
+    symbol VARCHAR(80) NOT NULL,
+    exchange_order_id VARCHAR(160) NOT NULL,
+    expected_quantity NUMERIC(36,18) NOT NULL DEFAULT 0,
+    report JSONB NOT NULL DEFAULT '{}'::jsonb,
+    checked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (credential_id, exchange_id, market_type, symbol, exchange_order_id)
+);
+CREATE INDEX IF NOT EXISTS idx_exchange_pnl_checked ON qd_exchange_order_pnl(credential_id, checked_at);

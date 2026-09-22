@@ -56,7 +56,6 @@ from app.services.pending_orders.fill_records import (
 )
 from app.services.pending_orders.fee_reconciliation import (
     allow_fee_reconciliation_attempt,
-    backfill_zero_commission_trades,
     commission_snapshot as _commission_snapshot,
     fee_breakdown_snapshot as _fee_breakdown_snapshot,
     fee_breakdown_to_quote,
@@ -443,7 +442,9 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                     """
                     SELECT *
                     FROM pending_orders
-                    WHERE status = 'sent'
+                    WHERE (status = 'sent' OR (status IN ('filled', 'cancelled') AND COALESCE(filled, 0) >
+                          COALESCE((SELECT SUM(t.amount) FROM qd_strategy_trades t
+                                    WHERE t.pending_order_id = pending_orders.id), 0)))
                       AND LOWER(COALESCE(exchange_id, '')) = 'alpaca'
                       AND COALESCE(exchange_order_id, '') <> ''
                     ORDER BY sent_at ASC NULLS FIRST, id ASC
@@ -472,7 +473,9 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                         dispatch_note = 'alpaca_fill_sync:syncing',
                         updated_at = NOW()
                     WHERE id = %s
-                      AND status = 'sent'
+                      AND (status = 'sent' OR (status IN ('filled', 'cancelled') AND COALESCE(filled, 0) >
+                          COALESCE((SELECT SUM(t.amount) FROM qd_strategy_trades t
+                                    WHERE t.pending_order_id = pending_orders.id), 0)))
                       AND LOWER(COALESCE(exchange_id, '')) = 'alpaca'
                       AND COALESCE(exchange_order_id, '') <> ''
                     RETURNING *
@@ -544,7 +547,7 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
         commission_delta = max(0.0, cumulative_commission - _previous_commission(row))
 
         delta = cumulative_filled - previous_filled
-        if delta > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
+        if cumulative_filled > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
             delta_avg = cumulative_avg
             if previous_filled > 0 and previous_avg > 0:
                 delta_notional = cumulative_filled * cumulative_avg - previous_filled * previous_avg
@@ -572,6 +575,10 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                 symbol=str(symbol or ""),
                 signal_type=str(signal_type or ""),
                 filled=float(delta),
+                cumulative_filled=cumulative_filled,
+                cumulative_average_price=cumulative_avg,
+                cumulative_fees={commission_ccy: cumulative_commission} if commission_ccy else {},
+                cumulative_commission_quote=fee_to_quote(client, symbol=str(symbol or ""), fee=cumulative_commission, fee_ccy=commission_ccy, fill_price=cumulative_avg),
                 avg_price=float(delta_avg),
                 exchange_config=exchange_config,
                 market_type=market_type_for_client,
@@ -777,6 +784,10 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                     WHERE (
                             status = 'sent'
                             OR (
+                                status IN ('filled', 'cancelled') AND COALESCE(filled, 0) >
+                                (SELECT COALESCE(SUM(t.amount), 0) FROM qd_strategy_trades t WHERE t.pending_order_id = pending_orders.id)
+                            )
+                            OR (
                                 status = 'filled'
                                 AND COALESCE(filled, 0) <= 0
                                 AND COALESCE(avg_price, 0) <= 0
@@ -823,6 +834,10 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                 WHERE id = %s
                   AND (
                         status = 'sent'
+                        OR (
+                            status IN ('filled', 'cancelled') AND COALESCE(filled, 0) >
+                            (SELECT COALESCE(SUM(t.amount), 0) FROM qd_strategy_trades t WHERE t.pending_order_id = pending_orders.id)
+                        )
                         OR (
                             status = 'filled'
                             AND COALESCE(filled, 0) <= 0
@@ -946,14 +961,25 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
         delta = cumulative_filled - tracked_previous_filled
         aggregate_filled = previous_filled
         aggregate_avg = previous_avg
+        evidence_quantity = float(sync_raw.get('filled') or 0)
+        if evidence_quantity > 0 and evidence_quantity + 1e-12 < cumulative_filled:
+            sync_raw = {}
         cumulative_fees = _fee_breakdown_snapshot(sync_raw)
+        from app.services.execution_streams.fill_snapshot import combine_pending_snapshot
+        combined, _ = combine_pending_snapshot(dict(exchange_order_id=exchange_order_id,
+            cumulative_quantity=cumulative_filled, cumulative_average_price=cumulative_avg,
+            order_status=exchange_status, _snapshot_fees=cumulative_fees), row)
+        other_fees = combined.get('_other_fees', {})
+        aggregate_fees = dict(cumulative_fees)
+        for currency, value in other_fees.items():
+            aggregate_fees[currency] = aggregate_fees.get(currency, 0.0) + value
         previous_fees = _previous_fee_breakdown(row)
         fee_deltas = incremental_fees(cumulative_fees, previous_fees)
         commission_delta, commission_ccy = fee_storage_values(fee_deltas)
 
-        if delta > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
+        if cumulative_filled > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
             delta_avg = cumulative_avg
-            if tracked_previous_filled > 0 and tracked_previous_avg > 0:
+            if delta > ALPACA_FILL_DELTA_EPSILON and tracked_previous_filled > 0 and tracked_previous_avg > 0:
                 delta_notional = (
                     cumulative_filled * cumulative_avg
                     - tracked_previous_filled * tracked_previous_avg
@@ -967,6 +993,9 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
             else:
                 aggregate_filled = previous_filled + delta
                 aggregate_avg = delta_avg
+            if '_other_fees' in combined:
+                aggregate_filled = combined['cumulative_quantity']
+                aggregate_avg = combined['cumulative_average_price']
             signal_type = str(payload.get("signal_type") or row.get("signal_type") or "")
             commission_quote = fee_breakdown_to_quote(
                 client,
@@ -981,7 +1010,7 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                     payload=payload,
                     symbol=symbol,
                     signal_type=signal_type,
-                    quantity=delta,
+                    quantity=max(0.0, delta),
                     entry_price=delta_avg,
                     exchange_config=exchange_config,
                     market_type=market_type,
@@ -998,6 +1027,10 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                 symbol=symbol,
                 signal_type=signal_type,
                 filled=delta,
+                cumulative_filled=aggregate_filled,
+                cumulative_average_price=aggregate_avg,
+                cumulative_fees=aggregate_fees,
+                cumulative_commission_quote=fee_breakdown_to_quote(client, symbol=symbol, fees=aggregate_fees, fill_price=aggregate_avg),
                 avg_price=delta_avg,
                 exchange_config=exchange_config,
                 market_type=market_type,
@@ -1031,18 +1064,17 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
             aggregate_avg = previous_avg
 
         fee_backfilled = 0
-        if cumulative_fees and cumulative_avg > 0:
-            cumulative_quote_fee = fee_breakdown_to_quote(
-                client,
-                symbol=symbol,
-                fees=cumulative_fees,
-                fill_price=cumulative_avg,
-            )
-            fee_backfilled = backfill_zero_commission_trades(
-                order_id=order_id,
-                fees_by_ccy=cumulative_fees,
-                commission_quote=cumulative_quote_fee,
-            )
+
+        synced_fee_status = str(sync_raw.get("fee_status") or "").strip().lower()
+        if synced_fee_status not in {"actual", "actual_zero"}:
+            if cumulative_fees:
+                synced_fee_status = (
+                    "actual"
+                    if any(abs(float(value or 0.0)) > 1e-18 for value in cumulative_fees.values())
+                    else "actual_zero"
+                )
+            else:
+                synced_fee_status = "pending"
 
         requested_qty = max(
             0.0,
@@ -1086,6 +1118,8 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                 if queue_status == "filled" and not cumulative_fees and delta <= ALPACA_FILL_DELTA_EPSILON
                 else ""
             ),
+            fee_status=synced_fee_status,
+            fee_source="rest" if synced_fee_status in {"actual", "actual_zero"} else "",
         )
 
         if fee_backfilled:
@@ -1108,6 +1142,8 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
         market_type: str,
         client_order_id: str,
     ) -> List[Dict[str, Any]]:
+        if quantity <= 0:
+            return []
         sig = str(signal_type or "").strip().lower()
         if sig not in {"open_long", "add_long", "open_short", "add_short"}:
             return []
@@ -1174,6 +1210,8 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
         avg_price: float,
         exchange_response_json: str,
         dispatch_note: str = "",
+        fee_status: str = "pending",
+        fee_source: str = "",
     ) -> None:
         exchange_response_json = _redact_exchange_json(exchange_response_json)
         with get_db_connection() as db:
@@ -1185,19 +1223,32 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                     dispatch_note = %s,
                     filled = %s,
                     avg_price = %s,
-                    exchange_response_json = %s,
+                    fee_status = CASE
+                        WHEN %s IN ('actual', 'actual_zero') THEN %s
+                        ELSE fee_status
+                    END,
+                    fee_source = CASE
+                        WHEN %s IN ('actual', 'actual_zero') THEN %s
+                        ELSE fee_source
+                    END,
+                    exchange_response_json = (COALESCE(NULLIF(exchange_response_json, ''), '{}')::jsonb || %s::jsonb)::text,
                     executed_at = CASE WHEN %s > 0 THEN COALESCE(executed_at, NOW()) ELSE executed_at END,
                     updated_at = NOW()
-                WHERE id = %s
+                WHERE id = %s AND COALESCE(filled, 0) <= %s
                 """,
                 (
                     str(status or "sent"),
                     str(dispatch_note or f"live_fill_sync:{exchange_status or 'unknown'}"),
                     float(filled or 0.0),
                     float(avg_price or 0.0),
+                    str(fee_status or "pending"),
+                    str(fee_status or "pending"),
+                    str(fee_status or "pending"),
+                    str(fee_source or ""),
                     str(exchange_response_json or ""),
                     float(filled or 0.0),
                     int(order_id),
+                    float(filled or 0.0),
                 ),
             )
             cur.execute(
@@ -1831,45 +1882,6 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
         if not reduce_only and ownership_enabled:
             phases["position_ownership"] = phases_ownership
 
-        if not reduce_only and market_type in {"spot", "swap"}:
-            try:
-                from app.services.live_trading.account_risk import (
-                    account_risk_limits,
-                    account_risk_snapshot,
-                )
-
-                credential_id = credential_id_from_exchange_config(exchange_config)
-                risk_snapshot = account_risk_snapshot(
-                    user_id=int(cfg.get("user_id") or 1),
-                    credential_id=int(credential_id or 0),
-                    market_type=str(market_type),
-                    strategy_id=int(strategy_id),
-                    proposed_symbol=str(symbol),
-                    proposed_side=str(pos_side),
-                    proposed_quantity=float(amount or 0.0),
-                    proposed_price=float(ref_price or 0.0),
-                    proposed_leverage=float(leverage or 1.0),
-                    limits=account_risk_limits(cfg),
-                )
-                phases["account_risk"] = risk_snapshot
-                if not risk_snapshot.get("allowed"):
-                    violations = list(risk_snapshot.get("violations") or [])
-                    error = str(violations[0] if violations else "accountRisk.rejected")
-                    self._mark_failed(order_id=order_id, error=error)
-                    _notify_live_best_effort(status="failed", error=error)
-                    append_strategy_log(
-                        strategy_id,
-                        "warning",
-                        f"Order rejected by account risk controls: {','.join(violations)}",
-                    )
-                    return
-            except Exception as e:
-                error = f"accountRisk.snapshotFailed:{e}"
-                self._mark_failed(order_id=order_id, error=error)
-                _notify_live_best_effort(status="failed", error=error)
-                append_strategy_log(strategy_id, "error", "Order rejected because account risk could not be verified")
-                return
-
         # Close/reduce: the strategy ledger is the ownership boundary.  The
         # exchange position/balance may only reduce the requested quantity.
         if reduce_only:
@@ -1941,23 +1953,6 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
 
         fills = FillAccumulator()
 
-        # Spot close: cap to exchange free base (fees often make DB size > sellable free).
-        if reduce_only and market_type == "spot" and side == "sell":
-            try:
-                from app.services.live_trading.spot_sizing import clamp_spot_close_quantity
-
-                new_amt, spot_meta = clamp_spot_close_quantity(
-                    client, symbol=str(symbol), requested_qty=float(amount or 0.0)
-                )
-                if spot_meta.get("adjusted"):
-                    phases["spot_close_adjustment"] = spot_meta
-                amount = new_amt
-            except Exception as e:
-                logger.warning(
-                    "Spot close amount adjustment failed: pending_id=%s, err=%s", order_id, e
-                )
-                phases["spot_close_adjust_error"] = str(e)
-
         spot_quote_amt = 0.0
         spot_market_buy_uses_quote = False
         if market_type == "spot":
@@ -1986,20 +1981,6 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
             amount, phases["exchange_quantity_normalization"] = exchange_quantity_snapshot(
                 client, exchange_id=exchange_id, symbol=symbol, market_type=market_type,
                 requested=amount, exchange_config=exchange_config)
-        self._log_live_order_sizing(
-            strategy_id=strategy_id,
-            client=client,
-            exchange_id=exchange_id, market_type=market_type,
-            symbol=symbol,
-            signal_type=signal_type,
-            reduce_only=reduce_only,
-            amount=amount,
-            ref_price=ref_price,
-            leverage=leverage,
-            payload=payload,
-            phases=phases,
-        )
-
         # Decide if we should use limit-first flow.
         use_limit_first = order_mode in ("maker", "limit", "limit_first", "maker_then_market")
 
@@ -2059,6 +2040,37 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                 )
                 phases["close_size_retry"]["error"] = str(e)
 
+        # Validate sellable inventory after every ledger retry and size conversion.
+        if reduce_only and market_type == "spot" and side == "sell" and remaining > 0:
+            try:
+                from app.services.live_trading.spot_sizing import clamp_spot_close_quantity
+
+                amount, spot_meta = clamp_spot_close_quantity(
+                    client, symbol=str(symbol), requested_qty=remaining,
+                )
+                remaining = amount
+                phases["spot_close_adjustment"] = spot_meta
+                if remaining <= 0:
+                    raise LiveTradingError("strategyRuntime.spotBalanceInsufficient")
+            except Exception as exc:
+                error = str(exc) if isinstance(exc, LiveTradingError) else "strategyRuntime.spotBalanceUnavailable"
+                logger.warning("Spot close rejected: pending_id=%s, err=%s", order_id, exc)
+                self._mark_failed(order_id=order_id, error=error)
+                _notify_live_best_effort(status="failed", error=error, amount_hint=amount)
+                append_strategy_log(strategy_id, "error", error)
+                return
+
+        self._log_live_order_sizing(
+            strategy_id=strategy_id,
+            client=client,
+            exchange_id=exchange_id, market_type=market_type,
+            symbol=symbol, signal_type=signal_type,
+            reduce_only=reduce_only, amount=amount,
+            ref_price=ref_price, leverage=leverage,
+            payload=payload,
+            phases=phases,
+        )
+
         if remaining <= 0 and not (spot_market_buy_uses_quote and spot_quote_amt > 0):
             friendly_error = self._friendly_order_error(
                 "invalid amount",
@@ -2098,6 +2110,7 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
         )
         try:
             limit_price = 0.0
+            limit_price_was_clamped = False
             if execution_algo == "limit" or use_limit_first:
                 explicit_limit_price = float(payload.get("limit_price") or 0.0)
                 limit_price = explicit_limit_price or maker_limit_price(
@@ -2105,6 +2118,23 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                     side=side,
                     maker_offset=maker_offset,
                 )
+                from app.services.live_trading.limit_price_safety import (
+                    normalize_marketable_limit_price,
+                )
+
+                submitted_limit_price = normalize_marketable_limit_price(
+                    side=side,
+                    limit_price=limit_price,
+                    reference_price=ref_price,
+                )
+                if submitted_limit_price != limit_price:
+                    limit_price_was_clamped = True
+                    phases["limit_price_safety"] = {
+                        "requested_price": limit_price,
+                        "reference_price": ref_price,
+                        "submitted_price": submitted_limit_price,
+                    }
+                    limit_price = submitted_limit_price
                 limit_client_oid = make_client_order_id(
                     exchange_id=exchange_id,
                     strategy_id=strategy_id,
@@ -2116,7 +2146,7 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                 exchange_id=exchange_id,
                 payload=payload,
                 exchange_config=exchange_config,
-                order_mode=order_mode,
+                order_mode="marketable_limit" if limit_price_was_clamped else order_mode,
                 ref_price=ref_price,
                 spot_quote_amt=spot_quote_amt,
                 spot_market_buy_uses_quote=spot_market_buy_uses_quote,
@@ -2239,7 +2269,7 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
             )
             if rec_filled > 0:
                 filled_final = rec_filled
-                avg_final = rec_avg if rec_avg > 0 else float(ref_price or 0.0)
+                avg_final = rec_avg
                 phases["fill_recovery"] = {
                     "source": rec_src,
                     "filled": rec_filled,
@@ -2314,8 +2344,7 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
 
         # Record trade + update local position snapshot (best-effort).
         try:
-            recordable_filled = self._unrecorded_pending_fill(order_id, filled)
-            if recordable_filled > 0 and avg_price > 0:
+            if filled > 0 and avg_price > 0:
                 from app.services.live_trading.fee_quote import fee_to_quote
 
                 commission_quote = 0.0
@@ -2343,13 +2372,13 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                         strategy_id=int(strategy_id),
                         symbol=str(symbol),
                         signal_type=str(signal_type),
-                        filled=float(recordable_filled), position_filled=proportional_spot_position_fill_quantity(str(market_type or "swap"), str(symbol), str(signal_type), float(recordable_filled), float(filled), dict(fills.fees_by_ccy)),
+                        cumulative_filled=float(filled), filled=float(filled), position_filled=proportional_spot_position_fill_quantity(str(market_type or "swap"), str(symbol), str(signal_type), float(filled), float(filled), dict(fills.fees_by_ccy)),
                         avg_price=float(avg_price),
                         exchange_config=exchange_config,
                         market_type=str(market_type or "swap"),
                         order_id=int(order_id),
                         fill_source="worker",
-                        commission=float(fills.total_fee or 0.0),
+                        cumulative_fees=dict(fills.fees_by_ccy), commission=float(fills.total_fee or 0.0),
                         commission_ccy=str(fills.fee_ccy or "").strip().upper(),
                         commission_quote=commission_quote,
                         close_reason=_close_reason,
@@ -2515,8 +2544,7 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
 
             # Record trade and update position
             try:
-                recordable_filled = self._unrecorded_pending_fill(order_id, filled)
-                if recordable_filled > 0 and avg_price > 0:
+                if filled > 0 and avg_price > 0:
                     logger.info(
                         f"IBKR record begin: pending_id={order_id} strategy_id={strategy_id} symbol={symbol} "
                         f"signal={signal_type} filled={filled} avg_price={avg_price}"
@@ -2525,7 +2553,7 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                         strategy_id=int(strategy_id),
                         symbol=str(symbol),
                         signal_type=str(signal_type),
-                        filled=float(recordable_filled),
+                        cumulative_filled=float(filled), filled=float(filled),
                         avg_price=float(avg_price),
                         exchange_config=exchange_config,
                         market_type=str(market_type or "USStock"),
@@ -2671,19 +2699,6 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
                 fill_price=avg_price,
             )
 
-            if avg_price <= 0 and ref_price > 0:
-                if filled > 0:
-                    logger.warning(
-                        f"[worker] Alpaca order avg_price=0, using ref_price={ref_price} as fallback: "
-                        f"strategy_id={strategy_id} pending_id={order_id}"
-                    )
-                    avg_price = ref_price
-                else:
-                    logger.info(
-                        f"[worker] Alpaca order submitted but not filled yet: "
-                        f"strategy_id={strategy_id} pending_id={order_id} status={result.status}"
-                    )
-
             executed_at = int(time.time())
 
             self._mark_sent(
@@ -2704,13 +2719,12 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
             )
 
             try:
-                recordable_filled = self._unrecorded_pending_fill(order_id, filled)
-                if recordable_filled > 0 and avg_price > 0:
+                if filled > 0 and avg_price > 0:
                     profit, matched_entry = persist_strategy_fill(
                         strategy_id=int(strategy_id),
                         symbol=str(symbol),
                         signal_type=str(signal_type),
-                        filled=float(recordable_filled),
+                        cumulative_filled=float(filled), filled=float(filled),
                         avg_price=float(avg_price),
                         exchange_config=exchange_config,
                         market_type=str(market_type_for_client or "USStock"),
@@ -2834,28 +2848,6 @@ class PendingOrderWorker(PendingOrderLoops, PendingOrderPositionSyncMixin):
             exchange_id=exchange_id,
             observed_filled=filled,
         )
-
-    @staticmethod
-    def _unrecorded_pending_fill(order_id: int, cumulative_filled: float) -> float:
-        """Prevent the immediate REST result racing the private stream event."""
-        if int(order_id or 0) <= 0:
-            return max(0.0, float(cumulative_filled or 0.0))
-        try:
-            with get_db_connection() as db:
-                cur = db.cursor()
-                cur.execute(
-                    """
-                    SELECT COALESCE(SUM(amount), 0) AS recorded
-                    FROM qd_strategy_trades
-                    WHERE pending_order_id = %s
-                    """,
-                    (int(order_id),),
-                )
-                row = cur.fetchone() or {}
-                cur.close()
-            return max(0.0, float(cumulative_filled or 0.0) - float(row.get("recorded") or 0.0))
-        except Exception:
-            return max(0.0, float(cumulative_filled or 0.0))
 
     def _register_pending_order_binding(
         self,

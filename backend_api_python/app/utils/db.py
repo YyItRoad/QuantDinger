@@ -279,6 +279,24 @@ def _apply_init_sql(logger, *, strict: bool = False):
             _apply_migration_component(
                 conn,
                 logger,
+                name="execution-fill-accounting-20260916",
+                path=Path(__file__).resolve().parent.parent.parent / "migrations" / "20260916_fill_accounting.sql",
+            )
+            _apply_migration_component(
+                conn,
+                logger,
+                name="exchange-order-pnl-20260916",
+                path=Path(__file__).resolve().parent.parent.parent / "migrations" / "20260916_exchange_order_pnl.sql",
+            )
+            _apply_migration_component(
+                conn,
+                logger,
+                name="ai-decision-billing-20260920",
+                path=Path(__file__).resolve().parent.parent.parent / "migrations" / "20260920_ai_decision_billing.sql",
+            )
+            _apply_migration_component(
+                conn,
+                logger,
                 name="market-state",
                 path=init_sql.parent / "20260917_market_state.sql",
             )

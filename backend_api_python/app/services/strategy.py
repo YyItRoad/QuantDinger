@@ -183,6 +183,7 @@ class StrategyService:
             "directionMode": existing_config.get("direction_mode") or "",
             "positionSide": existing_config.get("position_side") or "",
             "accountRisk": existing_config.get("account_risk") or {},
+            "aiDecisionFilter": bool(existing_config.get("ai_decision_filter")),
         }
         if position_management:
             merged["positionManagement"] = position_management
@@ -287,7 +288,7 @@ class StrategyService:
             "sourceId", "name", "initialCapital", "executionMode", "credentialId",
             "leverageEnabled", "leverage", "params", "notificationChannels",
             "notificationTargets", "directionMode", "positionSide",
-            "accountRisk", "positionManagement",
+            "accountRisk", "positionManagement", "aiDecisionFilter",
         }
         unsupported = set(payload) - allowed - {"user_id"}
         if unsupported:

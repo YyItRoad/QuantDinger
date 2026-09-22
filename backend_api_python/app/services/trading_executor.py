@@ -17,6 +17,7 @@ from app.data_sources.errors import (
     classify_market_data_failure,
 )
 from app.services.script_source import get_script_source_service
+from app.services.ai_decision_context import build_strategy_decision_context
 from app.services.strategy_runtime.health import record_runtime_heartbeat
 from app.services.strategy_runtime.identity import ensure_strategy_run, finish_strategy_run
 from app.services.strategy_runtime.order_intents import OrderIntentService
@@ -25,6 +26,8 @@ from app.services.strategy_runtime.live_portfolio import refresh_members, positi
 from app.services.strategy_runtime.cancellations import persist_cancellations
 from app.services.strategy_runtime.timeframes import (
     completed_bar_token,
+    daily_equity_execution_policy,
+    equity_daily_frames_ready,
     live_history_days,
     load_live_frequency_frames,
 )
@@ -184,6 +187,8 @@ class TradingExecutor:
         owns_both_legs = direction_mode in {"both", "neutral"} or neutral_grid
         if owns_both_legs and is_hedge is not True:
             raise RuntimeError(f"strategyV2.dualDirectionHedgeModeRequired:{label}")
+        if direction_mode == "one_way" and is_hedge is True:
+            raise RuntimeError(f"strategyV2.oneWayPositionModeRequired:{label}")
         if is_hedge is not True:
             if is_hedge is None:
                 raise RuntimeError(f"strategyV2.hedgeModeUnknown:{label}")
@@ -352,7 +357,7 @@ class TradingExecutor:
             strategy = self._load_strategy(strategy_id)
             if not strategy:
                 raise RuntimeError("strategyV2.strategyNotFound")
-            source_id, code = self._load_source(strategy)
+            source_version_id, code = self._load_source(strategy)
             program = compile_strategy_v2(code)
             user_id = int(strategy.get("user_id") or 0)
             trading_config = _json_object(strategy.get("trading_config"))
@@ -480,7 +485,7 @@ class TradingExecutor:
                 user_id=user_id,
                 code=code,
                 parameter_snapshot=trading_config,
-                source_version_id=str(source_id),
+                source_version_id=str(source_version_id),
                 exchange_id=str(primary.get("exchange_id") or account_exchange),
                 credential_id=int(
                     exchange_config.get("credential_id") or 0
@@ -687,6 +692,7 @@ class TradingExecutor:
                             strategy_name=strategy_name,
                             intent=intent,
                             frames=frames,
+                            frequency_frames=frequency_frames,
                             candidates=candidates,
                             initial_capital=initial_capital,
                             strategy_equity=current_equity,
@@ -746,6 +752,7 @@ class TradingExecutor:
                             strategy_name=strategy_name,
                             intent=intent,
                             frames=frames,
+                            frequency_frames=frequency_frames,
                             candidates=candidates,
                             initial_capital=initial_capital,
                             strategy_equity=current_equity,
@@ -811,6 +818,7 @@ class TradingExecutor:
                                 strategy_name=strategy_name,
                                 intent=intent,
                                 frames=frames,
+                                frequency_frames=frequency_frames,
                                 candidates=candidates,
                                 initial_capital=initial_capital,
                                 strategy_equity=current_equity,
@@ -834,16 +842,25 @@ class TradingExecutor:
                                     },
                                 })
                     if not equity_stop_reason and cycle_started >= next_signal_poll:
+                        from app.services.market_schedule import equity_daily_execution_session
+
+                        daily_policy = daily_equity_execution_policy(
+                            frequency, candidates, execution_mode=execution_mode,
+                            schedules=program.manifest.schedules,
+                        )
+                        signal_session = equity_daily_execution_session(*daily_policy) if daily_policy else None
                         current_bar_token = completed_bar_token(frequency)
+                        if signal_session is not None:
+                            current_bar_token = int(signal_session.timestamp())
                         has_new_closed_bar = (
                             initial_frames_pending
                             or current_bar_token != last_signal_bar_token
-                        )
+                        ) and (not daily_policy or signal_session is not None)
                         if has_new_closed_bar:
                             # Startup already warmed the complete frame bundle.
                             # Every later trigger extends the shared cache only
                             # for the newly completed candle window.
-                            if not initial_frames_pending:
+                            if not initial_frames_pending or daily_policy:
                                 frequency_frames = fetch_runtime_frames()
                                 frames = frequency_frames[frequency]
                             latest_frame_timestamp = _latest_frame_timestamp(frames)
@@ -856,6 +873,18 @@ class TradingExecutor:
                                     > last_processed_frame_timestamp
                                 )
                             )
+                            if daily_policy:
+                                frame_advanced = bool(
+                                    frame_advanced
+                                    and equity_daily_execution_session(*daily_policy) == signal_session
+                                    and equity_daily_frames_ready(frames, candidates, signal_session, daily_policy[0])
+                                    and all(
+                                        str(member["key"]) in active_prices
+                                        and time.monotonic() - last_price_seen_at.get(str(member["key"]), 0.0)
+                                        <= price_stale_after
+                                        for member in candidates
+                                    )
+                                )
                             if frame_advanced:
                                 intents, messages, timestamp = session.process(
                                     frames,
@@ -878,6 +907,7 @@ class TradingExecutor:
                                         strategy_name=strategy_name,
                                         intent=intent,
                                         frames=frames,
+                                        frequency_frames=frequency_frames,
                                         candidates=candidates,
                                         initial_capital=initial_capital,
                                         strategy_equity=current_equity,
@@ -887,6 +917,7 @@ class TradingExecutor:
                                         trading_config=trading_config,
                                         exchange_config=exchange_config,
                                         signal_ts=self._intent_signal_timestamp(intent, timestamp),
+                                        current_price_override=active_prices.get(str(intent.symbol)) if daily_policy else None,
                                         strategy_run_id=run_id,
                                         direction_mode=direction_mode,
                                     )
@@ -1025,6 +1056,7 @@ class TradingExecutor:
         strategy_name: str,
         intent: OrderIntent,
         frames: Dict[str, pd.DataFrame],
+        frequency_frames: Dict[str, Dict[str, pd.DataFrame]] | None = None,
         candidates: List[Dict[str, Any]],
         initial_capital: float,
         leverage: float,
@@ -1137,6 +1169,13 @@ class TradingExecutor:
                 signal_ts=signal_ts,
                 strategy_run_id=strategy_run_id,
                 price_exchange_id=str(member.get("exchange_id") or ""),
+                price_instrument_id=str(member.get("instrument_id") or ""),
+                market_frame=frame,
+                market_frames={
+                    frequency: bundle.get(str(intent.symbol))
+                    for frequency, bundle in (frequency_frames or {}).items()
+                    if bundle.get(str(intent.symbol)) is not None
+                },
             )) or submitted
         return submitted
 
@@ -1208,6 +1247,8 @@ class TradingExecutor:
             float(values.get("strategy_equity") if values.get("strategy_equity") is not None else initial_capital),
         )
         leverage = float(values.get("leverage") or 1)
+        trading_config = _json_object(values.get("trading_config"))
+        ai_decision_filter = bool(trading_config.get("ai_decision_filter"))
         nominal_capacity = strategy_equity * max(1.0, leverage)
         entry_pct = ((quantity * reference_price) / nominal_capacity * 100.0) if nominal_capacity > 0 else 0.0
         from app.services.pending_orders.order_budget import strategy_order_budget_snapshot
@@ -1221,7 +1262,7 @@ class TradingExecutor:
             market_type=str(values.get("market_type") or "spot"),
             current_positions=values.get("current_positions") or (),
             buffer_ratio=float(
-                (_json_object(values.get("trading_config"))).get("order_budget_buffer_ratio")
+                trading_config.get("order_budget_buffer_ratio")
                 or 0.02
             ),
         )
@@ -1258,6 +1299,19 @@ class TradingExecutor:
             maker_offset_bps=float(values.get("maker_offset_bps") or 0.0),
             protection=dict(values.get("protection") or {}),
             client_order_id=str(values.get("client_order_id") or ""),
+            ai_decision_filter=ai_decision_filter,
+            strategy_type=str(trading_config.get("bot_type") or ""),
+            decision_context=(
+                build_strategy_decision_context(
+                    values={**values, "trading_config": trading_config},
+                    strategy=strategy,
+                    order_budget=budget,
+                    strategy_equity=strategy_equity,
+                    initial_capital=initial_capital,
+                    entry_percent=entry_pct,
+                )
+                if ai_decision_filter else None
+            ),
             sizing={
                 "initial_capital": initial_capital,
                 "entry_pct": entry_pct,
@@ -1288,13 +1342,22 @@ class TradingExecutor:
                 )
             if request.client_order_id:
                 order_details.append(f"client_order_id={request.client_order_id}")
-            append_strategy_log(
-                strategy_id,
-                "trade",
-                f"Order queued: {request.action} {request.symbol} "
-                f"quantity={format_decimal(request.quantity)} "
-                + " ".join(order_details),
-            )
+            if request.execution_mode == "signal":
+                append_strategy_log(
+                    strategy_id,
+                    "signal",
+                    f"Signal notification queued: {request.action} {request.symbol} "
+                    f"quantity={format_decimal(request.quantity)} "
+                    + " ".join(order_details),
+                )
+            else:
+                append_strategy_log(
+                    strategy_id,
+                    "trade",
+                    f"Order queued: {request.action} {request.symbol} "
+                    f"quantity={format_decimal(request.quantity)} "
+                    + " ".join(order_details),
+                )
         return bool(pending_id)
 
     def _run_grid_resting_loop(
@@ -1379,7 +1442,29 @@ class TradingExecutor:
         initial_price = float(initial_prices.get(key) or 0)
         if initial_price <= 0 and frame is not None and not frame.empty:
             initial_price = float(frame["close"].iloc[-1])
-        runtime_grid_config = self._materialize_grid_anchor(trading_config, initial_price)
+        persisted_grid_bounds = None
+        try:
+            from app.services.live_trading.grid_cells import GridCellRepository
+
+            persisted_cells = GridCellRepository().list_cells(strategy_id, symbol)
+            if persisted_cells:
+                persisted_grid_bounds = (
+                    min(float(cell.lower_price) for cell in persisted_cells),
+                    max(float(cell.upper_price) for cell in persisted_cells),
+                    len(persisted_cells),
+                )
+        except Exception as exc:
+            logger.debug(
+                "Grid anchor recovery skipped sid=%s symbol=%s: %s",
+                strategy_id,
+                symbol,
+                exc,
+            )
+        runtime_grid_config = self._materialize_grid_anchor(
+            trading_config,
+            initial_price,
+            persisted_grid_bounds=persisted_grid_bounds,
+        )
         grid_risk_store = RuntimeStateStore(
             strategy_id=strategy_id,
             strategy_run_id=strategy_run_id,
@@ -1507,7 +1592,12 @@ class TradingExecutor:
             if isinstance(runtime_config.get("bot_params"), dict)
             else {}
         )
-        if all(
+        try:
+            grid_template_version = int(namespace.get("GRID_TEMPLATE_VERSION") or 0)
+        except (TypeError, ValueError):
+            grid_template_version = 0
+        source_is_authoritative = grid_template_version >= 7
+        if not source_is_authoritative and all(
             float(existing.get(key) or 0.0) > 0
             for key in ("lowerPrice", "upperPrice", "gridCount")
         ):
@@ -1539,6 +1629,17 @@ class TradingExecutor:
             <= abs(average_delta) * 1e-6
         )
         count = len(lowers)
+        raw_cell_budgets = namespace.get("CELL_BUDGET_PCTS")
+        cell_budget_pcts = []
+        if isinstance(raw_cell_budgets, (list, tuple)) and len(raw_cell_budgets) == count:
+            try:
+                cell_budget_pcts = [max(0.0, float(value)) for value in raw_cell_budgets]
+            except (TypeError, ValueError):
+                cell_budget_pcts = []
+        raw_cell_roles = namespace.get("CELL_ROLES")
+        cell_roles = []
+        if isinstance(raw_cell_roles, (list, tuple)) and len(raw_cell_roles) == count:
+            cell_roles = [str(value or "").strip().lower() for value in raw_cell_roles]
         existing.update({
             "lowerPrice": min(lowers),
             "upperPrice": max(uppers),
@@ -1556,6 +1657,12 @@ class TradingExecutor:
             ),
             "dynamicAnchor": bool(namespace.get("DYNAMIC_ANCHOR")),
         })
+        if cell_budget_pcts:
+            existing["cellBudgetPcts"] = cell_budget_pcts
+        if cell_roles:
+            existing["cellRoles"] = cell_roles
+        if source_is_authoritative:
+            existing["adaptiveBounds"] = False
         runtime_config["strategy_family"] = "robot"
         runtime_config["executor_type"] = "grid"
         runtime_config["bot_type"] = "grid"
@@ -1567,7 +1674,10 @@ class TradingExecutor:
             ("equity_trailing_activation_pct", "EQUITY_TRAILING_ACTIVATION"),
             ("equity_trailing_callback_pct", "EQUITY_TRAILING_CALLBACK"),
         ):
-            if runtime_key not in runtime_config and source_key in namespace:
+            if (
+                source_key in namespace
+                and (source_is_authoritative or runtime_key not in runtime_config)
+            ):
                 runtime_config[runtime_key] = namespace[source_key]
         return runtime_config
 
@@ -1575,6 +1685,8 @@ class TradingExecutor:
     def _materialize_grid_anchor(
         trading_config: Dict[str, Any],
         initial_price: float,
+        *,
+        persisted_grid_bounds: Optional[Tuple[float, float, int]] = None,
     ) -> Dict[str, Any]:
         runtime_config = dict(trading_config or {})
         grid_params = (
@@ -1582,16 +1694,67 @@ class TradingExecutor:
             if isinstance(runtime_config.get("bot_params"), dict)
             else {}
         )
-        if not bool(grid_params.get("dynamicAnchor")) or initial_price <= 0:
+        if not bool(grid_params.get("dynamicAnchor")):
             return runtime_config
         lower_ratio = float(grid_params.get("lowerPrice") or 0.0)
         upper_ratio = float(grid_params.get("upperPrice") or 0.0)
         reference = (lower_ratio + upper_ratio) / 2.0
         if lower_ratio <= 0 or upper_ratio <= 0 or reference <= 0:
             return runtime_config
-        grid_params["lowerPrice"] = initial_price * lower_ratio / reference
-        grid_params["upperPrice"] = initial_price * upper_ratio / reference
+
+        anchor_price = 0.0
+        anchor_source = ""
+        try:
+            from app.services.grid.runtime_state import load_grid_resting_state
+
+            grid_state = load_grid_resting_state(runtime_config)
+            anchor_price = float(grid_state.get("dynamic_anchor_price") or 0.0)
+            if anchor_price > 0:
+                anchor_source = "runtime_state"
+        except Exception:
+            anchor_price = 0.0
+
+        if anchor_price <= 0 and persisted_grid_bounds:
+            try:
+                persisted_lower, persisted_upper, persisted_count = persisted_grid_bounds
+                configured_count = max(2, int(grid_params.get("gridCount") or 10))
+                count_unit = str(grid_params.get("gridCountUnit") or "lines").strip().lower()
+                expected_count = (
+                    configured_count
+                    if count_unit == "cells"
+                    else configured_count - 1
+                )
+                low_anchor = float(persisted_lower or 0.0) * reference / lower_ratio
+                high_anchor = float(persisted_upper or 0.0) * reference / upper_ratio
+                midpoint = (low_anchor + high_anchor) / 2.0
+                relative_gap = (
+                    abs(low_anchor - high_anchor) / midpoint
+                    if midpoint > 0
+                    else float("inf")
+                )
+                if (
+                    int(persisted_count or 0) == expected_count
+                    and low_anchor > 0
+                    and high_anchor > 0
+                    and relative_gap <= 1e-6
+                ):
+                    anchor_price = midpoint
+                    anchor_source = "persisted_cells"
+            except (TypeError, ValueError, ZeroDivisionError):
+                anchor_price = 0.0
+
+        if anchor_price <= 0 and initial_price > 0:
+            anchor_price = float(initial_price)
+            anchor_source = "live_price"
+
+        if anchor_price <= 0:
+            return runtime_config
+
+        grid_params["lowerPrice"] = anchor_price * lower_ratio / reference
+        grid_params["upperPrice"] = anchor_price * upper_ratio / reference
         grid_params["dynamicAnchor"] = False
+        grid_params["_dynamicAnchorPrice"] = anchor_price
+        grid_params["_dynamicAnchorSource"] = anchor_source
         runtime_config["bot_params"] = grid_params
         return runtime_config
 
@@ -1814,8 +1977,16 @@ class TradingExecutor:
         params = config.get("bot_params") if isinstance(config.get("bot_params"), dict) else {}
         upper = float(params.get("upperPrice") or params.get("upper_price") or 0)
         lower = float(params.get("lowerPrice") or params.get("lower_price") or 0)
+        boundary_action = str(
+            params.get("boundaryAction") or params.get("boundary_action") or "pause"
+        ).strip().lower()
         buffer_ratio = self._ratio(config.get("grid_oob_buffer_pct"), 0.05)
-        if upper > lower > 0 and current_price > 0 and buffer_ratio > 0:
+        if (
+            boundary_action == "stop_loss"
+            and upper > lower > 0
+            and current_price > 0
+            and buffer_ratio > 0
+        ):
             if current_price >= upper * (1 + buffer_ratio):
                 return close_all("grid_out_of_bounds_up", oob_threshold=upper * (1 + buffer_ratio))
             if current_price <= lower * (1 - buffer_ratio):
@@ -2054,10 +2225,19 @@ class TradingExecutor:
         source_id = int(trading_config.get("script_source_id") or 0)
         if source_id <= 0:
             raise RuntimeError("strategyV2.sourceRequired")
-        source = get_script_source_service().get_source(
-            source_id,
+        source_version_id = int(
+            strategy.get("source_version_id")
+            or trading_config.get("script_source_version_id")
+            or 0
+        )
+        if source_version_id <= 0:
+            raise RuntimeError("strategyV2.sourceVersionRequired")
+        source = get_script_source_service().get_version(
+            source_version_id,
             user_id=int(strategy.get("user_id") or 0),
         )
+        if not source or int(source.get("source_id") or 0) != source_id:
+            raise RuntimeError("strategyV2.sourceVersionNotFound")
         code = str((source or {}).get("code") or "").strip()
         if not code:
             raise RuntimeError("strategyV2.codeRequired")
@@ -2080,7 +2260,7 @@ class TradingExecutor:
                 f"Legacy {bot_type} robot allocation contract upgraded for this run",
             )
             code = migrated
-        return source_id, code
+        return source_version_id, code
 
     def _is_strategy_running(self, strategy_id: int, thread: threading.Thread) -> bool:
         if self.runtime_guard and not self.runtime_guard(strategy_id):

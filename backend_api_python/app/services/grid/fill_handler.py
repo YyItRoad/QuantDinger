@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from app.services.grid.resting_orders_repo import GridRestingOrder
-from app.services.live_trading.grid_cells import GridCellRepository
+from app.services.live_trading.fill_evidence import require_execution
 from app.services.live_trading.leg_context import resolve_leg_context
 from app.services.live_trading.records import (
     apply_fill_to_local_position,
@@ -24,38 +24,6 @@ _PURPOSE_TO_SIGNAL = {
 }
 
 
-def _matched_grid_entry_price(strategy_id: int, symbol: str, order: GridRestingOrder) -> float:
-    """Best-effort cell cost basis for one grid close fill."""
-    purpose = str(order.purpose or "")
-    if purpose not in ("long_exit", "short_exit"):
-        return 0.0
-    try:
-        repo = GridCellRepository()
-        rows = repo.list_cells(int(strategy_id), str(symbol or ""))
-        for cell in rows or []:
-            if int(getattr(cell, "cell_index", -1)) != int(order.cell_index):
-                continue
-            entry = float(getattr(cell, "leg_entry_price", 0.0) or 0.0)
-            if entry > 0:
-                return entry
-            if purpose == "long_exit":
-                return float(getattr(cell, "lower_price", 0.0) or 0.0)
-            return float(getattr(cell, "upper_price", 0.0) or 0.0)
-    except Exception as e:
-        logger.debug("grid matched entry lookup sid=%s cell=%s: %s", strategy_id, order.cell_index, e)
-    return 0.0
-
-
-def _grid_match_profit(purpose: str, entry_price: float, exit_price: float, qty: float) -> float | None:
-    if entry_price <= 0 or exit_price <= 0 or qty <= 0:
-        return None
-    if purpose == "long_exit":
-        return (exit_price - entry_price) * qty
-    if purpose == "short_exit":
-        return (entry_price - exit_price) * qty
-    return None
-
-
 def apply_grid_fill_to_local_state(
     strategy_id: int,
     symbol: str,
@@ -71,19 +39,18 @@ def apply_grid_fill_to_local_state(
     fee_source: str = "",
     exchange_fill_id: str = "",
     execution_event_id: int = 0,
+    fees_by_ccy: Dict[str, float] | None = None,
 ) -> None:
     sym = normalize_strategy_symbol(symbol)
     purpose = str(order.purpose or "")
     signal_type = _PURPOSE_TO_SIGNAL.get(purpose, "")
     if not signal_type:
         return
-    px = float(avg_price or order.price or 0)
-    qty = float(filled_qty or order.quantity or 0)
-    if qty <= 0 or px <= 0:
-        return
+    px = float(avg_price or 0)
+    qty = float(filled_qty or 0)
+    require_execution(qty, px)
     tc = trading_config if isinstance(trading_config, dict) else {}
-    grid_entry_price = _matched_grid_entry_price(int(strategy_id), sym, order)
-    grid_profit = _grid_match_profit(purpose, grid_entry_price, px, qty)
+    from app.services.pending_orders.fill_records import spot_position_fill_quantity
 
     leg = resolve_leg_context(
         strategy_id=int(strategy_id),
@@ -95,13 +62,12 @@ def apply_grid_fill_to_local_state(
         strategy_id=int(strategy_id),
         symbol=sym,
         signal_type=signal_type,
-        filled=qty,
+        filled=spot_position_fill_quantity(
+            market_type=str(tc.get('market_type') or 'swap'), symbol=sym, signal_type=signal_type,
+            gross_quantity=qty, fees_by_ccy=fees_by_ccy or {}),
         avg_price=px,
         leg=leg,
     )
-    if grid_profit is not None:
-        profit = grid_profit
-        matched_entry = grid_entry_price
     record_trade(
         strategy_id=int(strategy_id),
         symbol=sym,
@@ -114,19 +80,27 @@ def apply_grid_fill_to_local_state(
         profit=profit,
         close_reason=purpose,
         matched_entry_price=matched_entry,
-        grid_matched_profit=(
-            profit if purpose in ("long_exit", "short_exit") and profit is not None else None
-        ),
+        grid_matched_profit=None,
         leg=leg,
         exchange_fill_id=str(exchange_fill_id or ""),
         execution_event_id=int(execution_event_id or 0),
         grid_order_id=int(order.id or 0),
         fee_status=str(fee_status or "pending"),
         fee_source=str(fee_source or ""),
+        fees_by_ccy=fees_by_ccy,
+        exchange_order_id=order.exchange_order_id,
     )
 
 
-def record_grid_market_fill(
+def record_grid_market_fill(*args, **kwargs):
+    from app.utils.db import get_db_transaction
+    from app.services.live_trading.fill_accounting import lock_strategy_fills
+    with get_db_transaction():
+        lock_strategy_fills(int(args[0] if args else kwargs['strategy_id']))
+        return _record_grid_market_fill(*args, **kwargs)
+
+
+def _record_grid_market_fill(
     strategy_id: int,
     symbol: str,
     signal_type: str,
@@ -144,6 +118,7 @@ def record_grid_market_fill(
     user_id: int = 0,
     fee_status: str = "pending",
     fee_source: str = "rest",
+    fees_by_ccy: Dict[str, float] | None = None,
 ) -> int:
     """Record a grid initial/risk market fill into L2/L3 ledgers."""
     sym = normalize_strategy_symbol(symbol)
@@ -152,8 +127,7 @@ def record_grid_market_fill(
         return 0
     px = float(avg_price or 0)
     qty = float(filled_qty or 0)
-    if qty <= 0 or px <= 0:
-        return 0
+    require_execution(qty, px)
     tc = trading_config if isinstance(trading_config, dict) else {}
     leg = resolve_leg_context(
         strategy_id=int(strategy_id),
@@ -161,11 +135,13 @@ def record_grid_market_fill(
         market_type=str(tc.get("market_type") or "swap"),
         fill_source="grid_market",
     )
+    from app.services.pending_orders.fill_records import spot_position_fill_quantity
+    fees_by_ccy = fees_by_ccy or ({commission_ccy: commission} if commission_ccy and commission_ccy != 'MIXED' else {})
     profit, _pos, matched_entry = apply_fill_to_local_position(
         strategy_id=int(strategy_id),
         symbol=sym,
         signal_type=sig,
-        filled=qty,
+        filled=spot_position_fill_quantity(market_type=leg.normalized_market_type(), symbol=sym, signal_type=sig, gross_quantity=qty, fees_by_ccy=fees_by_ccy),
         avg_price=px,
         leg=leg,
     )
@@ -184,6 +160,8 @@ def record_grid_market_fill(
         leg=leg,
         fee_status=str(fee_status or "pending"),
         fee_source=str(fee_source or "rest"),
+        fees_by_ccy=fees_by_ccy,
+        exchange_order_id=exchange_order_id,
     )
     if trade_id and (exchange_order_id or client_order_id):
         try:

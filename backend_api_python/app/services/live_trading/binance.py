@@ -8,6 +8,7 @@ API docs (reference):
 from __future__ import annotations
 
 from app.services.live_trading.binance_fees import aggregate_commissions
+from app.services.live_trading.fill_evidence import binance_execution_average
 
 import hashlib
 import hmac
@@ -466,14 +467,23 @@ class BinanceFuturesClient(BaseRestClient):
             params["startTime"] = max(0, int(end_time_ms) - 7 * 86400000 + 1)
         params["limit"] = lim
         data = self._signed_request("GET", "/fapi/v1/userTrades", params=params)
-        return data
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and isinstance(data.get("raw"), list):
+            return data["raw"]
+        return []
 
     def get_open_orders(self, *, symbol: str = "") -> Any:
         """Return current USD-M futures orders, optionally scoped to one symbol."""
         params: Dict[str, Any] = {}
         if symbol:
             params["symbol"] = to_binance_futures_symbol(symbol)
-        return self._signed_request("GET", "/fapi/v1/openOrders", params=params)
+        data = self._signed_request("GET", "/fapi/v1/openOrders", params=params)
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and isinstance(data.get("raw"), list):
+            return data["raw"]
+        return []
 
     def get_fee_for_order(self, *, symbol: str, order_id: str, max_retries: int = 3) -> Tuple[float, str]:
         """
@@ -500,7 +510,7 @@ class BinanceFuturesClient(BaseRestClient):
                     fee = 0.0
                 ccy = str(t.get("commissionAsset") or "").strip()
                 if fee != 0.0:
-                    total_fee += abs(float(fee))
+                    total_fee += float(fee)
                     if (not fee_ccy) and ccy:
                         fee_ccy = ccy
             if total_fee > 0 or attempt >= max_retries - 1:
@@ -677,24 +687,7 @@ class BinanceFuturesClient(BaseRestClient):
             except Exception:
                 filled = 0.0
 
-            avg_price = 0.0
-            try:
-                if last.get("avgPrice") is not None and str(last.get("avgPrice")).strip() != "":
-                    avg_price = float(last.get("avgPrice") or 0.0)
-            except Exception:
-                avg_price = 0.0
-            if avg_price <= 0 and filled > 0:
-                try:
-                    cum_quote = float(last.get("cumQuote") or 0.0)
-                    if cum_quote > 0:
-                        avg_price = cum_quote / filled
-                except Exception:
-                    pass
-            if avg_price <= 0:
-                try:
-                    avg_price = float(last.get("price") or 0.0)
-                except Exception:
-                    avg_price = 0.0
+            avg_price = binance_execution_average(last)
 
             if filled > 0 and avg_price > 0:
                 fee, fee_ccy, fees = self._fetch_commission_for_order(
@@ -873,7 +866,7 @@ class BinanceFuturesClient(BaseRestClient):
                             exchange_id="binance",
                             exchange_order_id=str(raw.get("orderId") or raw.get("clientOrderId") or ""),
                             filled=float(raw.get("executedQty") or 0.0),
-                            avg_price=float(raw.get("avgPrice") or raw.get("price") or 0.0),
+                            avg_price=binance_execution_average(raw),
                             raw=raw,
                         )
                     except Exception:
@@ -889,7 +882,7 @@ class BinanceFuturesClient(BaseRestClient):
                             exchange_id="binance",
                             exchange_order_id=str(raw.get("orderId") or raw.get("clientOrderId") or ""),
                             filled=float(raw.get("executedQty") or 0.0),
-                            avg_price=float(raw.get("avgPrice") or raw.get("price") or 0.0),
+                            avg_price=binance_execution_average(raw),
                             raw=raw,
                         )
                     except Exception:
@@ -934,7 +927,7 @@ class BinanceFuturesClient(BaseRestClient):
         # Best-effort parse fill info.
         exchange_order_id = str(raw.get("orderId") or raw.get("clientOrderId") or "")
         filled = float(raw.get("executedQty") or 0.0)
-        avg_price = float(raw.get("avgPrice") or raw.get("price") or 0.0)
+        avg_price = binance_execution_average(raw)
 
         return LiveOrderResult(
             exchange_id="binance",
@@ -1011,7 +1004,7 @@ class BinanceFuturesClient(BaseRestClient):
                             exchange_id="binance",
                             exchange_order_id=str(raw.get("orderId") or raw.get("clientOrderId") or ""),
                             filled=float(raw.get("executedQty") or 0.0),
-                            avg_price=float(raw.get("avgPrice") or raw.get("price") or 0.0),
+                            avg_price=binance_execution_average(raw),
                             raw=raw,
                         )
                     except Exception:
@@ -1026,7 +1019,7 @@ class BinanceFuturesClient(BaseRestClient):
                             exchange_id="binance",
                             exchange_order_id=str(raw.get("orderId") or raw.get("clientOrderId") or ""),
                             filled=float(raw.get("executedQty") or 0.0),
-                            avg_price=float(raw.get("avgPrice") or raw.get("price") or 0.0),
+                            avg_price=binance_execution_average(raw),
                             raw=raw,
                         )
                     except Exception:
@@ -1038,7 +1031,7 @@ class BinanceFuturesClient(BaseRestClient):
             )
         exchange_order_id = str(raw.get("orderId") or raw.get("clientOrderId") or "")
         filled = float(raw.get("executedQty") or 0.0)
-        avg_price = float(raw.get("avgPrice") or raw.get("price") or 0.0)
+        avg_price = binance_execution_average(raw)
         return LiveOrderResult(exchange_id="binance", exchange_order_id=exchange_order_id, filled=filled, avg_price=avg_price, raw=raw)
 
     def cancel_order(self, *, symbol: str, order_id: str = "", client_order_id: str = "") -> Dict[str, Any]:

@@ -273,3 +273,26 @@ def test_init_database_respects_skip_auto_migrate(monkeypatch, caplog):
     assert calls['apply'] == 0, "auto-migrate should be skipped"
     assert calls['verify'] == 1, "permission probe must still run"
     assert any('SKIP_AUTO_MIGRATE' in rec.message for rec in caplog.records)
+
+
+def test_bootstrap_applies_execution_accounting_after_schema(monkeypatch):
+    from contextlib import contextmanager
+    from unittest.mock import MagicMock
+    from app.utils import db as module
+
+    connection = MagicMock()
+    @contextmanager
+    def connect():
+        yield connection
+    calls = []
+    monkeypatch.setattr(module, "get_db_connection", connect)
+    monkeypatch.setattr(module, "_apply_migration_component", lambda conn, logger, **kw: calls.append(kw))
+    module._apply_init_sql(MagicMock(), strict=True)
+    names = [item["name"] for item in calls]
+    assert names[:2] == ["schema-init", "execution-fill-accounting-20260916"]
+    assert names[2] == "exchange-order-pnl-20260916"
+    assert names[3] == "ai-decision-billing-20260920"
+    assert "qd_exchange_order_pnl" in calls[2]["path"].read_text(encoding="utf-8")
+    assert "billing_json" in calls[3]["path"].read_text(encoding="utf-8")
+    assert calls[1]["path"].is_file()
+    assert "commission_breakdown" in calls[1]["path"].read_text(encoding="utf-8")

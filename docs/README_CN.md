@@ -95,8 +95,6 @@ Celery broker 与结果存储。修改进程归属或共享状态前，请先阅
 - [图表指标开发](trading/INDICATOR_DEV_GUIDE_CN.md)
 - [持仓管理使用指南](trading/POSITION_MANAGEMENT_GUIDE_CN.md)
 - [EMA 金叉爆发指标与策略指南](trading/EMA_CROSS_BURST_GUIDE_CN.md)
-- [EMA 金叉爆发永续合约多头策略说明](EMA金叉爆发永续合约策略.md)
-- [AiCoin EMA 金叉爆发指标](AiCoin_EMA金叉爆发指标.md)
 - [公开股票池与基本面数据](trading/PUBLIC_UNIVERSE_AND_FUNDAMENTALS_CN.md)
 - [Interactive Brokers](trading/IBKR_TRADING_GUIDE_CN.md)
 - 可运行示例位于 [`examples/`](examples/)
