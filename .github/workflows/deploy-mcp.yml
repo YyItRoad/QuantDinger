@@ -1,0 +1,129 @@
+name: Build and deploy MCP to personal server
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Override the image tag. Leave blank for manual-<short-sha>."
+        required: false
+        default: ""
+        type: string
+      host:
+        description: "Override secrets.SERVER_HOST for this run."
+        required: false
+        default: ""
+        type: string
+      deploy_dir:
+        description: "Server-side QuantDinger directory."
+        required: false
+        default: "/opt/quantdinger"
+        type: string
+      prune:
+        description: "Prune dangling images after a successful deployment."
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: "Build and push the image, but do not connect to the server."
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: deploy-mcp-${{ github.event.inputs.image_tag || github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: mcp_server/pyproject.toml
+
+      - name: Test official MCP package
+        run: |
+          python -m pip install --disable-pip-version-check -e './mcp_server[dev]'
+          python -m pytest mcp_server/tests -q
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="manual-${GITHUB_SHA::7}"
+          fi
+          image="ghcr.io/${REPO_OWNER,,}/quantdinger-mcp:${tag}"
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push MCP image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./mcp_server
+          file: ./mcp_server/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.resolve.outputs.ghcr_image }}
+          cache-from: type=gha,scope=deploy-mcp
+          cache-to: type=gha,mode=max,scope=deploy-mcp
+          provenance: mode=max
+          sbom: true
+
+      - name: Upload MCP deployment files
+        if: ${{ !inputs.dry_run }}
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ inputs.host || secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          command_timeout: 2m
+          source: "docker-compose.mcp.ghcr.yml,ops/deploy/deploy-mcp-remote.sh,ops/deploy/MCP_DEPLOY_CN.md"
+          target: ${{ inputs.deploy_dir }}
+
+      - name: Deploy MCP only
+        if: ${{ !inputs.dry_run }}
+        uses: appleboy/ssh-action@v1
+        env:
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+          GHCR_IMAGE: ${{ steps.resolve.outputs.ghcr_image }}
+          DEPLOY_DIR: ${{ inputs.deploy_dir }}
+          PRUNE: ${{ inputs.prune }}
+        with:
+          host: ${{ inputs.host || secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          command_timeout: 15m
+          command_stop: true
+          envs: IMAGE_TAG,GHCR_IMAGE,DEPLOY_DIR,PRUNE
+          script: |
+            set -euo pipefail
+            chmod +x "$DEPLOY_DIR/ops/deploy/deploy-mcp-remote.sh"
+            bash "$DEPLOY_DIR/ops/deploy/deploy-mcp-remote.sh"
