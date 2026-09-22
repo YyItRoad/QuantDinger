@@ -29,6 +29,10 @@ set -euo pipefail
 : "${COMPOSE_FILE:=docker-compose.ghcr.yml}"
 : "${PRUNE:=false}"
 : "${REPO_OWNER:=OpenByteInc}"
+# GHCR requires lowercase repo names. We lowercase in bash instead of using
+# the GitHub Actions `| lower` filter — that filter triggered a schema
+# fallback that hid the workflow name and the Run workflow button.
+REPO_OWNER="${REPO_OWNER,,}"
 : "${REF:=main}"
 
 log() { printf '[deploy-remote] %s\n' "$*"; }

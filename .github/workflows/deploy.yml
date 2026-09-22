@@ -117,13 +117,18 @@ jobs:
         id: resolve
         env:
           INPUT_TAG: ${{ inputs.image_tag }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           if [ -n "$INPUT_TAG" ]; then
             tag="$INPUT_TAG"
           else
             tag="manual-${GITHUB_SHA::7}"
           fi
-          image="ghcr.io/${{ github.repository_owner }}/quantdinger-backend:${tag}"
+          # GHCR requires the repository name lowercase. We lowercase the
+          # owner via bash parameter expansion instead of GitHub Actions'
+          # `| lower` filter — that filter triggered a schema fallback that
+          # hid the workflow name and the Run workflow button in the UI.
+          image="ghcr.io/${REPO_OWNER,,}/quantdinger-backend:${tag}"
           # Manual dispatch ⇒ no real git tag.
           app_version="0.0.0-${GITHUB_SHA::7}"
           git_tag=""
@@ -144,18 +149,6 @@ jobs:
             exit 1
           fi
 
-      - name: Extract image labels
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/quantdinger-backend
-          tags: |
-            type=ref,event=tag
-            type=sha,format=short
-          # Flavour this workflow owns: bake an "automatic manual-<sha>" label too.
-          flavor: |
-            latest=auto
-
       - name: Build and push backend image
         uses: docker/build-push-action@v7
         with:
@@ -168,7 +161,6 @@ jobs:
             APP_VERSION=${{ steps.resolve.outputs.app_version }}
             GIT_TAG=${{ steps.resolve.outputs.git_tag }}
           tags: ${{ steps.resolve.outputs.ghcr_image }}
-          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=deploy-backend
           cache-to: type=gha,mode=max,scope=deploy-backend
           provenance: mode=max
