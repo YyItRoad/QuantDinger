@@ -240,6 +240,7 @@ class PrivateWebSocketAdapter:
 
                 self._ws = websocket.WebSocketApp(
                     url,
+                    header={"X-Gate-Size-Decimal": "1"} if isinstance(self, GateExecutionAdapter) else None,
                     on_open=_open,
                     on_message=_message,
                     on_error=_error,
@@ -640,7 +641,7 @@ class HtxExecutionAdapter(PrivateWebSocketAdapter):
         return False
 
     def url(self) -> str:
-        return "wss://api.htx.com/ws/v2" if self.market_type == "spot" else "wss://api.hbdm.com/swap-notification"
+        return "wss://api.htx.com/ws/v2" if self.market_type == "spot" else "wss://api.hbdm.com/linear-swap-notification"
 
     def _auth_params(self) -> Dict[str, str]:
         parsed = urlparse(self.url())
@@ -651,10 +652,13 @@ class HtxExecutionAdapter(PrivateWebSocketAdapter):
             "SignatureVersion": "2",
             "Timestamp": timestamp,
         }
-        path = parsed.path or ("/ws/v2" if self.market_type == "spot" else "/swap-notification")
+        if self.market_type == 'spot':
+            params = {'accessKey': params['AccessKeyId'], 'signatureMethod': 'HmacSHA256',
+                      'signatureVersion': '2.1', 'timestamp': timestamp}
+        path = parsed.path
         encoded = urlencode(sorted(params.items()))
         payload = f"GET\n{parsed.hostname}\n{path}\n{encoded}"
-        params["Signature"] = _b64_hmac(
+        params['signature' if self.market_type == 'spot' else 'Signature'] = _b64_hmac(
             str(self.config.get("secret_key") or self.config.get("secret") or ""),
             payload,
         )
@@ -839,18 +843,21 @@ class IBKRExecutionAdapter:
                 source="commission_report",
             )
         ]
+        from app.services.execution_streams.reported_pnl import number
+        reported_pnl = number(getattr(report, "realizedPNL", None))
+        reported_pnl = float(reported_pnl) if reported_pnl is not None else None
         event.raw = {
             **base_event.raw,
             "commission": float(getattr(report, "commission", 0) or 0.0),
             "currency": str(getattr(report, "currency", "") or ""),
-            "realizedPNL": float(getattr(report, "realizedPNL", 0) or 0.0),
+            "realizedPNL": reported_pnl,
         }
         event.quantity = 0.0
         event.cumulative_quantity = base_event.cumulative_quantity
         event.is_cumulative = True
         # Commission is a second authoritative update for the same execution.
         event.exchange_fill_id = f"{exec_id}:commission"
-        event.realized_pnl = float(getattr(report, "realizedPNL", 0) or 0.0)
+        event.realized_pnl = reported_pnl
         event.credential_id = self.credential_id
         event.user_id = self.user_id
         self.on_event(event)

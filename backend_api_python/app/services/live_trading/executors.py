@@ -7,6 +7,8 @@ from typing import Any, Dict, Optional
 
 from app.services.live_trading.base import LiveOrderResult, LiveTradingError
 from app.services.live_trading.contracts import ExchangeOrderAdapter, FillSnapshot, OrderIntent
+from app.services.live_trading.fill_evidence import positive_number
+from app.services.pending_orders.error_classification import is_exchange_price_band_error
 from app.services.pending_orders.sent_order_recovery import normalize_live_order_status
 
 
@@ -60,12 +62,13 @@ class MarketOrderExecutor:
                 max_wait_sec=self.max_wait_sec,
             )
             if fill:
+                quantity, average = _execution_pair(result, fill)
                 return OrderExecutionResult(
                     success=True,
                     exchange_id=str(result.exchange_id or ""),
                     exchange_order_id=str(result.exchange_order_id or ""),
-                    filled_qty=float(fill.filled_qty or result.filled or 0.0),
-                    avg_price=float(fill.avg_price or result.avg_price or 0.0),
+                    filled_qty=quantity,
+                    avg_price=average,
                     status=fill.status or "submitted",
                     raw={"place": dict(result.raw or {}), "fill": dict(fill.raw or {})},
                     fees_by_ccy=dict(fill.fees_by_ccy or {}),
@@ -186,12 +189,14 @@ class LimitThenMarketExecutor:
                     "limit_fill": dict((fill.raw if fill else {}) or {}),
                     "limit_summary": {
                         "exchange_order_id": str(result.exchange_order_id or ""),
+                        "fees_by_ccy": dict((fill.fees_by_ccy if fill else {}) or {}),
                         "filled_qty": limit_filled,
                         "avg_price": limit_avg,
                     },
                     "market": dict(market.raw or {}),
                     "market_summary": {
                         "exchange_order_id": str(market.exchange_order_id or ""),
+                        "fees_by_ccy": dict(market.fees_by_ccy or {}),
                         "filled_qty": float(market.filled_qty or 0.0),
                         "avg_price": market_avg,
                     },
@@ -202,13 +207,38 @@ class LimitThenMarketExecutor:
                 deferred = _limit_result(result, fill, pending=True)
                 return replace(deferred, raw={**deferred.raw, "reconciliation_error": str(exc)})
             if isinstance(exc, LiveTradingError):
+                if self.fallback_to_market and is_exchange_price_band_error(exc):
+                    market_intent = replace(
+                        intent,
+                        price=0.0,
+                        client_order_id=intent.fallback_client_order_id or intent.client_order_id,
+                    )
+                    market = MarketOrderExecutor(self.adapter).execute(market_intent)
+                    return replace(
+                        market,
+                        raw={
+                            "limit_error": str(exc),
+                            "market": dict(market.raw or {}),
+                        },
+                    )
                 return OrderExecutionResult.rejected(exc)
             raise
 
 
+def _execution_pair(result: LiveOrderResult, fill: Optional[FillSnapshot]) -> tuple[float, float]:
+    """Keep quantity and average from the same cumulative execution snapshot."""
+    placed = float(result.filled or 0.0)
+    observed = float(fill.filled_qty or 0.0) if fill else 0.0
+    if fill is not None and observed >= placed:
+        average = positive_number(fill.avg_price) or 0.0
+        if observed == placed and not average:
+            average = positive_number(result.avg_price) or 0.0
+        return observed, average
+    return placed, positive_number(result.avg_price) or 0.0
+
+
 def _limit_result(result: LiveOrderResult, fill: Optional[FillSnapshot], *, pending: bool = False) -> OrderExecutionResult:
-    quantity = max(float(result.filled or 0.0), float(fill.filled_qty or 0.0) if fill else 0.0)
-    average = float(fill.avg_price or result.avg_price or 0.0) if fill else float(result.avg_price or 0.0)
+    quantity, average = _execution_pair(result, fill)
     return OrderExecutionResult(
         success=True,
         exchange_id=str(result.exchange_id or ""),
@@ -243,7 +273,9 @@ def _weighted_avg(*fills: tuple[float, float]) -> float:
     notional = 0.0
     for qty, price in fills:
         q = max(0.0, float(qty or 0.0))
-        p = max(0.0, float(price or 0.0))
+        p = positive_number(price) or 0.0
+        if q > 0 and not p:
+            return 0.0
         notional += q * p
     return notional / total_qty if notional > 0 else 0.0
 
@@ -253,11 +285,9 @@ def _merge_fee_breakdowns(*items: Dict[str, float]) -> Dict[str, float]:
     for item in items:
         for currency, amount in (item or {}).items():
             try:
-                fee = abs(float(amount or 0.0))
+                fee = float(amount or 0.0)
             except (TypeError, ValueError):
                 fee = 0.0
-            if fee <= 0:
-                continue
             key = str(currency or "").strip().upper() or "UNKNOWN"
             merged[key] = merged.get(key, 0.0) + fee
     return merged

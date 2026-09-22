@@ -95,9 +95,34 @@ def test_http_502_is_not_classified_as_order_size():
     assert result["retryable"] is True
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        "OKX error: {'sCode': '51138'}",
+        'Bybit error: {"retCode": 110121}',
+        "Bitget error 25205: trading price cannot be below 5%",
+        "Gate error PRICE_TOO_DEVIATED",
+    ],
+)
+def test_dynamic_price_band_error_has_retryable_category(error):
+    result = classify_exchange_order_error(error)
+    assert result["category"] == "price_band"
+    assert result["retryable"] is True
+
+
 def test_legacy_executor_type_routes_to_grid_engine():
     assert resolve_bot_type({"trading_config": {"executor_type": "grid"}}) == "grid"
     assert resolve_bot_type({"template_key": "robot_v2_layered_martingale"}) == "layered_martingale"
+
+
+def test_current_manifest_metadata_routes_to_grid_engine():
+    assert resolve_bot_type({
+        "trading_config": {
+            "strategy_manifest": {
+                "metadata": {"strategy_family": "grid", "executor_type": "grid"},
+            },
+        },
+    }) == "grid"
 
 
 def test_legacy_grid_bot_params_route_to_resting_grid_engine():
@@ -181,3 +206,43 @@ def test_generated_grid_constants_recover_missing_deployed_bot_params():
         "dynamicAnchor": True,
     }
     assert recovered["equity_take_profit_pct"] == pytest.approx(0.2)
+
+
+def test_v7_grid_source_overrides_stale_editor_runtime_params():
+    recovered = TradingExecutor._recover_generated_grid_config(
+        {
+            "bot_type": "grid",
+            "bot_params": {
+                "lowerPrice": 0.90,
+                "upperPrice": 1.10,
+                "gridCount": 120,
+                "gridCountUnit": "cells",
+                "gridMode": "arithmetic",
+                "dynamicAnchor": True,
+            },
+            "equity_take_profit_pct": 0.10,
+        },
+        {
+            "GRID_TEMPLATE_VERSION": 7,
+            "CELL_LOWER": [2 / 3, 0.80],
+            "CELL_UPPER": [0.80, 4 / 3],
+            "GRID_SIDE": "long",
+            "DYNAMIC_ANCHOR": True,
+            "INITIAL_POSITION_PCT": 0.60,
+            "MAX_OPEN_ENTRY_ORDERS": 2,
+            "CELL_BUDGET_PCTS": [0.4, 0.6],
+            "CELL_ROLES": ["long_entry", "long_seed"],
+            "EQUITY_TAKE_PROFIT": 0.30,
+        },
+    )
+
+    assert recovered["bot_params"]["lowerPrice"] == pytest.approx(2 / 3)
+    assert recovered["bot_params"]["upperPrice"] == pytest.approx(4 / 3)
+    assert recovered["bot_params"]["gridCount"] == 2
+    assert recovered["bot_params"]["gridMode"] == "geometric"
+    assert recovered["bot_params"]["initialPositionPct"] == pytest.approx(0.60)
+    assert recovered["bot_params"]["maxOpenOrders"] == 2
+    assert recovered["bot_params"]["cellBudgetPcts"] == pytest.approx([0.4, 0.6])
+    assert recovered["bot_params"]["cellRoles"] == ["long_entry", "long_seed"]
+    assert recovered["bot_params"]["adaptiveBounds"] is False
+    assert recovered["equity_take_profit_pct"] == pytest.approx(0.30)
