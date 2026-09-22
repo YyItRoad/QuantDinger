@@ -1,4 +1,4 @@
-name: Build & deploy backend to personal server
+name: Build and deploy backend to personal server
 
 # Builds the backend image from THIS fork's `./backend_api_python` source, pushes
 # it to the fork owner's GHCR namespace (ghcr.io/<github.repository_owner>/...),
