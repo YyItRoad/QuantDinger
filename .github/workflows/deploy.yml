@@ -1,0 +1,252 @@
+name: Build & deploy backend to personal server
+
+# Builds the backend image from THIS fork's `./backend_api_python` source, pushes
+# it to the fork owner's GHCR namespace (ghcr.io/<github.repository_owner>/...),
+# then SSHes to the user's own Linux host and restarts the backend services via
+# `docker-compose.ghcr.yml`.
+#
+# Why we don't reuse the public image (ghcr.io/OpenByteInc/...):
+#   The upstream image is built from the OpenByteInc upstream codebase at a
+#   specific commit hash. If you've edited files under backend_api_python/, the
+#   published image does NOT include your changes. This workflow always builds
+#   from YOUR fork's code and tags the result so the server pulls *your* code.
+#
+# Why frontend is out of scope:
+#   The Vue frontend lives in a separate (private) QuantDinger-Vue repo with its
+#   own release workflow. Once you've published your frontend image to your own
+#   GHCR namespace, override FRONTEND_IMAGE on the server (or set it once in the
+#   deploy host's `.env`). See ops/deploy/server-prep.md.
+#
+# Triggers:
+#   - workflow_dispatch (manual only).
+#
+# Architecture: linux/amd64 only (matches the user's server, Skylake IBRS Xeon).
+#   Drop the `platforms:` array from the build step to add arm64 later.
+#
+# Why `cancel-in-progress: false`:
+#   A `docker compose up -d backend` interrupted mid-flight can leave the backend
+#   service in a degraded state. We do not want a second dispatch to abort the
+#   first; concurrent same-tag runs queue instead.
+#
+# Required secrets (set in fork repo Settings → Secrets and variables → Actions):
+#   DEPLOY_SSH_KEY   - ed25519 private key (no passphrase), pubkey pre-installed
+#                      on the deploy user's ~/.ssh/authorized_keys.
+#   SERVER_HOST      - server hostname or IP.
+#   SERVER_USER      - SSH username (recommend a non-root `deploy` user in the
+#                      `docker` group, so it can run `docker compose` without sudo).
+#   SERVER_PORT      - optional, defaults to 22.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Override the GHCR tag (e.g. v5.0.1). Leave blank to auto-tag as 'manual-<short-sha>'."
+        required: false
+        default: ""
+        type: string
+      host:
+        description: "Override secrets.SERVER_HOST for a one-off run. Leave blank to use the secret."
+        required: false
+        default: ""
+        type: string
+      deploy_dir:
+        description: "Server-side working directory."
+        required: false
+        default: "/opt/quantdinger"
+        type: string
+      prune:
+        description: "Run `docker image prune -f` after deployment."
+        required: false
+        default: "false"
+        type: boolean
+      dry_run:
+        description: "Build and push to GHCR, but skip the SSH deploy step."
+        required: false
+        default: "false"
+        type: boolean
+
+concurrency:
+  group: deploy-backend-${{ github.event.inputs.image_tag || github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read    # checkout
+  packages: write   # push to fork owner's GHCR namespace
+
+jobs:
+  build-and-deploy:
+    name: Build, push, and deploy backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Echo run context
+        env:
+          DEPLOY_HOST_RESOLVED: ${{ inputs.host || secrets.SERVER_HOST }}
+          DEPLOY_PORT_RESOLVED: ${{ secrets.SERVER_PORT || '22' }}
+        run: |
+          {
+            echo "### Run context ###"
+            echo "repo_owner          = ${{ github.repository_owner }}"
+            echo "actor               = ${{ github.actor }}"
+            echo "sha                = ${{ github.sha }}"
+            echo "image_tag (input)   = '${{ inputs.image_tag }}'"
+            echo "dry_run             = ${{ inputs.dry_run }}"
+            echo "prune               = ${{ inputs.prune }}"
+            echo "deploy_dir          = ${{ inputs.deploy_dir }}"
+            echo "host (resolved)     = $DEPLOY_HOST_RESOLVED"
+            echo "port (resolved)     = $DEPLOY_PORT_RESOLVED"
+            # SERVER_USER is a secret; do not echo its value.
+            echo "user (set via secret)= $([ -n '${{ secrets.SERVER_USER }}' ] && echo yes || echo no)"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Log in to GHCR (fork owner namespace)
+        uses: docker/login-action@v4.5.2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tag and application version
+        id: resolve
+        env:
+          INPUT_TAG: ${{ inputs.image_tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="manual-${GITHUB_SHA::7}"
+          fi
+          image="ghcr.io/${{ github.repository_owner }}/quantdinger-backend:${tag}"
+          # Manual dispatch ⇒ no real git tag.
+          app_version="0.0.0-${GITHUB_SHA::7}"
+          git_tag=""
+          echo "image_tag=${tag}"   >> "$GITHUB_OUTPUT"
+          echo "ghcr_image=${image}" >> "$GITHUB_OUTPUT"
+          echo "app_version=${app_version}" >> "$GITHUB_OUTPUT"
+          echo "git_tag=${git_tag}"   >> "$GITHUB_OUTPUT"
+
+      - name: Validate external tag exists in GHCR
+        if: inputs.image_tag != ''
+        env:
+          GHCR_IMAGE: ${{ steps.resolve.outputs.ghcr_image }}
+        run: |
+          if ! docker manifest inspect "$GHCR_IMAGE" > /dev/null 2>&1; then
+            echo "::error::Backend image $GHCR_IMAGE not found in GHCR."
+            echo "::error::Either push it first (run this workflow with image_tag blank),"
+            echo "::error::or pick a tag that already exists in your fork's GHCR namespace."
+            exit 1
+          fi
+
+      - name: Extract image labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/quantdinger-backend
+          tags: |
+            type=ref,event=tag
+            type=sha,format=short
+          # Flavour this workflow owns: bake an "automatic manual-<sha>" label too.
+          flavor: |
+            latest=auto
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v7
+        with:
+          context: ./backend_api_python
+          file: ./backend_api_python/Dockerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BUILD_REGION=global
+            APP_VERSION=${{ steps.resolve.outputs.app_version }}
+            GIT_TAG=${{ steps.resolve.outputs.git_tag }}
+          tags: ${{ steps.resolve.outputs.ghcr_image }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=deploy-backend
+          cache-to: type=gha,mode=max,scope=deploy-backend
+          provenance: mode=max
+          sbom: true
+
+      - name: Confirm image is reachable in GHCR
+        env:
+          GHCR_IMAGE: ${{ steps.resolve.outputs.ghcr_image }}
+        run: |
+          # Retry briefly; GHCR propagation is usually instant but the API can lag.
+          for i in $(seq 1 5); do
+            if docker buildx imagetools inspect "$GHCR_IMAGE" --raw | grep -q manifest; then
+              echo "Image $GHCR_IMAGE confirmed in GHCR."
+              exit 0
+            fi
+            echo "Attempt $i: manifest not visible yet, retrying in 5s..."
+            sleep 5
+          done
+          echo "::error::Image $GHCR_IMAGE not visible after build+push. GHCR propagation issue?"
+          exit 1
+
+      - name: Exit early on dry_run
+        if: inputs.dry_run
+        run: |
+          echo "::notice::dry_run=true — skipping SSH deploy. Image ${GITHUB_SHA::7} is in your GHCR."
+
+      - name: Upload deploy script to server
+        if: "!inputs.dry_run"
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ inputs.host || secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          command_timeout: 2m
+          source: ops/deploy/deploy-remote.sh
+          target: ${{ inputs.deploy_dir }}/.deploy-remote.sh
+
+      - name: Run deploy on server
+        if: "!inputs.dry_run"
+        uses: appleboy/ssh-action@v1
+        env:
+          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
+          GHCR_IMAGE: ${{ steps.resolve.outputs.ghcr_image }}
+          DEPLOY_DIR: ${{ inputs.deploy_dir }}
+          COMPOSE_FILE: docker-compose.ghcr.yml
+          PRUNE: ${{ inputs.prune }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        with:
+          host: ${{ inputs.host || secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          command_timeout: 10m
+          command_stop: true
+          script: |
+            set -euo pipefail
+            chmod +x "$DEPLOY_DIR/.deploy-remote.sh"
+            bash "$DEPLOY_DIR/.deploy-remote.sh"
+
+      - name: Post-deploy health probe
+        if: "!inputs.dry_run"
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ inputs.host || secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          command_timeout: 30s
+          command_stop: false   # health-check failure is a warning, not a hard error
+          script: |
+            set -euo pipefail
+            for i in $(seq 1 15); do
+              if curl -fsS --max-time 3 http://127.0.0.1:5000/api/health; then
+                echo "Backend /api/health OK."
+                exit 0
+              fi
+              echo "Attempt $i: not ready, sleeping 2s..."
+              sleep 2
+            done
+            echo "::warning::Backend /api/health did not return 200 within 30s — deploy may be incomplete."
