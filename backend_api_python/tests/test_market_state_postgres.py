@@ -56,6 +56,24 @@ def task_value(symbol='BTC/USDT'):
     return dict(market='Crypto', symbol=symbol, exchange_id='binance', market_type='swap', instrument_id='', timeframe='4h')
 
 
+def test_manual_reservation_stopped_scope_and_save(postgres_repo):
+    from app.market_state.scheduling import ScheduleRepository
+    repo, _ = postgres_repo
+    schedule = ScheduleRepository()
+    task = repo.create_task(1, task_value())
+    stopped = repo.change_task(1, task['id'], enabled=False)
+    now = datetime.now(timezone.utc)
+    assert schedule.reserve_manual(2, task['id'], now) is None
+    reservation = schedule.reserve_manual(1, task['id'], now)
+    assert reservation
+    assert schedule.reserve_manual(1, task['id'], now) is None
+    record = repo.save_result(1, task['id'], stopped['revision'], now - timedelta(hours=1), result_value(), allow_stopped=True)
+    assert record['id']
+    assert repo.get_task(1, task['id'])['enabled'] is False
+    schedule.release(1, task['id'], reservation['lease_token'])
+    assert schedule.reserve_manual(1, task['id'], now)
+
+
 def result_value():
     return dict(trend='UP', structure='PULLBACK', ma_state='BULL_ALIGNED', position='HIGH', momentum='DOWN',
                 phase='ADVANCE', confidence=4, summary='集成测试结果',
@@ -141,7 +159,6 @@ def test_routes_use_database_by_default(postgres_repo, monkeypatch):
     from flask import Flask
     from flask_smorest import Api
     from app.market_state.routes import blp
-    monkeypatch.delenv('MARKET_STATE_DEMO_ENABLED', raising=False)
     monkeypatch.setattr('app.utils.auth.verify_token', lambda _: {'user_id': 1, '_verified_user_role': 'user'})
     app = Flask(__name__)
     app.config.update(TESTING=True, API_TITLE='test', API_VERSION='1', OPENAPI_VERSION='3.0.3')
@@ -149,7 +166,7 @@ def test_routes_use_database_by_default(postgres_repo, monkeypatch):
     client = app.test_client()
     headers = {'Authorization': 'Bearer test'}
     response = client.get('/api/market-state/records', headers=headers)
-    assert response.json['mode'] == 'database' and response.json['data']['total'] == 0
+    assert response.json['data']['total'] == 0
     assert client.post('/api/market-state/tasks', json=task_value(), headers=headers).status_code == 201
     assert client.get('/api/market-state/tasks', headers=headers).json['data']['total'] == 1
 
@@ -276,7 +293,6 @@ def test_celery_consumption_to_record_api_with_duplicate_delivery(postgres_repo,
         store, fetch=lambda *_: bars, model=model, clock=lambda: now))
     monkeypatch.setattr('app.utils.auth.verify_token', lambda _: {'user_id': 1, '_verified_user_role': 'user'})
     monkeypatch.setenv('MARKET_STATE_EXECUTION_ENABLED', 'true')
-    monkeypatch.delenv('MARKET_STATE_DEMO_ENABLED', raising=False)
     monkeypatch.setitem(celery_app.conf, 'broker_url', 'memory://')
     monkeypatch.setitem(celery_app.conf, 'result_backend', 'cache+memory://')
     done = Event()

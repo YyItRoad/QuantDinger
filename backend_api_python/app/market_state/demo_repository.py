@@ -9,6 +9,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from app.market_state.errors import TaskConflictError
+
 
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
@@ -115,7 +117,7 @@ class DemoRepository:
             keys = ('market', 'symbol', 'exchange_id', 'market_type', 'timeframe')
             existing = [self.unpack(r) for r in db.execute('SELECT * FROM demo_tasks WHERE user_id=?', (user_id,))]
             if any(not r['deleted_at'] and all(r[k] == value[k] for k in keys) for r in existing):
-                raise ValueError('该品种及周期已存在分析任务，请启动已有任务')
+                raise TaskConflictError('该品种及周期已存在分析任务，请启动已有任务')
             return self.insert(db, 'demo_tasks', user_id, {
                 **value, 'enabled': True, 'deleted_at': None,
                 'created_at': now_iso(), 'updated_at': now_iso(),

@@ -50,6 +50,26 @@ def test_closed_window_excludes_open_and_preserves_order():
     assert closed_frame(milliseconds, '1h', 180, NOW)[0].equals(frame)
 
 
+def test_manual_run_stopped_task_keeps_state_and_uses_same_pipeline(setup):
+    service, repo, fetch, indicator, execute, model = setup
+    repo.get_task.return_value['enabled'] = False
+    repo.save_result.side_effect = lambda *args, **kwargs: {'id': 9}
+    assert service.run_once(1, 1, allow_stopped=True) == {'id': 9}
+    assert repo.get_task.return_value['enabled'] is False
+    assert repo.save_result.call_args.kwargs == {'allow_stopped': True}
+    model.assert_called_once()
+    repo.change_task.assert_not_called()
+
+
+def test_manual_run_still_rejects_revision_change(setup):
+    service, repo, fetch, indicator, execute, model = setup
+    original = {**repo.get_task.return_value, 'enabled': False}
+    repo.get_task.side_effect = [original, {**original, 'revision': original['revision'] + 1}]
+    with pytest.raises(ValueError, match='变更'):
+        service.run_once(1, 1, allow_stopped=True)
+    model.assert_not_called()
+
+
 @pytest.mark.parametrize('change', ['gap', 'duplicate', 'price', 'ohlc', 'interval', 'stale', 'few'])
 def test_bad_market_data_rejected(change):
     bars = candles()
@@ -172,6 +192,11 @@ def test_model_contract_rejects_invalid_fields(change):
         validate_answer(json.dumps({**answer(), **change}), {'candles': []})
 
 
+def test_model_contract_accepts_existing_prose_wrapped_json_parser():
+    raw = '<think>先分析行情结构。</think>\n' + json.dumps(answer(), ensure_ascii=False)
+    assert validate_answer(raw, {'candles': []}) == answer()
+
+
 def test_invalid_json_and_failed_model_not_saved(setup):
     service, repo, _, _, _, model = setup
     model.return_value = ('```json\n{}\n```', {})
@@ -216,26 +241,18 @@ def test_dangerous_script_rejected_before_model(setup):
 
 
 def test_source_adapter_binds_identity_and_uppercase_timeframe(setup, monkeypatch):
-    from app.data_sources.crypto import CryptoDataSource
-    source = Mock()
-    source._ensure_markets_loaded.return_value = True
-    source.exchange.timeframes = {'1h': '1h'}
-    source.exchange.market.return_value = {'id': 'BTCUSDT', 'swap': True}
-    source.get_kline.return_value = candles()
-    factory = Mock(return_value=source)
-    monkeypatch.setattr(CryptoDataSource, 'for_exchange', factory)
+    service = Mock()
+    service.get_kline.return_value = candles()
+    factory = Mock(return_value=service)
+    monkeypatch.setattr('app.services.kline.KlineService', factory)
     task = setup[1].get_task.return_value
     assert fetch_bars(task, 181) == candles()
-    factory.assert_called_once_with('binance', 'swap')
-    source.get_kline.assert_called_once_with('BTC/USDT', '1H', 181)
-    source.exchange.market.return_value['id'] = 'OTHER'
-    with pytest.raises(ValueError, match='品种标识'):
-        fetch_bars(task, 181)
-    source.exchange.market.return_value['id'] = 'BTCUSDT'
-    source.exchange.timeframes = {'1d': '1d'}
-    with pytest.raises(ValueError, match='原生任务周期'):
-        fetch_bars(task, 181)
-    assert source.get_kline.call_count == 1
+    factory.assert_called_once_with()
+    service.get_kline.assert_called_once_with(
+        market='Crypto', symbol='BTC/USDT', timeframe='1H', limit=181,
+        exchange_id='binance', market_type='swap', instrument_id='BTCUSDT')
+    with pytest.raises(ValueError, match='行情来源身份'):
+        fetch_bars({**task, 'exchange_id': 'unknown'}, 181)
 
 
 def test_model_adapter_locks_provider_and_disables_fallback(monkeypatch):

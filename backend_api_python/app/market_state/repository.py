@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from psycopg2.errors import UniqueViolation
 from psycopg2.extras import Json
 
+from app.market_state.errors import TaskConflictError
 from app.utils.db import get_db_transaction
 
 
@@ -73,7 +74,7 @@ class AnalysisRepository:
                 return public(cur.fetchone())
         except UniqueViolation as exc:
             if exc.diag.constraint_name == 'uq_market_state_active_task':
-                raise ValueError('该品种及周期已存在分析任务，请启动已有任务') from exc
+                raise TaskConflictError('该品种及周期已存在分析任务，请启动已有任务') from exc
             raise
 
     def change_task(self, user_id, task_id, *, enabled=None, delete=False):
@@ -85,7 +86,7 @@ class AnalysisRepository:
                 (False if delete else enabled, delete, user_id, task_id))
             return public(cur.fetchone())
 
-    def save_result(self, user_id, task_id, expected_revision, bar_close_at, result):
+    def save_result(self, user_id, task_id, expected_revision, bar_close_at, result, *, allow_stopped=False):
         """供后续单次分析调用，不提供外部写入接口。旧任务执行结果不得覆盖新状态。"""
         if not isinstance(bar_close_at, datetime) or bar_close_at.tzinfo is None:
             raise ValueError('K 线收盘时间必须带时区')
@@ -96,7 +97,7 @@ class AnalysisRepository:
                 'SELECT * FROM qd_market_state_tasks WHERE user_id=%s AND id=%s FOR UPDATE',
                 (user_id, task_id))
             task = cur.fetchone()
-            if not task or task['deleted_at'] or not task['enabled'] or task['revision'] != expected_revision:
+            if not task or task['deleted_at'] or (not task['enabled'] and not allow_stopped) or task['revision'] != expected_revision:
                 raise ValueError('分析任务已停止、删除或发生变更')
             columns = ('user_id', 'task_id', *IDENTITY, 'bar_close_at', *RESULT_FIELDS, 'details')
             values = (user_id, task_id, *(task[key] for key in IDENTITY), bar_close_at,

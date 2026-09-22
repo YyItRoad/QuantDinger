@@ -7,10 +7,11 @@ import math
 
 import pandas as pd
 
+from app.market_state.constants import TIMEFRAME_SECONDS
+from app.market_state.model_output import extract_json_object
 from app.market_state.recipe import default_recipe
 
 
-SECONDS = {'1h': 3600, '4h': 14400, '1d': 86400}
 STATES = {
     'trend': 'STRONG_UP UP TURNING_UP SIDEWAYS TURNING_DOWN DOWN STRONG_DOWN'.split(),
     'structure': 'RANGE BREAKOUT BREAKDOWN RETEST PULLBACK REBOUND CONTINUATION REVERSAL FAILED_BREAKOUT FAILED_BREAKDOWN UNCLEAR'.split(),
@@ -35,7 +36,7 @@ def digest(value):
 
 def closed_frame(bars, timeframe, count, now):
     """首版仅用于 24 小时交易的 Crypto；不把交易日历缺口误判为缺数据。"""
-    step = SECONDS[timeframe]
+    step = TIMEFRAME_SECONDS[timeframe]
     if now.tzinfo is None:
         raise ValueError('当前时间必须带时区')
     rows = []
@@ -73,21 +74,22 @@ def closed_frame(bars, timeframe, count, now):
 
 
 def fetch_bars(task, limit):
-    # 绑定交易所的现有只读来源不跨交易所降级，也不转用代币对应股票行情。
-    from app.data_sources.crypto import CryptoDataSource
-    source = CryptoDataSource.for_exchange(task['exchange_id'], task['market_type'])
+    """通过项目公开行情服务读取绑定到任务身份的 K 线。"""
+    from app.services.kline import KlineService
+    from app.services.market_context import MarketContext, SUPPORTED_CRYPTO_EXCHANGE_IDS
+    context = MarketContext.from_mapping(task, apply_crypto_defaults=False)
+    if context.market != 'Crypto' or context.exchange_id not in SUPPORTED_CRYPTO_EXCHANGE_IDS:
+        raise ValueError('无法核验行情来源身份')
     timeframe = {'1h': '1H', '4h': '4H', '1d': '1D'}[task['timeframe']]
-    if not source._ensure_markets_loaded():
-        raise ValueError('无法核验行情来源品种')
-    symbol = source._symbol_for_scoped_market(task['symbol'])
-    product = source.exchange.market(symbol)
-    if not product.get(task['market_type']) or (task.get('instrument_id') and str(product['id']) != task['instrument_id']):
-        raise ValueError('行情来源与任务品种标识不一致')
-    # 不接受不完整低周期聚合；其完整性应在以后单独验收。
-    supported = getattr(source.exchange, 'timeframes', None) or {}
-    if supported and task['timeframe'] not in supported:
-        raise ValueError('当前来源不支持原生任务周期')
-    return source.get_kline(task['symbol'], timeframe, limit)
+    return KlineService().get_kline(
+        market=context.market,
+        symbol=context.symbol,
+        timeframe=timeframe,
+        limit=limit,
+        exchange_id=context.exchange_id,
+        market_type=context.market_type,
+        instrument_id=context.instrument_id,
+    )
 
 
 def compute_indicator(name, frame, params):
@@ -114,7 +116,7 @@ def ask_model(messages):
 def validate_answer(raw, facts):
     if not isinstance(raw, str) or len(raw.encode()) > 64_000:
         raise ValueError('模型输出无效或过大')
-    value = json.loads(raw)
+    value = extract_json_object(raw)
     if not isinstance(value, dict) or value.get('error'):
         raise ValueError('模型未能给出有效分析')
     for field, choices in STATES.items():
@@ -140,14 +142,14 @@ class AnalysisService:
         self.fetch, self.indicator, self.execute, self.model = fetch, indicator, execute, model
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
-    def run_once(self, user_id, task_id, recipe=None, *, expected_revision=None, expected_bar=None):
+    def run_once(self, user_id, task_id, recipe=None, *, expected_revision=None, expected_bar=None, allow_stopped=False):
         recipe = deepcopy(recipe or default_recipe())
         task = self.repository.get_task(user_id, task_id)
-        if not task or not task['enabled'] or task.get('deleted_at'):
+        if not task or (not task['enabled'] and not allow_stopped) or task.get('deleted_at'):
             raise ValueError('分析任务不存在、已停止或已删除')
         if expected_revision is not None and task['revision'] != expected_revision:
             raise ValueError('排队期间分析任务已变更')
-        if task['market'] != 'Crypto' or task['timeframe'] not in SECONDS:
+        if task['market'] != 'Crypto' or task['timeframe'] not in TIMEFRAME_SECONDS:
             raise ValueError('单次执行首版仅支持 Crypto 的 1h、4h、1d；其他市场待交易日历接入')
         if not task.get('exchange_id') or task['market_type'] not in ('spot', 'swap'):
             raise ValueError('分析任务必须绑定交易所和市场类型')
@@ -173,7 +175,7 @@ class AnalysisService:
         if len(facts_json.encode()) > 256_000:
             raise ValueError('计算结果过大')
         current = self.repository.get_task(user_id, task_id)
-        if not current or not current['enabled'] or current.get('deleted_at') or current['revision'] != task['revision']:
+        if not current or (not current['enabled'] and not allow_stopped) or current.get('deleted_at') or current['revision'] != task['revision']:
             raise ValueError('分析任务已停止、删除或发生变更')
         identity = {key: task[key] for key in ('market', 'symbol', 'exchange_id', 'market_type', 'instrument_id', 'timeframe')}
         messages = [
@@ -197,4 +199,5 @@ class AnalysisService:
                                          'indicators': recipe.indicators, 'params': recipe.params, 'bars': recipe.bars})},
             'input': input_rows, 'input_sha256': digest(input_rows),
         }
-        return self.repository.save_result(user_id, task_id, task['revision'], close_at, result)
+        options = {'allow_stopped': True} if allow_stopped else {}
+        return self.repository.save_result(user_id, task_id, task['revision'], close_at, result, **options)

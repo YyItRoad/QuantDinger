@@ -4,7 +4,9 @@ from flask import Flask
 from flask_smorest import Api
 
 from app.market_state.demo_repository import DemoRepository
-from app.market_state.routes import blp, repository
+from app.market_state.errors import RequestValidationError
+from app.market_state.routes import blp
+from app.market_state.validation import validate_task_input
 
 
 @pytest.fixture
@@ -62,35 +64,81 @@ def test_duplicate_identity_and_recreation_after_delete(demo):
     assert demo.create_task(1, value)['id'] != task['id']
 
 
+def test_task_input_reuses_canonical_market_context():
+    value = validate_task_input({
+        'market': 'Crypto', 'symbol': ' btc/usdt:usdt ', 'exchange_id': 'okex',
+        'market_type': 'perpetual', 'instrument_id': 'BTC-USDT-SWAP', 'timeframe': '4h',
+    })
+    assert value == {
+        'market': 'Crypto', 'symbol': 'BTC/USDT', 'exchange_id': 'okx',
+        'market_type': 'swap', 'instrument_id': 'BTC-USDT-SWAP', 'timeframe': '4h',
+    }
+    with pytest.raises(RequestValidationError):
+        validate_task_input({'market': 'Unknown', 'symbol': 'BTC/USDT', 'timeframe': '4h'})
+
+
 @pytest.fixture
 def api_client(tmp_path, monkeypatch):
     import app.utils.auth as auth
+    import app.market_state.routes as routes
     monkeypatch.setattr(auth, 'verify_token', lambda token: {'user_id': int(token), '_verified_username': 'demo', '_verified_user_role': 'user'})
-    monkeypatch.setenv('MARKET_STATE_DEMO_ENABLED', 'true')
-    monkeypatch.setenv('MARKET_STATE_DEMO_DB', str(tmp_path / 'api.sqlite'))
+    store = DemoRepository(tmp_path / 'api.sqlite')
+    store.seed(1)
+    monkeypatch.setattr(routes, 'AnalysisRepository', lambda: store)
     application = Flask(__name__)
     application.config.update(TESTING=True, API_TITLE='test', API_VERSION='1', OPENAPI_VERSION='3.0.3')
     Api(application).register_blueprint(blp, url_prefix='/api/market-state')
     yield application.test_client()
-    repository.cache_clear()
 
 
 def headers(user=1):
     return {'Authorization': f'Bearer {user}'}
 
 
-def test_api_requires_login_and_explicit_demo_switch(api_client, monkeypatch):
+def test_manual_run_requires_login(api_client):
+    assert api_client.post('/api/market-state/tasks/1/run').status_code == 401
+
+
+@pytest.mark.parametrize('case, status', [('ok', 202), ('missing', 404), ('busy', 409), ('unsupported', 400), ('failed', 503)])
+def test_manual_run_scope_lease_and_failure(api_client, monkeypatch, case, status):
+    from unittest.mock import Mock
+    repo = Mock()
+    repo.get_task.return_value = None if case == 'missing' else {
+        'market': 'USStock' if case == 'unsupported' else 'Crypto',
+        'timeframe': '4h',
+        'enabled': False,
+    }
+    repo.reserve_manual.return_value = None if case == 'busy' else {'revision': 3, 'lease_token': 'token'}
+    submit = Mock(return_value='celery')
+    if case == 'failed':
+        submit.side_effect = RuntimeError('private broker error')
+    monkeypatch.setattr('app.market_state.scheduling.ScheduleRepository', lambda: repo)
+    monkeypatch.setattr('app.market_state.tasks.submit_manual_analysis', submit)
+    response = api_client.post('/api/market-state/tasks/5/run', headers=headers(2))
+    assert response.status_code == status
+    repo.get_task.assert_called_once_with(2, 5)
+    repo.change_task.assert_not_called()
+    if case in ('ok', 'failed'):
+        submit.assert_called_once_with({'id': 5, 'user_id': 2, 'revision': 3, 'lease_token': 'token'})
+    else:
+        submit.assert_not_called()
+    if case == 'failed':
+        repo.release.assert_called_once_with(2, 5, 'token')
+    else:
+        repo.release.assert_not_called()
+    if case == 'ok':
+        assert response.json['data']['status'] == 'queued'
+        assert response.json['data']['expected_bar_close_at'].endswith('+00:00')
+    assert 'private broker error' not in response.get_data(as_text=True)
+
+
+def test_api_requires_login(api_client):
     assert api_client.get('/api/market-state/records').status_code == 401
-    monkeypatch.delenv('MARKET_STATE_DEMO_DB')
-    response = api_client.get('/api/market-state/records', headers=headers())
-    assert response.status_code == 503
-    assert response.json['mode'] == 'unavailable'
 
 
 def test_api_pagination_validation_detail_and_ownership(api_client):
     root = '/api/market-state'
     response = api_client.get(root + '/records?page=2&page_size=10', headers=headers())
-    assert response.json['mode'] == 'demo'
     assert response.json['data']['page'] == 2
     record_id = response.json['data']['items'][0]['id']
     assert api_client.get(f'{root}/records/{record_id}', headers=headers()).json['data']['details']['demo']
@@ -121,14 +169,13 @@ def test_api_rejects_invalid_creation(api_client, body):
 
 def test_database_failure_returns_unavailable_without_demo_fallback(api_client, monkeypatch):
     from psycopg2 import OperationalError
-    from app.market_state.repository import AnalysisRepository
-    monkeypatch.delenv('MARKET_STATE_DEMO_ENABLED')
-    def fail(*args):
-        raise OperationalError('test database unavailable')
-    monkeypatch.setattr(AnalysisRepository, 'list', fail)
+    import app.market_state.routes as routes
+    class FailingRepository:
+        def list(self, *args):
+            raise OperationalError('test database unavailable')
+    monkeypatch.setattr(routes, 'AnalysisRepository', FailingRepository)
     response = api_client.get('/api/market-state/records', headers=headers())
     assert response.status_code == 503
-    assert response.json['mode'] == 'unavailable'
     assert response.json['data'] is None
 
 

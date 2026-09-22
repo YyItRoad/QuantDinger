@@ -13,7 +13,6 @@ ITEM = dict(id=1, user_id=2, revision=1, lease_token='00000000-0000-0000-0000-00
 @pytest.fixture
 def setup(monkeypatch):
     monkeypatch.setenv('MARKET_STATE_EXECUTION_ENABLED', 'true')
-    monkeypatch.delenv('MARKET_STATE_DEMO_ENABLED', raising=False)
     repo = Mock()
     repo.reserve_due.return_value = [ITEM]
     repo.start_reserved.return_value = True
@@ -26,19 +25,15 @@ def setup(monkeypatch):
     return repo, service, publish
 
 
-def test_default_disabled_and_demo_never_runs(setup, monkeypatch):
+def test_default_disabled_and_explicit_enable(setup, monkeypatch):
     repo, service, publish = setup
     monkeypatch.delenv('MARKET_STATE_EXECUTION_ENABLED')
     assert not execution_enabled()
     assert tasks.dispatch_analysis.run() == {'skipped': True}
     assert tasks.execute_analysis.run(**ITEM) == {'skipped': True}
+    repo.release_pending.assert_called_once()
     monkeypatch.setenv('MARKET_STATE_EXECUTION_ENABLED', 'true')
-    monkeypatch.setenv('MARKET_STATE_DEMO_ENABLED', 'true')
-    assert not execution_enabled()
-    tasks.dispatch_analysis.run()
-    repo.reserve_due.assert_not_called()
-    service.run_once.assert_not_called()
-    publish.assert_not_called()
+    assert execution_enabled()
 
 
 def test_dispatch_uses_reserved_identity(setup):
@@ -78,6 +73,33 @@ def test_analysis_failure_propagates_without_retry(setup):
         tasks.execute_analysis.run(**ITEM)
     repo.release.assert_called_once()
     assert service.run_once.call_count == 1
+
+
+def test_manual_worker_ignores_periodic_switch_and_releases_lease(setup, monkeypatch):
+    repo, service, _ = setup
+    monkeypatch.delenv('MARKET_STATE_EXECUTION_ENABLED')
+    item = {key: ITEM[key] for key in ('id', 'user_id', 'revision', 'lease_token')}
+    assert tasks.execute_analysis.run(**item, manual=True) == {'record_id': 10}
+    service.run_once.assert_called_once_with(2, 1, expected_revision=1, allow_stopped=True)
+    repo.release.assert_called_once_with(2, 1, ITEM['lease_token'])
+
+
+def test_manual_worker_failure_is_visible_and_releases_lease(setup):
+    repo, service, _ = setup
+    service.run_once.side_effect = ValueError('模型格式错误')
+    item = {key: ITEM[key] for key in ('id', 'user_id', 'revision', 'lease_token')}
+    with pytest.raises(ValueError, match='模型格式错误'):
+        tasks.execute_analysis.run(**item, manual=True)
+    repo.release.assert_called_once_with(2, 1, ITEM['lease_token'])
+
+
+def test_manual_submit_uses_existing_ai_queue_task(monkeypatch):
+    payload = {key: ITEM[key] for key in ('id', 'user_id', 'revision', 'lease_token')}
+    publish = Mock()
+    monkeypatch.setenv('CELERY_TASKS_ENABLED', 'true')
+    monkeypatch.setattr(tasks.execute_analysis, 'apply_async', publish)
+    assert tasks.submit_manual_analysis(payload) == 'celery'
+    publish.assert_called_once_with(kwargs={**payload, 'manual': True}, expires=1800)
 
 
 def test_celery_registration_uses_existing_queues():

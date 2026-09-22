@@ -1,0 +1,5 @@
+"""行情分析模块内部协议常量。"""
+
+
+TIMEFRAME_SECONDS = {'1h': 3600, '4h': 14400, '1d': 86400}
+SUPPORTED_TIMEFRAMES = tuple(TIMEFRAME_SECONDS)

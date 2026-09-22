@@ -4,16 +4,38 @@ from datetime import datetime, timezone
 import os
 from uuid import uuid4
 
+from app.market_state.constants import TIMEFRAME_SECONDS
 from app.market_state.repository import AnalysisRepository, public
 from app.utils.db import get_db_transaction
 
 
 def execution_enabled():
-    return (os.getenv('MARKET_STATE_EXECUTION_ENABLED', '').lower() in ('1', 'true', 'yes', 'on')
-            and os.getenv('MARKET_STATE_DEMO_ENABLED', '').lower() not in ('1', 'true', 'yes', 'on'))
+    return os.getenv('MARKET_STATE_EXECUTION_ENABLED', '').lower() in ('1', 'true', 'yes', 'on')
+
+
+def latest_bar_close(now, timeframe):
+    """返回 24 小时市场当前最近一个已完成周期的 UTC 收盘边界。"""
+    step = TIMEFRAME_SECONDS.get(timeframe)
+    if step is None or not isinstance(now, datetime) or now.tzinfo is None:
+        raise ValueError('无法确定分析周期收盘时间')
+    timestamp = int(now.timestamp() // step) * step
+    return datetime.fromtimestamp(timestamp, timezone.utc)
 
 
 class ScheduleRepository(AnalysisRepository):
+    def reserve_manual(self, user_id, task_id, now):
+        """手动执行复用调度租约，不更改启停状态或自动尝试记录。"""
+        with get_db_transaction() as db, closing(db.cursor()) as cur:
+            cur.execute('''
+                UPDATE qd_market_state_tasks SET lease_token=%s,
+                    lease_until=%s::timestamptz+INTERVAL '30 minutes'
+                WHERE id=%s AND user_id=%s AND deleted_at IS NULL
+                    AND market='Crypto'
+                    AND (lease_until IS NULL OR lease_until<=%s)
+                RETURNING id, user_id, revision, lease_token::text
+            ''', (str(uuid4()), now, task_id, user_id, now))
+            return public(cur.fetchone())
+
     def reserve_due(self, now, limit=100):
         """短事务领取队列租约；多个 Beat 同时扫描也不重复派发。"""
         with get_db_transaction() as db, closing(db.cursor()) as cur:
