@@ -19,11 +19,14 @@ QUANTDINGER_MCP_AUTH_TOKEN=替换为单独生成的至少32位随机字符串
 openssl rand -hex 32
 ```
 
-随后限制文件权限：
+`mcp.env` 必须归 GitHub Actions 使用的 `SERVER_USER` 所有。假如你使用 `root` 创建文件，而工作流通过 `deploy` 用户登录，需要先执行：
 
 ```bash
+chown deploy:deploy /opt/quantdinger/mcp.env
 chmod 600 /opt/quantdinger/mcp.env
 ```
+
+上面的 `deploy` 需要替换成仓库 Secret `SERVER_USER` 的实际用户名。部署脚本不会使用 `sudo` 修改密钥文件归属。
 
 两个令牌用途不同，禁止设置为相同值：
 

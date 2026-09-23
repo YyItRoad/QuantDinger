@@ -22,7 +22,18 @@ cd "$DEPLOY_DIR"
 [ -f "$MCP_COMPOSE_FILE" ] || die "$DEPLOY_DIR/$MCP_COMPOSE_FILE is missing."
 [ -f mcp.env ] || die "$DEPLOY_DIR/mcp.env is missing. Create it from ops/deploy/MCP_DEPLOY_CN.md."
 [ ! -d mcp.env ] || die "$DEPLOY_DIR/mcp.env must be a regular file, not a directory."
-chmod 600 mcp.env
+
+deploy_user="$(id -un)"
+deploy_group="$(id -gn)"
+if [ ! -r mcp.env ]; then
+  owner="$(stat -c '%U:%G' mcp.env 2>/dev/null || printf 'unknown')"
+  die "mcp.env is not readable by SSH deploy user '$deploy_user' (owner: $owner). Run as root: chown $deploy_user:$deploy_group $DEPLOY_DIR/mcp.env && chmod 600 $DEPLOY_DIR/mcp.env"
+fi
+if ! chmod 600 mcp.env 2>/dev/null; then
+  mode="$(stat -c '%a' mcp.env 2>/dev/null || printf 'unknown')"
+  [ "$mode" = "600" ] || die "mcp.env permissions are $mode and cannot be tightened by '$deploy_user'. Fix its ownership, then set mode 600."
+  log "mcp.env is readable and already mode 600; continuing without changing its ownership."
+fi
 
 agent_token="$(sed -n 's/^QUANTDINGER_AGENT_TOKEN=//p' mcp.env | tail -n 1)"
 mcp_auth_token="$(sed -n 's/^QUANTDINGER_MCP_AUTH_TOKEN=//p' mcp.env | tail -n 1)"
