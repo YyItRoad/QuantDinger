@@ -50,6 +50,12 @@ QUANTDINGER_AGENT_TOKEN=qd_agent_xxx
 - `QUANTDINGER_MCP_AUTH_TOKEN` 保护 MCP 网络入口；
 - `QUANTDINGER_AGENT_TOKEN` 标识并限制上游 QuantDinger 租户权限。
 
+### 同一地址兼容静态 Token 与 ChatGPT OAuth
+
+个人单用户部署可以将 `QUANTDINGER_MCP_AUTH_MODE` 设置为 `hybrid`。现有客户端继续使用静态 MCP Token，ChatGPT 则通过外部 OAuth 身份服务登录。OAuth 请求必须配置独立的 `QUANTDINGER_MCP_OAUTH_AGENT_TOKEN`，建议只授予 `R` Scope；不要让 OAuth 请求复用原有高权限 Agent Token。
+
+完整环境变量和云端验收步骤见 [MCP 生产环境部署说明](../../ops/deploy/MCP_DEPLOY_CN.md)。
+
 ## 验收清单
 
 1. 客户端能发现 QuantDinger 工具。

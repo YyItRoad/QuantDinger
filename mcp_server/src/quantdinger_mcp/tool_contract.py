@@ -5,6 +5,7 @@ from typing import Any
 
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 
+from .oauth_auth import authorize_tool_call, tool_security_meta
 from .security import redact_secrets
 
 
@@ -43,6 +44,9 @@ def register_tool(server):
 
         @wraps(fn)
         def invoke(*args, **kwargs):
+            denial = authorize_tool_call(fn.__name__, WRITE_TOOLS)
+            if denial is not None:
+                return denial
             value = fn(*args, **kwargs)
             if isinstance(value, dict) and (value.get("error") or value.get("success") is False or value.get("ok") is False):
                 safe = redact_secrets(value)
@@ -56,7 +60,11 @@ def register_tool(server):
         # Gateway responses have heterogeneous shapes. An inferred Any output
         # model can require a synthetic `result` field that conflicts with our
         # explicit CallToolResult error payload on Python 3.10.
-        server.tool(annotations=annotations, structured_output=False)(invoke)
+        server.tool(
+            annotations=annotations,
+            meta=tool_security_meta(fn.__name__, WRITE_TOOLS),
+            structured_output=False,
+        )(invoke)
         return fn
 
     return register

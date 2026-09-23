@@ -17,6 +17,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 
 from . import __version__
+from .oauth_auth import apply_oauth_upstream_token, build_hybrid_http_auth
 from .tool_contract import register_tool
 from .security import (
     assert_code_size,
@@ -148,7 +149,13 @@ class _StaticTokenVerifier:
         )
 
 
-def _http_auth_config() -> tuple[AuthSettings | None, _StaticTokenVerifier | None]:
+def _http_auth_config() -> tuple[AuthSettings | None, Any | None]:
+    hybrid = build_hybrid_http_auth(
+        static_token=MCP_AUTH_TOKEN,
+        primary_agent_token=AGENT_TOKEN,
+    )
+    if hybrid is not None:
+        return hybrid
     if not MCP_AUTH_TOKEN:
         return None, None
     public_url = MCP_PUBLIC_URL or f"http://127.0.0.1:{MCP_PORT}"
@@ -200,6 +207,11 @@ def _idempotency_headers(key: str | None) -> dict[str, str]:
 
 
 def _request(method: str, path: str, **kwargs: Any) -> Any:
+    kwargs = apply_oauth_upstream_token(
+        kwargs,
+        static_token=MCP_AUTH_TOKEN,
+        primary_agent_token=AGENT_TOKEN,
+    )
     try:
         return _unwrap(_client.request(method, path, **kwargs))
     except httpx.TimeoutException:
