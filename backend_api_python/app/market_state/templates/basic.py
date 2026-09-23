@@ -1,3 +1,5 @@
+# ruff: noqa: F821
+# 本文件由安全执行器注入 df、indicators、params，并预加载 pd，不作为普通模块导入。
 # 本模板只整理观察事实，不计算最终状态，不固化旧讨论稿的形态规则。
 # df 为已收盘行情；indicators 为按模板清单调用项目指标库得到的完整序列。
 window = int(params['window'])
