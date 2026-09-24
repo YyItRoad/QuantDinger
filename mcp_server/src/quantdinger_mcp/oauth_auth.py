@@ -126,11 +126,36 @@ class OAuthJWTVerifier:
         except (PyJWTError, PyJWKClientError, KeyError, TypeError, ValueError):
             return None
 
+        print(
+            "[quantdinger-mcp] OAuth token claims:",
+            {
+                "iss": claims.get("iss"),
+                "aud": claims.get("aud"),
+                "sub": claims.get("sub"),
+                "scope": claims.get("scope"),
+                "scp": claims.get("scp"),
+                "permissions": claims.get("permissions"),
+                "azp": claims.get("azp"),
+            },
+            file=sys.stderr,
+        )
+
         subject = str(claims.get("sub") or "").strip()
         if not subject or not secrets.compare_digest(subject, self.config.allowed_subject):
+            print(
+                f"[quantdinger-mcp] SUBJECT REJECTED: "
+                f"actual={subject!r}, expected={self.config.allowed_subject!r}",
+                file=sys.stderr,
+            )
             return None
         scopes = _normalize_scopes(claims.get("scope") or claims.get("scp"))
         if READ_SCOPE not in scopes:
+            print(
+                f"[quantdinger-mcp] SCOPE REJECTED: "
+                f"actual={scopes!r}, required={READ_SCOPE!r}, "
+                f"permissions={claims.get('permissions')!r}",
+                file=sys.stderr,
+            )
             return None
         return AccessToken(
             token=token,
