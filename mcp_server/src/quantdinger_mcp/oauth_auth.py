@@ -113,8 +113,20 @@ class OAuthJWTVerifier:
         )
 
     def _verify_sync(self, token: str) -> AccessToken | None:
+        print(
+            "[quantdinger-mcp] _verify_sync entered",
+            file=sys.stderr,
+            flush=True,
+        )
+
         try:
             signing_key = self._jwks.get_signing_key_from_jwt(token)
+
+            print(
+                f"[quantdinger-mcp] signing key obtained kid={signing_key.key_id!r}",
+                file=sys.stderr,
+                flush=True,
+            )
             claims = jwt.decode(
                 token,
                 signing_key.key,
@@ -123,7 +135,14 @@ class OAuthJWTVerifier:
                 issuer=self.config.issuer,
                 options={"require": ["exp", "iat", "sub"]},
             )
-        except (PyJWTError, PyJWKClientError, KeyError, TypeError, ValueError):
+        except (PyJWTError, PyJWKClientError, KeyError, TypeError, ValueError) as exc:
+            print(
+                "[quantdinger-mcp] JWT VERIFICATION FAILED:",
+                type(exc).__name__,
+                repr(exc),
+                file=sys.stderr,
+                flush=True,
+            )
             return None
 
         print(
