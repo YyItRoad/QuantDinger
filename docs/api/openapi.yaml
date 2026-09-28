@@ -4950,6 +4950,86 @@ paths:
       operationId: postApiStrategiesPositionOwnershipRepair
       summary: Post Api Strategies Position Ownership Repair
       x-visibility: internal
+  /api/position-management/trade-history:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: 分页返回当前账户的持仓管理交易历史。
+      tags:
+      - strategy
+      operationId: getApiPositionManagementTradeHistory
+      x-visibility: internal
+  /api/account/position-snapshot:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: 只读取持仓管理页面需要的现货和合约仓位，不查询挂单。
+      tags:
+      - Account
+      operationId: getApiAccountPositionSnapshot
+      x-visibility: internal
+  /api/account/managed-positions:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: 只读返回当前凭证已登记在标准策略实例下的持仓。
+      tags:
+      - Account
+      operationId: getApiAccountManagedPositions
+      x-visibility: internal
+  /api/account/managed-strategies:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: 用标准策略创建流程接管交易所当前整笔仓位。
+      tags:
+      - Account
+      operationId: postApiAccountManagedStrategies
+      x-visibility: internal
   /api/strategies/review-report:
     post:
       responses:
@@ -7687,6 +7767,189 @@ paths:
       - FastAnalysis
       operationId: getApiFastAnalysisSimilarPatterns
       x-visibility: public
+  /api/market-state/records:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Market
+      operationId: getApiMarketStateRecords
+      summary: Get Api Market State Records
+      x-visibility: public
+  /api/market-state/records/{record_id}:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Market
+      operationId: getApiMarketStateRecordsRecordId
+      summary: Get Api Market State Records Record Id
+      parameters:
+      - name: record_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: public
+    parameters:
+    - in: path
+      name: record_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+  /api/market-state/tasks:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Market
+      operationId: getApiMarketStateTasks
+      summary: Get Api Market State Tasks
+      x-visibility: public
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Market
+      operationId: postApiMarketStateTasks
+      summary: Post Api Market State Tasks
+      x-visibility: public
+  /api/market-state/tasks/{task_id}:
+    patch:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Market
+      operationId: patchApiMarketStateTasksTaskId
+      summary: Patch Api Market State Tasks Task Id
+      parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: public
+    delete:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Market
+      operationId: deleteApiMarketStateTasksTaskId
+      summary: Delete Api Market State Tasks Task Id
+      parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: public
+    parameters:
+    - in: path
+      name: task_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+  /api/market-state/tasks/{task_id}/run:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: 提交一次后台分析；不开启周期调度，不自动重试模型调用。
+      tags:
+      - Market
+      operationId: postApiMarketStateTasksTaskIdRun
+      parameters:
+      - name: task_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: public
+    parameters:
+    - in: path
+      name: task_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
   /api/billing/plans:
     get:
       responses:
