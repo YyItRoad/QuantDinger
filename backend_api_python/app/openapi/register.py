@@ -19,6 +19,7 @@ _PREFIX_TAGS: list[tuple[str, str]] = [
     ("/api/users", "Users"),
     ("/api/indicator", "Indicator"),
     ("/api/backtest", "Strategy"),
+    ("/api/strategy-evolution", "Strategy"),
     ("/api/market", "Market"),
     ("/api/universes", "Universe"),
     ("/api/factors", "Factor"),
@@ -62,6 +63,7 @@ def register_human_blueprints(api: Api) -> None:
     from app.routes.user import user_blp
     from app.routes.kline import kline_blp
     from app.routes.backtest_center import backtest_center_blp
+    from app.routes.strategy_evolution import strategy_evolution_blp
     from app.routes.market import market_blp
     from app.routes.universe import universe_blp
     from app.routes.factors import factors_blp
@@ -83,6 +85,7 @@ def register_human_blueprints(api: Api) -> None:
     from app.market_state.routes import blp as market_state_blp
     from app.routes.billing import billing_blp
     from app.routes.quick_trade import quick_trade_blp
+    from app.routes.quick_trade_event_radar import quick_trade_event_radar_blp
 
     registrations: list[tuple] = [
         (health_blp, ""),
@@ -91,6 +94,7 @@ def register_human_blueprints(api: Api) -> None:
         (user_blp, "/api/users"),
         (kline_blp, "/api/indicator"),
         (backtest_center_blp, "/api/backtest"),
+        (strategy_evolution_blp, "/api/strategy-evolution"),
         (market_blp, "/api/market"),
         (universe_blp, "/api/universes"),
         (factors_blp, "/api/factors"),
@@ -111,6 +115,7 @@ def register_human_blueprints(api: Api) -> None:
         (market_state_blp, "/api/market-state"),
         (billing_blp, "/api/billing"),
         (quick_trade_blp, "/api/quick-trade"),
+        (quick_trade_event_radar_blp, "/api/quick-trade"),
     ]
 
     for blp, prefix in registrations:

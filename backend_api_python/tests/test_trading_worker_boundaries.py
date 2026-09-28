@@ -2,21 +2,34 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.services.strategy_command_repository import StrategyCommand
 from app.workers.trading import TradingWorker
 
 
 class FakeExecutor:
-    def __init__(self) -> None:
+    def __init__(self, *, stop_result: bool = True) -> None:
         self.running_strategies = {}
         self.lock = __import__("threading").Lock()
         self.stopped = []
+        self.stop_result = stop_result
 
     def stop_strategy(self, strategy_id, persist_status=False):
         del persist_status
         self.stopped.append(int(strategy_id))
-        self.running_strategies.pop(int(strategy_id), None)
-        return True
+        if self.stop_result:
+            self.running_strategies.pop(int(strategy_id), None)
+        return self.stop_result
+
+    def stop_strategy_with_policy(self, strategy_id, *, close_positions):
+        del close_positions
+        stopped = self.stop_strategy(strategy_id)
+        return {
+            "strategy_id": strategy_id,
+            "success": stopped,
+            "message": "runtime stop timeout" if not stopped else "",
+        }
 
     def start_strategy(self, strategy_id):
         self._last_start_failure = f"temporary network failure for {strategy_id}"
@@ -106,3 +119,31 @@ def test_restore_renews_ownership_around_each_strategy_without_stopping_desired_
     assert len(maintenance_calls) == 4
     assert repository.released == [(10, worker.worker_id), (20, worker.worker_id)]
     assert FakeStrategyService.status_updates == []
+
+
+@pytest.mark.parametrize("close_positions", [False, True])
+def test_stop_timeout_retains_runtime_lease(monkeypatch, close_positions):
+    repository = FakeRepository()
+    executor = FakeExecutor(stop_result=False)
+    executor.running_strategies[55] = object()
+    worker = TradingWorker(executor, repository)
+    monkeypatch.setattr("app.workers.trading.append_strategy_log", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="stop"):
+        worker._stop_strategy(55, close_positions=close_positions)
+
+    assert repository.released == []
+    assert 55 in executor.running_strategies
+
+
+def test_worker_shutdown_retains_lease_when_runtime_does_not_stop(monkeypatch):
+    repository = FakeRepository()
+    executor = FakeExecutor(stop_result=False)
+    executor.running_strategies[55] = object()
+    worker = TradingWorker(executor, repository)
+    monkeypatch.setattr("app.workers.trading.append_strategy_log", lambda *_args, **_kwargs: None)
+
+    worker._shutdown_local_runtimes()
+
+    assert repository.released == []
+    assert 55 in executor.running_strategies
