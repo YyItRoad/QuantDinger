@@ -119,9 +119,14 @@ def validate_answer(raw, facts):
     value = extract_json_object(raw)
     if not isinstance(value, dict) or value.get('error'):
         raise ValueError('模型未能给出有效分析')
+    state_errors = []
     for field, choices in STATES.items():
-        if value.get(field) not in choices:
-            raise ValueError('模型状态不在约定字典内：' + field)
+        actual = value.get(field)
+        # 容许大小写差异：模型偶发返回 Pullback、pullback 等，统一大写后再比对。
+        if not isinstance(actual, str) or actual.upper() not in choices:
+            state_errors.append(f'{field}={actual!r}，可选：{choices}')
+    if state_errors:
+        raise ValueError('模型状态不在约定字典内：' + '；'.join(state_errors))
     if type(value.get('confidence')) is not int or not 1 <= value['confidence'] <= 5:
         raise ValueError('置信度必须为 1～5 的整数')
     if not isinstance(value.get('reason'), str) or not value['reason'].strip():
