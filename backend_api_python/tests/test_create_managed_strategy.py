@@ -278,7 +278,7 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
             "leverageEnabled": False,
             "leverage": 1,
             "timeframe": "15m",
-            "params": {"atr_period": 14},
+            "params": {"atr_period": 14, "fixed_stop_price": 0.3},
         },
     )
 
@@ -292,6 +292,7 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
         "leverage": 5.0,
         "params": {
             "atr_period": 14,
+            "fixed_stop_price": 0.3,
             "leverage": 5.0,
             "managed_instrument": "Crypto:KAITO/USDC@swap",
         },
@@ -337,6 +338,25 @@ def test_create_managed_strategy_uses_fresh_full_exchange_position(monkeypatch):
         "command_type": "start",
         "idempotency_key": "position-management:start:44",
     }]
+
+
+@pytest.mark.parametrize(("side", "stop", "message"), [
+    ("long", 0, "固定止损价必须是正数"),
+    ("long", float("nan"), "固定止损价必须是正数"),
+    ("long", 0.34, "多单固定止损价必须低于当前价格"),
+    ("short", 0.33, "空单固定止损价必须高于当前价格"),
+])
+def test_create_managed_strategy_rejects_invalid_fixed_stop(monkeypatch, side, stop, message):
+    monkeypatch.setattr(position_management, "list_managed_positions_for_account", lambda **_kwargs: [])
+    fresh = {**_snapshot()["swap_positions"][0], "side": side}
+    with pytest.raises(position_management.PositionManagementError, match=message):
+        position_management._create_managed_strategy_locked(
+            user_id=3,
+            credential_id=7,
+            position_ref={"market_type": "swap"},
+            strategy_payload={"params": {"fixed_stop_price": stop}},
+            fresh=fresh,
+        )
 
 
 def test_create_managed_strategy_keeps_created_strategy_when_auto_start_fails(monkeypatch):

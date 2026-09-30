@@ -12,6 +12,7 @@ PERSIST_RUNTIME_STATE = True
 # @param structure_buffer_atr float 0.2 接管K线低点下方ATR缓冲 range=0.0:3.0:0.1
 # @param trail_activation_r float 2.0 移动止损启动盈利R倍数 range=0.5:10.0:0.25
 # @param trail_atr_mult float 3.5 移动止损距离ATR倍数 range=0.5:10.0:0.25
+# @param fixed_stop_price float 0 固定止损价（接管时填写）
 
 
 def initialize(context):
@@ -80,6 +81,7 @@ def _initialize_position(context, instrument, position, bars, atr_value):
         + "｜数量=" + _price(abs(float(position.amount or 0.0)))
         + "｜开仓均价=" + _price(entry_price)
         + "｜ATR=" + _price(atr_value)
+        + "｜固定止损=" + _price(context.params.get("fixed_stop_price") or 0.0)
         + "｜初始止损=" + _price(initial_stop)
         + "｜每R价格距离=" + _price(g.state["risk"])
         + "｜杠杆=" + _price(_number(context, "leverage", 1.0, 1.0)) + "x"
@@ -109,6 +111,7 @@ def _log_cycle(context, instrument, position, bars, atr_value, stop_before, stop
         + "｜收=" + _price(close)
         + "｜开仓均价=" + _price(entry)
         + "｜ATR=" + _price(atr_value)
+        + "｜固定止损=" + _price(context.params.get("fixed_stop_price") or 0.0)
         + "｜接管后最高价=" + _price(g.state["highest_high"])
         + "｜移动止损启动价=" + _price(activation)
         + "｜本周期止损=" + _price(stop_before)
@@ -165,13 +168,19 @@ def handle_data(context, data):
         return
 
     stop_before = _active_stop()
-    if float(bars["low"].iloc[-1]) <= stop_before:
-        _log_cycle(context, instrument, position, bars, atr_value, stop_before, stop_before, "最低价触及止损，提交多单平仓")
+    close = float(bars["close"].iloc[-1])
+    fixed_stop = float(context.params.get("fixed_stop_price") or 0.0)
+    fixed_hit = fixed_stop > 0 and close <= fixed_stop
+    atr_hit = close <= stop_before
+    if fixed_hit or atr_hit:
+        reason = "fixed_long_position_stop" if fixed_hit else "atr_long_position_stop"
+        decision = "收盘价触及固定止损，提交多单平仓" if fixed_hit else "收盘价触及ATR止损，提交多单平仓"
+        _log_cycle(context, instrument, position, bars, atr_value, stop_before, stop_before, decision)
         g.state["exit_ref"] = order_target_value(
             instrument,
             0.0,
             position_side="long",
-            reason="atr_long_position_stop",
+            reason=reason,
         )
         return
 

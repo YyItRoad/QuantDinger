@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 import hashlib
 import json
+import math
 import uuid
 from typing import Any, Dict, Iterator
 
@@ -470,6 +471,18 @@ def _create_managed_strategy_locked(
         else ""
     )
     params = _object(payload.get("params"))
+    if "fixed_stop_price" in params:
+        try:
+            fixed_stop = float(params["fixed_stop_price"])
+        except (TypeError, ValueError) as exc:
+            raise PositionManagementError("固定止损价必须是正数") from exc
+        if not math.isfinite(fixed_stop) or fixed_stop <= 0:
+            raise PositionManagementError("固定止损价必须是正数")
+        if side == "long" and fixed_stop >= mark_price:
+            raise PositionManagementError("多单固定止损价必须低于当前价格")
+        if side == "short" and fixed_stop <= mark_price:
+            raise PositionManagementError("空单固定止损价必须高于当前价格")
+        params["fixed_stop_price"] = fixed_stop
     params["leverage"] = leverage
     managed_instrument = f"Crypto:{symbol}@{market_type}"
     params["managed_instrument"] = managed_instrument

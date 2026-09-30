@@ -21,7 +21,7 @@ def _source(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _frame(*, periods: int = 30, final_high: float | None = None, final_low: float | None = None) -> pd.DataFrame:
+def _frame(*, periods: int = 30, final_high: float | None = None, final_low: float | None = None, final_close: float | None = None) -> pd.DataFrame:
     index = pd.date_range("2026-08-01", periods=periods, freq="1h", tz="UTC")
     rows = []
     for offset in range(periods):
@@ -37,6 +37,10 @@ def _frame(*, periods: int = 30, final_high: float | None = None, final_low: flo
         rows[-1]["high"] = final_high
     if final_low is not None:
         rows[-1]["low"] = final_low
+    if final_close is not None:
+        rows[-1]["close"] = final_close
+        rows[-1]["high"] = max(rows[-1]["high"], final_close)
+        rows[-1]["low"] = min(rows[-1]["low"], final_close)
     return pd.DataFrame(rows, index=index)
 
 
@@ -52,12 +56,12 @@ def _position(side: str) -> dict:
     }
 
 
-def _session(path: Path, frame: pd.DataFrame) -> StrategyV2LiveSession:
+def _session(path: Path, frame: pd.DataFrame, *, fixed_stop_price: float = 0) -> StrategyV2LiveSession:
     return StrategyV2LiveSession(
         code=_source(path),
         frames={INSTRUMENT: frame},
         initial_capital=1000,
-        params={"managed_instrument": MANAGED_INSTRUMENT, "leverage": 3},
+        params={"managed_instrument": MANAGED_INSTRUMENT, "leverage": 3, "fixed_stop_price": fixed_stop_price},
     )
 
 
@@ -118,6 +122,7 @@ class AtrPositionManagerExamplesTest(unittest.TestCase):
                 for field in (
                     "开仓均价=",
                     "ATR=",
+                    "固定止损=",
                     "移动止损启动价=",
                     "本周期止损=",
                     "下一周期止损=",
@@ -127,7 +132,7 @@ class AtrPositionManagerExamplesTest(unittest.TestCase):
                 ):
                     self.assertIn(field, cycle)
 
-    def test_short_stop_touch_creates_only_short_close_intent(self):
+    def test_short_atr_stop_requires_close_above_stop(self):
         initial = _frame()
         session = _session(SHORT_SOURCE, initial)
         session.synchronize_positions(_position("short"))
@@ -135,15 +140,19 @@ class AtrPositionManagerExamplesTest(unittest.TestCase):
 
         triggered = _frame(periods=31, final_high=120.0)
         session.synchronize_positions(_position("short"))
+        self.assertEqual(session.process({INSTRUMENT: triggered})[0], [])
+
+        triggered = _frame(periods=32, final_high=120.0, final_close=120.0)
+        session.synchronize_positions(_position("short"))
         intents, messages, _ = session.process({INSTRUMENT: triggered})
         self.assertEqual(len(intents), 1)
         self.assertEqual(intents[0].kind, "target_value")
         self.assertEqual(intents[0].value, 0)
         self.assertEqual(intents[0].position_side, "short")
         self.assertEqual(intents[0].reason, "atr_short_position_stop")
-        self.assertTrue(any("最高价触及止损，提交空单平仓" in message for message in messages))
+        self.assertTrue(any("收盘价触及ATR止损，提交空单平仓" in message for message in messages))
 
-    def test_long_stop_touch_creates_only_long_close_intent(self):
+    def test_long_atr_stop_requires_close_below_stop(self):
         initial = _frame()
         session = _session(LONG_SOURCE, initial)
         session.synchronize_positions(_position("long"))
@@ -151,13 +160,38 @@ class AtrPositionManagerExamplesTest(unittest.TestCase):
 
         triggered = _frame(periods=31, final_low=80.0)
         session.synchronize_positions(_position("long"))
+        self.assertEqual(session.process({INSTRUMENT: triggered})[0], [])
+
+        triggered = _frame(periods=32, final_low=80.0, final_close=80.0)
+        session.synchronize_positions(_position("long"))
         intents, messages, _ = session.process({INSTRUMENT: triggered})
         self.assertEqual(len(intents), 1)
         self.assertEqual(intents[0].kind, "target_value")
         self.assertEqual(intents[0].value, 0)
         self.assertEqual(intents[0].position_side, "long")
         self.assertEqual(intents[0].reason, "atr_long_position_stop")
-        self.assertTrue(any("最低价触及止损，提交多单平仓" in message for message in messages))
+        self.assertTrue(any("收盘价触及ATR止损，提交多单平仓" in message for message in messages))
+
+    def test_fixed_stop_is_independent_from_atr_stop(self):
+        initial = _frame()
+        for path, side, stop, close, reason in (
+            (LONG_SOURCE, "long", 99.0, 98.5, "fixed_long_position_stop"),
+            (SHORT_SOURCE, "short", 101.0, 101.5, "fixed_short_position_stop"),
+        ):
+            with self.subTest(side=side):
+                session = _session(path, initial, fixed_stop_price=stop)
+                session.synchronize_positions(_position(side))
+                self.assertEqual(session.process({INSTRUMENT: initial})[0], [])
+                state = dict(session.program.state.state)
+                self.assertNotEqual(state["initial_stop"], stop)
+
+                triggered = _frame(periods=31, final_close=close)
+                session.synchronize_positions(_position(side))
+                intents, messages, _ = session.process({INSTRUMENT: triggered})
+                self.assertEqual(len(intents), 1)
+                self.assertEqual(intents[0].reason, reason)
+                self.assertEqual(intents[0].position_side, side)
+                self.assertTrue(any("收盘价触及固定止损" in message for message in messages))
 
 
 if __name__ == "__main__":
