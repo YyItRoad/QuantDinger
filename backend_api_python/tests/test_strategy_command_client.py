@@ -132,3 +132,46 @@ def test_exit_reason_is_forwarded_only_for_close_requests(monkeypatch):
     assert repository.commands[-1].payload['exit_reason'] == '担心反弹'
     client.stop_strategy_with_policy(10, close_positions=False, exit_reason='不应记录')
     assert 'exit_reason' not in repository.commands[-1].payload
+
+def test_command_status_reports_pending_stop_without_claiming_completion(monkeypatch):
+    repository = FakeRepository(status="processing")
+    client = StrategyCommandClient(repository)
+    monkeypatch.setenv("STRATEGY_COMMAND_STOP_WAIT_SEC", "0")
+    client.stop_strategy_with_policy(9, close_positions=True)
+
+    result = client.get_command_status(9, 1)
+
+    assert result["success"] is True
+    assert result["status"] == "stopping"
+    assert result["command_status"] == "processing"
+    assert result["close_requested"] is True
+
+
+def test_command_status_preserves_terminal_stop_result():
+    repository = FakeRepository(status="succeeded")
+    client = StrategyCommandClient(repository)
+    client.stop_strategy_with_policy(9, close_positions=True)
+    repository.commands[0] = replace(
+        repository.commands[0],
+        result={
+            "success": True,
+            "status": "stopped",
+            "close_requested": True,
+            "close_positions_found": 0,
+        },
+    )
+
+    result = client.get_command_status(9, 1)
+
+    assert result["status"] == "stopped"
+    assert result["close_positions_found"] == 0
+    assert result["command_status"] == "succeeded"
+
+
+def test_command_status_rejects_another_strategy_command(monkeypatch):
+    repository = FakeRepository(status="pending")
+    client = StrategyCommandClient(repository)
+    monkeypatch.setenv("STRATEGY_COMMAND_STOP_WAIT_SEC", "0")
+    client.stop_strategy_with_policy(9)
+
+    assert client.get_command_status(10, 1) is None

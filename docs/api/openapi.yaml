@@ -494,6 +494,11 @@ components:
           - limit
         amount:
           type: number
+          default: 0.0
+          minimum: 0.0
+        quantity:
+          type: number
+          default: 0.0
           minimum: 0.0
         price:
           type: number
@@ -538,8 +543,22 @@ components:
         ai_decision_filter:
           type: boolean
           default: false
+        instrument_id:
+          type: string
+          default: ''
+          maxLength: 128
+        product_type:
+          type: string
+          default: ''
+          maxLength: 64
+        api_family:
+          type: string
+          default: ''
+          maxLength: 64
+        resolve_product:
+          type: boolean
+          default: false
       required:
-      - amount
       - credential_id
       - side
       - symbol
@@ -594,6 +613,21 @@ components:
           type: string
           default: manual
           maxLength: 64
+        instrument_id:
+          type: string
+          default: ''
+          maxLength: 128
+        product_type:
+          type: string
+          default: ''
+          maxLength: 64
+        api_family:
+          type: string
+          default: ''
+          maxLength: 64
+        resolve_product:
+          type: boolean
+          default: false
       required:
       - credential_id
       - symbol
@@ -5258,6 +5292,50 @@ paths:
       schema:
         type: integer
         minimum: 0
+  /api/strategies/{strategy_id}/commands/{command_id}:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Strategy
+      operationId: getApiStrategiesStrategyIdCommandsCommandId
+      summary: Get Api Strategies Strategy Id Commands Command Id
+      parameters:
+      - name: strategy_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      - name: command_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: internal
+    parameters:
+    - in: path
+      name: strategy_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
+    - in: path
+      name: command_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
   /api/strategies/exchange/test:
     post:
       responses:
@@ -6563,9 +6641,7 @@ paths:
 
         secretKey (required): Secret key
 
-        paper (optional, default true): Use paper trading
-
-        baseUrl (optional): Override API base URL'
+        paper (optional, default true): Use paper trading'
       tags:
       - Alpaca
       operationId: postApiAlpacaConnect
@@ -6672,7 +6748,7 @@ paths:
 
         side (required): buy or sell
 
-        quantity (required): Share quantity
+        quantity or notional (required): Share quantity or USD amount; mutually exclusive
 
         marketType (optional): USStock or crypto (default USStock)
 
@@ -8220,6 +8296,132 @@ paths:
       operationId: putApiBillingAdminPlans
       summary: Put Api Billing Admin Plans
       x-visibility: private
+  /api/billing/referral-rewards:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Billing
+      operationId: getApiBillingReferralRewards
+      summary: Get Api Billing Referral Rewards
+      x-visibility: private
+  /api/billing/referral-rewards/withdrawals:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Billing
+      operationId: postApiBillingReferralRewardsWithdrawals
+      summary: Post Api Billing Referral Rewards Withdrawals
+      x-visibility: private
+  /api/billing/admin/plans/{plan_code}:
+    delete:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Billing
+      operationId: deleteApiBillingAdminPlansPlanCode
+      summary: Delete Api Billing Admin Plans Plan Code
+      parameters:
+      - name: plan_code
+        in: path
+        required: true
+        schema:
+          type: string
+      x-visibility: private
+    parameters:
+    - in: path
+      name: plan_code
+      required: true
+      schema:
+        type: string
+        minLength: 1
+  /api/billing/admin/referral-withdrawals:
+    get:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Billing
+      operationId: getApiBillingAdminReferralWithdrawals
+      summary: Get Api Billing Admin Referral Withdrawals
+      x-visibility: private
+  /api/billing/admin/referral-withdrawals/{withdrawal_id}/review:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - Billing
+      operationId: postApiBillingAdminReferralWithdrawalsWithdrawalIdReview
+      summary: Post Api Billing Admin Referral Withdrawals Withdrawal Id Review
+      parameters:
+      - name: withdrawal_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: private
+    parameters:
+    - in: path
+      name: withdrawal_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
   /api/quick-trade/place-order:
     post:
       responses:
@@ -8248,7 +8450,8 @@ paths:
         \ ID\nsymbol         (str)    - e.g. \"BTC/USDT\"\nside           (str)  \
         \  - \"buy\" or \"sell\"\norder_type     (str)    - \"market\" or \"limit\"\
         \  (default: market)\namount         (float)  - spot quote amount or swap\
-        \ margin amount in USDT\nprice          (float)  - limit price (required for\
+        \ margin amount in USDT\nquantity       (float)  - optional exact base quantity\
+        \ for spot sell orders\nprice          (float)  - limit price (required for\
         \ limit orders)\nleverage       (int)    - leverage multiplier (default: 1)\n\
         \                          - leverage = 1: spot market\n                 \
         \         - leverage > 1: swap (perpetual futures) market\nmarket_type   \

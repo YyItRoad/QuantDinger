@@ -371,6 +371,10 @@ def create_ibkr_client(exchange_config: Dict[str, Any]):
     """
     global IBKRClient, IBKRConfig
 
+    from app.utils.local_brokers import require_local_desktop_brokers_allowed
+
+    require_local_desktop_brokers_allowed()
+
     # Lazy import to avoid ImportError if ib_insync not installed
     if IBKRClient is None or IBKRConfig is None:
         try:
@@ -424,7 +428,7 @@ def create_alpaca_client(exchange_config: Dict[str, Any]):
     - api_key:    Alpaca API key (PK*=paper, AK*=live)
     - secret_key: Alpaca API secret
     - paper:      Boolean (default True). 'true'/'false' strings also accepted.
-    - base_url:   Optional explicit URL override (otherwise paper/live decides)
+    - base_url:   Optional official Alpaca URL retained for stored-config compatibility
 
     Unlike IBKR, Alpaca is stateless REST — no terminal/gateway needed,
     so it's the recommended USStock broker on cloud / SaaS deployments where

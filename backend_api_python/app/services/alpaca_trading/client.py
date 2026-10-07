@@ -22,6 +22,12 @@ from app.services.alpaca_trading.symbols import normalize_symbol, format_display
 logger = get_logger(__name__)
 
 
+_ALPACA_TRADING_HOSTS = {
+    "api.alpaca.markets",
+    "paper-api.alpaca.markets",
+}
+
+
 def _market_hint_from_type(market_type: str) -> str:
     return "Crypto" if (market_type or "").strip().lower() == "crypto" else "USStock"
 
@@ -116,10 +122,20 @@ def normalize_base_url(base_url: Optional[str]) -> Optional[str]:
         raw = "https://" + raw
 
     parts = urlsplit(raw)
+    scheme = (parts.scheme or "").lower()
+    hostname = (parts.hostname or "").lower().rstrip(".")
+    if scheme != "https":
+        raise ValueError("Alpaca base URL must use HTTPS")
+    if hostname not in _ALPACA_TRADING_HOSTS:
+        raise ValueError("Alpaca base URL must use an official Alpaca trading host")
+    if parts.username or parts.password or parts.port is not None:
+        raise ValueError("Alpaca base URL must not contain credentials or a custom port")
     path = (parts.path or "").rstrip("/")
     if path.lower() == "/v2":
         path = ""
-    normalized = urlunsplit((parts.scheme or "https", parts.netloc, path, "", ""))
+    elif path:
+        raise ValueError("Alpaca base URL must not contain a path")
+    normalized = urlunsplit(("https", hostname, path, "", ""))
     return normalized.rstrip("/") or None
 
 
@@ -210,21 +226,30 @@ class AlpacaClient:
         """Connection is verified by a successful account fetch."""
         return self._trading_client is not None and self._account_id is not None
 
+    def _trading_base_url(self) -> str:
+        expected_host = "paper-api.alpaca.markets" if self.config.paper else "api.alpaca.markets"
+        base_url = normalize_base_url(self.config.base_url)
+        if base_url and (urlsplit(base_url).hostname or "").lower() != expected_host:
+            raise ValueError("Alpaca base URL does not match the selected account environment")
+        return base_url or f"https://{expected_host}"
+
     def connect(self) -> bool:
         """Initialize Alpaca client and verify credentials by fetching account."""
         try:
-            modules = _ensure_alpaca()
             api_key = (self.config.api_key or "").strip()
             secret_key = (self.config.secret_key or "").strip()
             if not api_key or not secret_key:
                 logger.error("Alpaca connect failed: empty api_key or secret_key")
                 return False
 
+            base_url = self._trading_base_url()
+            modules = _ensure_alpaca()
+
             self._trading_client = modules["TradingClient"](
                 api_key=api_key,
                 secret_key=secret_key,
                 paper=self.config.paper,
-                url_override=self.config.base_url,
+                url_override=base_url,
             )
             # Paper trading keys use the standard Alpaca market-data endpoint.
             # The SDK sandbox flag targets a separate data sandbox and rejects
@@ -285,19 +310,23 @@ class AlpacaClient:
         self,
         symbol: str,
         side: str,
-        quantity: float,
+        quantity: float = 0.0,
         market_type: str = "USStock",
         take_profit_price: float = 0.0,
         stop_loss_price: float = 0.0,
         client_order_id: str = "",
+        notional: float = 0.0,
     ) -> OrderResult:
         """Place a market order. market_type: 'USStock' or 'crypto'."""
         try:
             self._ensure_connected()
             modules = _ensure_alpaca()
             sym, asset_class = parse_symbol(symbol, market_hint=_market_hint_from_type(market_type))
-            requested_quantity = float(quantity)
-            if side.lower() == "sell":
+            requested_quantity = float(quantity or 0.0)
+            requested_notional = float(notional or 0.0)
+            if (requested_quantity > 0) == (requested_notional > 0):
+                raise ValueError("Provide exactly one of quantity or notional")
+            if side.lower() == "sell" and requested_quantity > 0:
                 positions = self._trading_client.get_all_positions()
                 matching = next(
                     (
@@ -314,10 +343,13 @@ class AlpacaClient:
 
             request_kwargs = {
                 "symbol": sym,
-                "qty": quantity,
                 "side": modules["OrderSide"].BUY if side.lower() == "buy" else modules["OrderSide"].SELL,
                 "time_in_force": modules["TimeInForce"].GTC if asset_class == "crypto" else modules["TimeInForce"].DAY,
             }
+            if requested_notional > 0:
+                request_kwargs["notional"] = requested_notional
+            else:
+                request_kwargs["qty"] = quantity
             if str(client_order_id or "").strip():
                 request_kwargs["client_order_id"] = str(client_order_id).strip()[:48]
             take_profit_price = float(take_profit_price or 0.0)
@@ -360,7 +392,9 @@ class AlpacaClient:
                     "status": status,
                     "filled_qty": filled_qty,
                     "requested_qty": requested_quantity,
-                    "submitted_qty": float(quantity),
+                    "submitted_qty": float(quantity) if requested_quantity > 0 else 0.0,
+                    "requested_notional": requested_notional,
+                    "submitted_notional": requested_notional,
                     "submitted_at": str(order.submitted_at),
                     "client_order_id": str(getattr(order, "client_order_id", "") or client_order_id),
                     **self._order_commission_snapshot(order),
@@ -542,9 +576,7 @@ class AlpacaClient:
         )
         if not types:
             return []
-        host = self.config.base_url or (
-            "https://paper-api.alpaca.markets" if self.config.paper else "https://api.alpaca.markets"
-        )
+        host = self._trading_base_url()
         url = f"{host.rstrip('/')}/v2/account/activities"
         params: Dict[str, Any] = {
             "activity_types": types,
@@ -691,8 +723,8 @@ class AlpacaClient:
                     "quantity": _num(getattr(o, "qty", None), default=None),
                     "qty": _num(getattr(o, "qty", None), default=None),
                     "notional": _num(getattr(o, "notional", 0), default=0.0),
-                    "orderType": _enum_value(getattr(o, "order_type", "")),
-                    "order_type": _enum_value(getattr(o, "order_type", "")),
+                    "orderType": _enum_value(getattr(o, "order_type", None) or getattr(o, "type", "")),
+                    "order_type": _enum_value(getattr(o, "order_type", None) or getattr(o, "type", "")),
                     "limitPrice": _num(getattr(o, "limit_price", None), default=None),
                     "limit_price": _num(getattr(o, "limit_price", None), default=None),
                     "status": _enum_value(getattr(o, "status", "")),
@@ -759,9 +791,7 @@ class AlpacaClient:
         return {
             "connected": self.connected,
             "paper": self.config.paper,
-            "base_url": self.config.base_url or (
-                "https://paper-api.alpaca.markets" if self.config.paper else "https://api.alpaca.markets"
-            ),
+            "base_url": self._trading_base_url(),
             "account_id": self._account_id,
         }
 
