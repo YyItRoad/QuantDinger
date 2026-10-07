@@ -76,6 +76,8 @@ HISTORY_COLUMNS = (
     "fee_source",
     "funding_fee_total",
     "funding_fee_ccy",
+    "entry_reason",
+    "exit_reason",
 )
 
 
@@ -276,6 +278,8 @@ def _history_row(
         "fee_source": str(row.get("fee_source") or ""),
         "funding_fee_total": float(funding_total or 0.0),
         "funding_fee_ccy": str(funding_currency or ""),
+        "entry_reason": str(row.get("entry_reason") or ""),
+        "exit_reason": str(row.get("exit_reason") or ""),
     }
 
 
@@ -391,6 +395,8 @@ def sync_position_management_trade_history(
                        r.started_at AS strategy_started_at,
                        r.stopped_at AS strategy_stopped_at,
                        r.stop_reason AS strategy_stop_reason,
+                       s.trading_config -> 'position_management' ->> 'entry_reason' AS entry_reason,
+                       NULLIF(po.payload_json, '')::jsonb ->> 'exit_reason' AS exit_reason,
                        po.exchange_id AS order_exchange_id,
                        po.credential_id AS order_credential_id,
                        po.order_type,
@@ -539,3 +545,20 @@ def sync_stopped_position_management_history() -> Dict[str, Any]:
         "skipped": skipped,
         "deleted_count": 0,
     }
+
+
+def update_position_management_reasons(*, user_id: int, history_id: int, entry_reason: str, exit_reason: str) -> bool:
+    """仅更新当前用户现有成交历史中的两个原因字段。"""
+    if any(not isinstance(value, str) or len(value) > 500 for value in (entry_reason, exit_reason)):
+        raise ValueError("原因必须是最多500字的文字")
+    with get_db_connection() as db:
+        cur = db.cursor()
+        try:
+            cur.execute("""UPDATE qd_position_management_trade_history
+                SET entry_reason=%s, exit_reason=%s WHERE id=%s AND user_id=%s RETURNING id""",
+                (entry_reason.strip(), exit_reason.strip(), history_id, user_id))
+            changed = cur.fetchone() is not None
+            db.commit()
+            return changed
+        finally:
+            cur.close()

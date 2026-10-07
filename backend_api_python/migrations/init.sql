@@ -3106,3 +3106,7 @@ CREATE TABLE IF NOT EXISTS qd_exchange_order_pnl (
     PRIMARY KEY (credential_id, exchange_id, market_type, symbol, exchange_order_id)
 );
 CREATE INDEX IF NOT EXISTS idx_exchange_pnl_checked ON qd_exchange_order_pnl(credential_id, checked_at);
+
+-- 持仓管理沿用现有成交历史，仅增加两个个人原因字段。
+ALTER TABLE qd_position_management_trade_history ADD COLUMN IF NOT EXISTS entry_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE qd_position_management_trade_history ADD COLUMN IF NOT EXISTS exit_reason TEXT NOT NULL DEFAULT '';

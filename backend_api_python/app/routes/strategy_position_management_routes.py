@@ -134,3 +134,21 @@ def create_managed_account_strategy():
     except Exception:
         logger.exception("create_managed_account_strategy failed")
         return jsonify({'code': 0, 'msg': '创建持仓管理策略失败', 'data': None}), 500
+
+
+@strategy_blp.route('/position-management/trade-history/<int:history_id>/reasons', methods=['PUT'])
+@login_required
+def update_managed_history_reasons(history_id):
+    from app.services.live_trading.position_management_history import update_position_management_reasons
+    payload = request.get_json(silent=True) or {}
+    try:
+        changed = update_position_management_reasons(user_id=int(g.user_id), history_id=history_id,
+            entry_reason=payload.get('entry_reason', ''), exit_reason=payload.get('exit_reason', ''))
+        if not changed:
+            return jsonify({'code': 0, 'msg': '交易历史不存在'}), 404
+        return jsonify({'code': 1, 'msg': '已保存原因'})
+    except ValueError as exc:
+        return jsonify({'code': 0, 'msg': str(exc)}), 400
+    except Exception:
+        logger.exception('保存交易原因失败')
+        return jsonify({'code': 0, 'msg': '保存原因失败'}), 500
