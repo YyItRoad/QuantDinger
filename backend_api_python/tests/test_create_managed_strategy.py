@@ -791,3 +791,19 @@ def test_create_managed_strategy_route_hides_unexpected_internal_error(monkeypat
 
     assert status == 500
     assert response.get_json() == {"code": 0, "msg": "创建持仓管理策略失败", "data": None}
+
+
+def test_entry_reason_is_saved_in_existing_config_not_strategy_params(monkeypatch):
+    service = _StrategyService()
+    monkeypatch.setattr(position_management, 'get_strategy_service', lambda: service)
+    monkeypatch.setattr(position_management, 'fetch_target_position_snapshot', lambda **_: _snapshot())
+    monkeypatch.setattr(position_management, 'list_managed_positions_for_account', lambda **_: [])
+    monkeypatch.setattr(position_management, 'upsert_position', lambda **_: None)
+    result = position_management.create_managed_strategy(
+        user_id=3, position_ref={'credential_id': 7, 'symbol': 'KAITO/USDC', 'side': 'long', 'market_type': 'swap'},
+        strategy_payload={'sourceId': 9, 'entryReason': ' 支撑附近接管 '},
+    )
+    assert result['status'] == 'starting'
+    assert service.created_payload['positionManagement']['entry_reason'] == '支撑附近接管'
+    assert 'entryReason' not in service.created_payload
+    assert 'entry_reason' not in service.created_payload['params']

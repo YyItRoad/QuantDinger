@@ -464,6 +464,9 @@ def _create_managed_strategy_locked(
     inst_id = str(fresh.get("inst_id") or position_ref.get("inst_id") or "").strip()
 
     payload = dict(strategy_payload)
+    entry_reason = payload.pop("entryReason", "")
+    if not isinstance(entry_reason, str) or len(entry_reason) > 500:
+        raise PositionManagementError("开仓原因必须是最多500字的文字")
     requested_timeframe = payload.pop("timeframe", None)
     managed_timeframe = (
         normalize_position_management_timeframe(requested_timeframe)
@@ -498,6 +501,7 @@ def _create_managed_strategy_locked(
             "auto_stop_when_flat": True,
             "instrument": managed_instrument,
             "side": side,
+            **({"entry_reason": entry_reason.strip()} if entry_reason.strip() else {}),
             **({"timeframe": managed_timeframe} if managed_timeframe else {}),
         },
     })
