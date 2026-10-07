@@ -285,6 +285,7 @@ class TradingExecutor:
         strategy_id: int,
         *,
         close_positions: bool = False,
+        exit_reason: str = "",
     ) -> Dict[str, Any]:
         """Pause a strategy and optionally queue reduce-only closes for its owned legs."""
         sid = int(strategy_id)
@@ -364,6 +365,7 @@ class TradingExecutor:
                     execution_mode="live",
                     leverage=leverage,
                     reason="user_stop_and_close",
+                    exit_reason=exit_reason,
                     notification_config=notification_config,
                     execution_algo="market",
                     order_type="market",

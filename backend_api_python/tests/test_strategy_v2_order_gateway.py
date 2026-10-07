@@ -220,3 +220,20 @@ def test_fallback_idempotency_distinguishes_different_same_second_orders():
 
     assert first != second
     assert first == retry
+
+
+def test_personal_exit_reason_stays_separate_from_system_reason(monkeypatch):
+    import json
+    class IntentService:
+        def __init__(self, **kwargs):
+            pass
+        def create_intent(self, **kwargs):
+            return SimpleNamespace(id=91, existing=False, status='pending')
+    cursor = _Cursor({'id': 99})
+    monkeypatch.setattr(live_execution, 'OrderIntentService', IntentService)
+    monkeypatch.setattr(live_execution, 'get_db_connection', lambda: _Db(cursor))
+    request = _request('close_short', exit_reason='担心反弹', client_order_id='test-close', reason='user_stop_and_close')
+    assert StrategyV2OrderGateway().submit(request) == 99
+    payload = json.loads(cursor.params[10])
+    assert payload['exit_reason'] == '担心反弹'
+    assert payload['reason'] == 'user_stop_and_close'

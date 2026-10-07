@@ -67,12 +67,13 @@ class StrategyCommandClient:
         strategy_id: int,
         *,
         close_positions: bool = False,
+        exit_reason: str = "",
     ) -> dict:
         try:
             command = self.repository.enqueue(
                 strategy_id=int(strategy_id),
                 command_type="stop",
-                payload={"close_positions": bool(close_positions)},
+                payload={"close_positions": bool(close_positions), **({"exit_reason": exit_reason} if close_positions and exit_reason else {})},
             )
             self._remember(strategy_id, "stop", command.id)
             queued = {

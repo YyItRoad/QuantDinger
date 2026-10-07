@@ -33,3 +33,16 @@ def test_stop_response_matches_execution_state(monkeypatch, close_positions, res
     assert response.json["data"] == {"id": 20, **result}
     assert service.update_strategy_status.called is persist
     executor.stop_strategy_with_policy.assert_called_once_with(20, close_positions=close_positions)
+
+
+def test_stop_forwards_optional_personal_exit_reason(monkeypatch):
+    executor = Mock()
+    executor.stop_strategy_with_policy.return_value = {'success': True, 'status': 'stopping'}
+    monkeypatch.setattr(routes, '_strategy', lambda _: {'id': 20})
+    monkeypatch.setattr(routes, 'get_trading_executor', lambda: executor)
+    app = Flask(__name__)
+    with app.test_request_context(json={'close_positions': True, 'exitReason': ' 担心反弹 '}):
+        g.user_id = 1
+        response = app.make_response(unwrap(routes.stop_strategy)(20))
+    assert response.status_code == 202
+    executor.stop_strategy_with_policy.assert_called_once_with(20, close_positions=True, exit_reason='担心反弹')

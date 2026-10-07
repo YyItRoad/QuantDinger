@@ -122,3 +122,13 @@ def test_stop_enqueue_failure_is_not_accepted(monkeypatch):
     result = StrategyCommandClient(repository).stop_strategy_with_policy(9)
     assert result["success"] is False
     assert "command_id" not in result
+
+
+def test_exit_reason_is_forwarded_only_for_close_requests(monkeypatch):
+    repository = FakeRepository(status='pending')
+    monkeypatch.setenv('STRATEGY_COMMAND_STOP_WAIT_SEC', '0')
+    client = StrategyCommandClient(repository)
+    client.stop_strategy_with_policy(9, close_positions=True, exit_reason='担心反弹')
+    assert repository.commands[-1].payload['exit_reason'] == '担心反弹'
+    client.stop_strategy_with_policy(10, close_positions=False, exit_reason='不应记录')
+    assert 'exit_reason' not in repository.commands[-1].payload

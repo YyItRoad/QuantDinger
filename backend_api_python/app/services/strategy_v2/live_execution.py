@@ -38,6 +38,7 @@ class LiveOrderRequest:
     ai_decision_filter: bool = False
     strategy_type: str = ""
     decision_context: dict[str, Any] | None = None
+    exit_reason: str = ""
 
 
 class StrategyV2OrderGateway:
@@ -287,6 +288,7 @@ class StrategyV2OrderGateway:
             "notification_config": request.notification_config or {},
             "signal_ts": request.signal_timestamp,
             "reason": request.reason,
+            "exit_reason": request.exit_reason,
             "order_type": request.order_type,
             "execution_algo": request.execution_algo,
             "limit_price": request.limit_price,

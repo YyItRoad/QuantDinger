@@ -240,10 +240,11 @@ def stop_strategy(strategy_id: int):
         or payload.get("closePositions")
         or str(payload.get("mode") or "").strip().lower() in {"close", "flatten", "stop_and_close"}
     )
-    result = get_trading_executor().stop_strategy_with_policy(
-        strategy_id,
-        close_positions=close_positions,
-    )
+    kwargs = {"close_positions": close_positions}
+    exit_reason = payload.get("exitReason", "")
+    if close_positions and isinstance(exit_reason, str) and len(exit_reason) <= 500 and exit_reason.strip():
+        kwargs["exit_reason"] = exit_reason.strip()
+    result = get_trading_executor().stop_strategy_with_policy(strategy_id, **kwargs)
     status = str(result.get("status") or "")
     if status == "stopped":
         get_strategy_service().update_strategy_status(strategy_id, "stopped", user_id=int(g.user_id))

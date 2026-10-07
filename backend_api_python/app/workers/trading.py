@@ -142,6 +142,7 @@ class TradingWorker:
                 result = self._stop_strategy(
                     command.strategy_id,
                     close_positions=bool(command.payload.get("close_positions")),
+                    **({"exit_reason": command.payload["exit_reason"]} if command.payload.get("exit_reason") else {}),
                 )
             elif command.command_type == "restart":
                 self._stop_strategy(command.strategy_id)
@@ -203,12 +204,13 @@ class TradingWorker:
             raise RuntimeError("strategyRuntime.leaseLost")
         return {"strategy_id": strategy_id, "runtime_owner": self.worker_id, "status": "running"}
 
-    def _stop_strategy(self, strategy_id: int, *, close_positions: bool = False) -> dict:
+    def _stop_strategy(self, strategy_id: int, *, close_positions: bool = False, exit_reason: str = "") -> dict:
         append_strategy_log(strategy_id, "info", "strategyRuntime.stopCommand")
         if close_positions:
             result = self.executor.stop_strategy_with_policy(
                 strategy_id,
                 close_positions=True,
+                **({"exit_reason": exit_reason} if exit_reason else {}),
             )
             if not bool(result.get("success")):
                 raise RuntimeError(
