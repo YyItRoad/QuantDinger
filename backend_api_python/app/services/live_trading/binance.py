@@ -473,6 +473,20 @@ class BinanceFuturesClient(BaseRestClient):
             return data["raw"]
         return []
 
+    def get_liquidation_orders(self, *, symbol: str, start_time_ms: int) -> list:
+        """Read liquidation orders only; never submit an exchange order."""
+        data = self._signed_request("GET", "/fapi/v1/forceOrders", params={
+            "symbol": to_binance_futures_symbol(symbol),
+            "autoCloseType": "LIQUIDATION",
+            "startTime": int(start_time_ms),
+            "limit": 100,
+        })
+        if isinstance(data, dict):
+            data = data.get("raw")
+        if not isinstance(data, list):
+            raise LiveTradingError("Invalid Binance liquidation response")
+        return data
+
     def get_open_orders(self, *, symbol: str = "") -> Any:
         """Return current USD-M futures orders, optionally scoped to one symbol."""
         params: Dict[str, Any] = {}

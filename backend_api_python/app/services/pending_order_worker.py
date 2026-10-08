@@ -411,6 +411,13 @@ class PendingOrderWorker(
         except Exception as e:
             logger.debug(f"position sync skipped/failed: {e}")
 
+        # Optional managed-position recovery must not skip the existing sync jobs.
+        try:
+            from app.services.live_trading.position_management_liquidation import sync_managed_binance_liquidations
+            sync_managed_binance_liquidations()
+        except Exception as e:
+            logger.warning("Managed liquidation reconciliation skipped/failed: %s", e)
+
     def _sync_alpaca_sent_orders(self, limit: int = 50) -> None:
         rows = self._fetch_alpaca_sent_orders(limit=limit)
         for row in rows:
