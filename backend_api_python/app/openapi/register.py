@@ -28,6 +28,7 @@ _PREFIX_TAGS: list[tuple[str, str]] = [
     ("/api/account", "Account"),
     ("/api/strategy-assets", "Strategy"),
     ("/api/strategies", "Strategy"),
+    ("/api/position-management", "Strategy"),
     ("/api/bots", "Strategy"),
     ("/api/credentials", "Credentials"),
     ("/api/dashboard", "Dashboard"),

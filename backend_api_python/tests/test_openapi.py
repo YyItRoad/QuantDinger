@@ -51,6 +51,18 @@ def test_openapi_shared_schemas(openapi_spec):
         assert name in schemas, f"missing shared schema {name}"
 
 
+def test_exported_operation_tags_are_declared(openapi_spec):
+    from app.openapi.register import enrich_spec
+
+    spec = enrich_spec(openapi_spec)
+    declared = {tag["name"] for tag in spec["tags"]}
+    for path, item in spec["paths"].items():
+        for method, operation in item.items():
+            if method not in {"get", "post", "put", "patch", "delete", "head", "options", "trace"}:
+                continue
+            assert set(operation.get("tags", [])) <= declared, f"undeclared tag: {method} {path}"
+
+
 def test_export_script_writes_yaml(tmp_path):
     """Regression: export_openapi.py produces parseable YAML."""
     import subprocess

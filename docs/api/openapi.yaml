@@ -5001,7 +5001,7 @@ paths:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: 分页返回当前账户的持仓管理交易历史。
       tags:
-      - strategy
+      - Strategy
       operationId: getApiPositionManagementTradeHistory
       x-visibility: internal
   /api/account/position-snapshot:
@@ -5080,7 +5080,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       tags:
-      - strategy
+      - Strategy
       operationId: putApiPositionManagementTradeHistoryHistoryIdReasons
       summary: Put Api Position Management Trade History History Id Reasons
       parameters:
