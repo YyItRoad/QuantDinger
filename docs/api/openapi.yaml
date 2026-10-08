@@ -5064,6 +5064,39 @@ paths:
       - Account
       operationId: postApiAccountManagedStrategies
       x-visibility: internal
+  /api/position-management/trade-history/{history_id}/reasons:
+    put:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      tags:
+      - strategy
+      operationId: putApiPositionManagementTradeHistoryHistoryIdReasons
+      summary: Put Api Position Management Trade History History Id Reasons
+      parameters:
+      - name: history_id
+        in: path
+        required: true
+        schema:
+          type: integer
+      x-visibility: internal
+    parameters:
+    - in: path
+      name: history_id
+      required: true
+      schema:
+        type: integer
+        minimum: 0
   /api/strategies/review-report:
     post:
       responses:

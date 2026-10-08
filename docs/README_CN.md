@@ -87,7 +87,6 @@ Celery broker 与结果存储。修改进程归属或共享状态前，请先阅
 - 通知配置：[邮件](deployment/NOTIFICATION_EMAIL_CONFIG_CN.md)、
   [短信](deployment/NOTIFICATION_SMS_CONFIG_CN.md)、
   [Telegram](deployment/NOTIFICATION_TELEGRAM_CONFIG_CN.md)
-- [USDT 支付](deployment/USDT_PAYMENT_GUIDE.md)
 
 ### 交易与研究
 
