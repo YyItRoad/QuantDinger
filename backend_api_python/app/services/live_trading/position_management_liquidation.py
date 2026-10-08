@@ -1,4 +1,4 @@
-"""Reconcile complete Binance liquidations into existing managed-position ledgers."""
+"""Reconcile Binance external exits and enrich existing managed-position history."""
 
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -10,7 +10,7 @@ from app.services.live_trading.leg_context import credential_id_from_exchange_co
 from app.services.pending_orders.fill_records import persist_strategy_fill
 from app.utils.db import get_db_connection, get_db_transaction
 from app.utils.logger import get_logger
-from app.utils.trade_close_reason import EXCHANGE_LIQUIDATION
+from app.utils.trade_close_reason import EXCHANGE_LIQUIDATION, EXCHANGE_EXTERNAL_CLOSE
 
 logger = get_logger(__name__)
 
@@ -84,6 +84,81 @@ def _owners(cur, position):
     return len(rows) == 1 and int(rows[0]["id"]) == int(position["id"]) and Decimal(str(rows[0]["size"])) == Decimal(str(position["size"]))
 
 
+def _external_fills(client, position, start_ms):
+    """Match a complete unexplained reduction; never adopt account-wide inventory."""
+    symbol, side = position["symbol"], position["side"]
+    rows = client.get_positions(symbol=symbol)
+    if not isinstance(rows, list) or not rows:
+        return []
+    target = [r for r in rows if _symbol(r.get("symbol")) == _symbol(symbol)
+              and r.get("positionSide") in (side.upper(), "BOTH") and "positionAmt" in r]
+    if len(target) != 1:
+        return []
+    amount = Decimal(str(target[0]["positionAmt"]))
+    if not amount.is_finite() or (amount and (amount > 0) != (side == "long")):
+        return []
+    delta = Decimal(str(position["size"])) - abs(amount)
+    if delta <= 0:
+        return []
+    fills = client.get_user_trades(symbol=symbol, limit=1000)
+    if not isinstance(fills, list) or len(fills) >= 1000:
+        return []
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute("""SELECT exchange_fill_id FROM qd_strategy_trades
+            WHERE credential_id = %s AND market_type = 'swap' AND symbol = %s""",
+            (position["credential_id"], symbol))
+        posted = {str(r["exchange_fill_id"]) for r in cur.fetchall() or []}
+        cur.execute("""SELECT exchange_order_id, client_order_id FROM qd_live_order_bindings
+            WHERE credential_id = %s AND exchange_id = 'binance' AND market_type = 'swap'
+            UNION SELECT exchange_order_id, client_order_id FROM pending_orders
+            WHERE credential_id = %s AND exchange_id = 'binance' AND market_type = 'swap'""",
+            (position["credential_id"], position["credential_id"]))
+        bindings = cur.fetchall() or []
+        cur.close()
+    order_ids = {str(r["exchange_order_id"]) for r in bindings if r.get("exchange_order_id")}
+    client_ids = {str(r["client_order_id"]) for r in bindings if r.get("client_order_id")}
+    result, orders, seen = [], {}, set()
+    for raw in fills:
+        if int(raw.get("time") or 0) < start_ms or str(raw.get("id")) in posted:
+            continue
+        if raw.get("side") != ("BUY" if side == "short" else "SELL"):
+            if (_symbol(raw.get("symbol")) == _symbol(symbol)
+                    and raw.get("positionSide") in (side.upper(), "BOTH")):
+                return []
+            continue
+        if raw.get("positionSide") not in (side.upper(), "BOTH") or _symbol(raw.get("symbol")) != _symbol(symbol):
+            continue
+        if raw.get("id") is None or str(raw["id"]) in seen:
+            return []
+        oid = str(raw.get("orderId") or "")
+        if not oid or oid in order_ids:
+            return []
+        if oid not in orders:
+            orders[oid] = client.get_order(symbol=symbol, order_id=oid)
+        order = orders[oid]
+        cid = str(order.get("clientOrderId") or "")
+        if (str(order.get("orderId")) != oid or _symbol(order.get("symbol")) != _symbol(symbol)
+                or order.get("status") != "FILLED" or cid in client_ids or cid.startswith(("qd_", "autoclose-", "adl_autoclose"))
+                or (raw["positionSide"] == "BOTH" and order.get("reduceOnly") is not True)):
+            return []
+        if not all(key in raw for key in ("qty", "price", "realizedPnl", "commission", "commissionAsset")):
+            return []
+        numbers = {key: Decimal(str(raw[key])) for key in ("qty", "price", "realizedPnl", "commission")}
+        if not all(n.is_finite() for n in numbers.values()) or numbers["qty"] <= 0 or numbers["price"] <= 0:
+            return []
+        seen.add(str(raw["id"]))
+        result.append(dict(raw, _reason=EXCHANGE_EXTERNAL_CLOSE))
+    if sum(Decimal(str(f["qty"])) for f in result) != delta:
+        return []
+    # Do not match an incomplete order response or a partly posted external order.
+    for oid, order in orders.items():
+        total = sum(Decimal(str(f["qty"])) for f in result if str(f["orderId"]) == oid)
+        if total != Decimal(str(order.get("executedQty") or 0)):
+            return []
+    return sorted(result, key=lambda f: (int(f["time"]), int(f["id"])))
+
+
 def _reconcile(position):
     sid = int(position["strategy_id"])
     config = load_strategy_configs(sid)
@@ -98,6 +173,8 @@ def _reconcile(position):
         created = created.replace(tzinfo=timezone.utc)
     fills = _matching_fills(client, position, int(created.timestamp() * 1000))
     if not fills:
+        fills = _external_fills(client, position, int(created.timestamp() * 1000))
+    if not fills:
         return False
     with get_db_transaction():
         lock_strategy_fills(sid)
@@ -108,20 +185,30 @@ def _reconcile(position):
                 return False
             # Account-scoped IDs prevent REST retries from reposting an existing fill.
             cur.execute("""SELECT 1 FROM qd_strategy_trades WHERE credential_id = %s
-                AND market_type = 'swap' AND exchange_order_id = %s AND exchange_fill_id IN %s LIMIT 1""",
-                (position["credential_id"], str(fills[0]["orderId"]), tuple(str(f["id"]) for f in fills)))
+                AND market_type = 'swap' AND symbol = %s AND exchange_fill_id IN %s LIMIT 1""",
+                (position["credential_id"], position["symbol"], tuple(str(f["id"]) for f in fills)))
+            if cur.fetchone():
+                cur.close()
+                return False
+            cur.execute("""SELECT 1 FROM qd_live_order_bindings
+                WHERE credential_id = %s AND exchange_id = 'binance' AND market_type = 'swap'
+                  AND exchange_order_id IN %s LIMIT 1""",
+                (position["credential_id"], tuple({str(f["orderId"]) for f in fills})))
             if cur.fetchone():
                 cur.close()
                 return False
             remaining = float(position["size"])
             for index, fill in enumerate(fills):
                 # Consume the exact float remainder on the last fill to avoid a dust row.
-                position_filled = remaining if index == len(fills) - 1 else float(fill["qty"])
+                complete = sum(Decimal(str(f["qty"])) for f in fills) == Decimal(str(position["size"]))
+                position_filled = remaining if complete and index == len(fills) - 1 else float(fill["qty"])
+                reason = fill.get("_reason", EXCHANGE_LIQUIDATION)
+                source = "external_close" if reason == EXCHANGE_EXTERNAL_CLOSE else "liquidation"
                 persist_strategy_fill(
                     strategy_id=sid, symbol=position["symbol"], signal_type="close_" + position["side"],
                     filled=float(fill["qty"]), avg_price=float(fill["price"]), market_type="swap",
-                    exchange_config=exchange_config, exchange_id="binance", fill_source="liquidation",
-                    close_reason=EXCHANGE_LIQUIDATION, profit=float(fill["realizedPnl"]),
+                    exchange_config=exchange_config, exchange_id="binance", fill_source=source,
+                    close_reason=reason, profit=float(fill["realizedPnl"]),
                     commission=float(fill["commission"]), commission_ccy=fill["commissionAsset"],
                     fees_by_ccy={fill["commissionAsset"]: float(fill["commission"])},
                     fee_status="actual" if float(fill["commission"]) else "actual_zero", fee_source="rest",
@@ -131,7 +218,7 @@ def _reconcile(position):
                 )
                 remaining -= position_filled
                 cur.execute("""UPDATE qd_strategy_trades SET created_at = %s
-                    WHERE strategy_id = %s AND fill_source = 'liquidation'
+                    WHERE strategy_id = %s AND fill_source IN ('liquidation', 'external_close')
                       AND exchange_order_id = %s AND exchange_fill_id = %s""",
                     (datetime.fromtimestamp(int(fill["time"]) / 1000, timezone.utc).replace(tzinfo=None),
                      sid, str(fill["orderId"]), str(fill["id"])))
@@ -160,3 +247,68 @@ def sync_managed_binance_liquidations():
             _reconcile(position)
         except Exception as exc:
             logger.warning("Managed liquidation reconciliation failed strategy=%s: %s", position["strategy_id"], exc)
+    _enrich_external_history()
+
+
+def _enrich_external_history():
+    """Fill missing history metadata without fabricating a successful system order."""
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute("""SELECT h.*, t.exchange_order_id AS trade_order_id
+            FROM qd_position_management_trade_history h
+            JOIN qd_strategy_trades t ON t.id = h.source_trade_id AND t.user_id = h.user_id
+            WHERE h.exchange_id = 'binance' AND h.market_type = 'swap'
+              AND h.fill_source IN ('liquidation', 'external_close')
+              AND (COALESCE(h.order_type, '') = '' OR COALESCE(h.exit_reason, '') = '')
+            ORDER BY h.id""")
+        rows = [dict(r) for r in cur.fetchall() or []]
+        cur.close()
+    for row in rows:
+        try:
+            order = {}
+            if not row.get("order_type") and row.get("trade_order_id"):
+                config = load_strategy_configs(int(row["source_strategy_id"]))
+                cfg = resolve_exchange_config(config.get("exchange_config") or {}, user_id=int(row["user_id"]))
+                if (str(cfg.get("exchange_id") or "").lower() != "binance"
+                        or int(credential_id_from_exchange_config(cfg) or 0) != int(row["credential_id"])):
+                    continue
+                order = create_client(cfg, market_type="swap").get_order(
+                    symbol=row["symbol"], order_id=str(row["trade_order_id"]))
+                if (str(order.get("orderId")) != str(row["trade_order_id"])
+                        or _symbol(order.get("symbol")) != _symbol(row["symbol"])
+                        or order.get("side") != ("BUY" if row["position_side"] == "short" else "SELL")
+                        or order.get("status") != "FILLED"
+                        or Decimal(str(order.get("executedQty") or 0)) < Decimal(str(row["filled_amount"]))):
+                    continue
+            with get_db_connection() as db:
+                cur = db.cursor()
+                # Closing notes may describe an already completed liquidation; retain them as notes only.
+                cur.execute("""SELECT NULLIF(payload_json, '')::jsonb ->> 'exit_reason' AS exit_reason
+                    FROM pending_orders WHERE user_id = %s AND strategy_id = %s AND credential_id = %s
+                      AND regexp_replace(upper(symbol), '[-/_]', '', 'g') = %s
+                      AND signal_type = %s AND status = 'failed'
+                      AND market_type = 'swap' AND amount = %s
+                      AND created_at >= %s AND created_at <= %s + INTERVAL '1 day'
+                      AND NULLIF(payload_json, '')::jsonb ->> 'exit_reason' IS NOT NULL
+                    ORDER BY id""", (row["user_id"], row["source_strategy_id"], row["credential_id"],
+                    _symbol(row["symbol"]), "close_" + row["position_side"], row["filled_amount"], row["exit_time"], row["exit_time"]))
+                notes = [r["exit_reason"] for r in cur.fetchall() or [] if str(r.get("exit_reason") or "").strip()]
+                note = notes[0] if len(notes) == 1 else ""
+                created = (datetime.fromtimestamp(int(order["time"]) / 1000, timezone.utc).replace(tzinfo=None)
+                           if order.get("time") else None)
+                cur.execute("""UPDATE qd_position_management_trade_history SET
+                    exchange_order_id = COALESCE(NULLIF(exchange_order_id, ''), %s),
+                    order_type = COALESCE(NULLIF(order_type, ''), %s),
+                    order_status = COALESCE(NULLIF(order_status, ''), %s),
+                    requested_amount = CASE WHEN COALESCE(requested_amount, 0) = 0 THEN %s ELSE requested_amount END,
+                    client_order_id = COALESCE(NULLIF(client_order_id, ''), %s),
+                    order_created_at = COALESCE(order_created_at, %s),
+                    exit_reason = COALESCE(NULLIF(exit_reason, ''), %s)
+                    WHERE id = %s AND user_id = %s""", (
+                    str(row.get("trade_order_id") or ""), str(order.get("type") or ""), str(order.get("status") or ""),
+                    float(order.get("origQty") or 0), str(order.get("clientOrderId") or ""), created, note,
+                    row["id"], row["user_id"]))
+                db.commit()
+                cur.close()
+        except Exception as exc:
+            logger.warning("External close history enrichment failed history=%s: %s", row["id"], exc)

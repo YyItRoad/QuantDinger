@@ -140,6 +140,7 @@ def test_periodic_reconciliation_includes_stopped_and_isolates_failures(monkeypa
     reconcile = Mock(side_effect=[RuntimeError("timeout"), True])
     monkeypatch.setattr(module, "get_db_connection", db)
     monkeypatch.setattr(module, "_reconcile", reconcile)
+    monkeypatch.setattr(module, "_enrich_external_history", Mock())
     module.sync_managed_binance_liquidations()
     assert "('running', 'stopped')" in cursor.execute.call_args.args[0]
     assert reconcile.call_count == 2
@@ -162,3 +163,65 @@ def test_recovery_failure_does_not_interrupt_existing_worker_sync(monkeypatch):
     sync.assert_called_once()
     funding.assert_called_once()
     alpaca.assert_called_once()
+
+@pytest.mark.parametrize('remaining,quantity', [('0', '86.9'), ('-46.9', '40')])
+def test_external_full_and_partial_close_require_matching_delta(monkeypatch, remaining, quantity):
+    venue = client()
+    venue.get_positions.return_value[0]['positionAmt'] = remaining
+    venue.get_user_trades.return_value[0]['qty'] = quantity
+    venue.get_order.return_value = dict(orderId=20, symbol='PROMUSDT', side='BUY',
+        positionSide='BOTH', status='FILLED', reduceOnly=True, executedQty=quantity, clientOrderId='manual-20')
+    cursor = Mock()
+    cursor.fetchall.return_value = []
+
+    @contextmanager
+    def db():
+        yield Mock(cursor=Mock(return_value=cursor))
+
+    monkeypatch.setattr(module, 'get_db_connection', db)
+    fills = module._external_fills(venue, position(), 1000000)
+    assert len(fills) == 1
+    assert fills[0]['qty'] == quantity
+    assert fills[0]['_reason'] == 'exchange_external_close'
+    venue.get_order.return_value['executedQty'] = '100'
+    assert module._external_fills(venue, position(), 1000000) == []
+
+
+def test_external_system_order_is_not_adopted(monkeypatch):
+    venue = client()
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[], [dict(exchange_order_id='20', client_order_id='qd_40')]]
+
+    @contextmanager
+    def db():
+        yield Mock(cursor=Mock(return_value=cursor))
+
+    monkeypatch.setattr(module, 'get_db_connection', db)
+    assert module._external_fills(venue, position(), 1000000) == []
+    venue.get_order.assert_not_called()
+
+
+def test_history_enrichment_uses_exchange_order_and_unique_note(monkeypatch):
+    row = dict(id=34, source_strategy_id=40, user_id=3, credential_id=7, symbol='PROM/USDT',
+               position_side='short', trade_order_id='20', order_type='', filled_amount='86.9',
+               exit_time=datetime(2026, 10, 8, 7, 13, 49))
+    cursor = Mock()
+    cursor.fetchall.side_effect = [[row], [dict(exit_reason='市场强势上涨，被强平')]]
+
+    @contextmanager
+    def db():
+        yield Mock(cursor=Mock(return_value=cursor))
+
+    venue = client()
+    venue.get_order.return_value = dict(orderId=20, symbol='PROMUSDT', side='BUY', status='FILLED',
+        executedQty='86.9', origQty='86.9', type='LIMIT', clientOrderId='autoclose-20', time=2000000)
+    monkeypatch.setattr(module, 'get_db_connection', db)
+    monkeypatch.setattr(module, 'load_strategy_configs', lambda _: {})
+    monkeypatch.setattr(module, 'resolve_exchange_config', lambda *a, **kw: dict(exchange_id='binance', credential_id=7))
+    monkeypatch.setattr(module, 'create_client', lambda *a, **kw: venue)
+    module._enrich_external_history()
+    sql, values = cursor.execute.call_args.args
+    assert 'COALESCE(NULLIF(exit_reason' in sql
+    assert values[:5] == ('20', 'LIMIT', 'FILLED', 86.9, 'autoclose-20')
+    assert values[6] == '市场强势上涨，被强平'
+    assert 'order_sent_at =' not in sql

@@ -42,6 +42,7 @@ SERVER_TRAILING_STOP = "server_trailing_stop"
 
 # Exchange-triggered risk exits
 EXCHANGE_LIQUIDATION = "exchange_liquidation"
+EXCHANGE_EXTERNAL_CLOSE = "exchange_external_close"
 
 # Indicator / generic script signal close (non-grid)
 INDICATOR_SIGNAL = "indicator_signal"
@@ -51,6 +52,7 @@ LEGACY_SIGNAL_TRIGGER = "signal_trigger"
 
 _LABELS_ZH: Dict[str, str] = {
     EXCHANGE_LIQUIDATION: "交易所强平",
+    EXCHANGE_EXTERNAL_CLOSE: "交易所外部平仓",
     GRID_LONG_ENTRY: "网格买入开多",
     GRID_LONG_EXIT: "网格卖出平多",
     GRID_SHORT_ENTRY: "网格卖出开空",
@@ -81,6 +83,7 @@ _LABELS_ZH: Dict[str, str] = {
 
 _LABELS_EN: Dict[str, str] = {
     EXCHANGE_LIQUIDATION: "Exchange liquidation",
+    EXCHANGE_EXTERNAL_CLOSE: "External exchange close",
     GRID_LONG_ENTRY: "Grid buy long",
     GRID_LONG_EXIT: "Grid sell close long",
     GRID_SHORT_ENTRY: "Grid sell short",

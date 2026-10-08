@@ -402,7 +402,7 @@ def sync_position_management_trade_history(
                        po.order_type,
                        po.status AS order_status,
                        po.amount AS requested_amount,
-                       po.exchange_order_id,
+                       COALESCE(NULLIF(po.exchange_order_id, ''), t.exchange_order_id) AS exchange_order_id,
                        po.client_order_id,
                        po.signal_ts,
                        po.created_at AS order_created_at,
