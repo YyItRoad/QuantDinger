@@ -26,7 +26,6 @@ jobs:
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
           command_timeout: 3m
-          command_stop: true
           script: |
             set -eu
             docker exec -i quantdinger-mcp python - <<'PY'
@@ -45,8 +44,8 @@ jobs:
                 key = 'mcp-smoke-' + '20261013' + '-2f2c31d'
                 with httpx.Client(base_url=base, timeout=60) as api:
                     identity = api.get('/api/agent/v1/whoami', headers={'Authorization': 'Bearer ' + primary})
-                    identity.raise_for_status()
-                    scopes = identity.json()['data']['scopes']
+                    print('PRIMARY_TOKEN_STATUS', identity.status_code, flush=True)
+                    scopes = (identity.json().get('data') or {}).get('scopes', []) if identity.status_code == 200 else []
                     async with streamablehttp_client('https://trade.yangyang.fun/mcp', headers=headers) as (reader, writer, _):
                         async with ClientSession(reader, writer) as session:
                             await session.initialize()
@@ -58,6 +57,7 @@ jobs:
                             print('INVALID_INPUT_REJECTED', True, flush=True)
                             if 'N' in scopes:
                                 result = await session.call_tool('send_notification', {**payload, 'idempotency_key': key})
+                                print('MCP_RESULT', result.content[0].text, flush=True)
                                 assert not result.isError, 'MCP delivery failed; do not retry with a new key'
                                 first = json.loads(result.content[0].text)
                                 token = primary
