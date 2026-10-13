@@ -1,129 +1,84 @@
-name: Build and deploy MCP to personal server
+name: Approved MCP production notification smoke test
 
 on:
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: "Override the image tag. Leave blank for manual-<short-sha>."
-        required: false
-        default: ""
-        type: string
-      host:
-        description: "Override secrets.SERVER_HOST for this run."
-        required: false
-        default: ""
-        type: string
-      deploy_dir:
-        description: "Server-side QuantDinger directory."
-        required: false
-        default: "/opt/quantdinger"
-        type: string
-      prune:
-        description: "Prune dangling images after a successful deployment."
-        required: false
+      confirm_send:
+        description: "Send one approved test notification, then replay the same request"
+        required: true
         default: false
         type: boolean
-      dry_run:
-        description: "Build and push the image, but do not connect to the server."
-        required: false
-        default: false
-        type: boolean
-
-concurrency:
-  group: deploy-mcp-${{ github.event.inputs.image_tag || github.sha }}
-  cancel-in-progress: false
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
-  build-and-deploy:
+  smoke-test:
+    if: inputs.confirm_send
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: mcp_server/pyproject.toml
-
-      - name: Test official MCP package
-        run: |
-          python -m pip install --disable-pip-version-check -e './mcp_server[dev]'
-          python -m pytest mcp_server/tests -q
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4.5.2
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Resolve image
-        id: resolve
-        env:
-          INPUT_TAG: ${{ inputs.image_tag }}
-          REPO_OWNER: ${{ github.repository_owner }}
-        run: |
-          if [ -n "$INPUT_TAG" ]; then
-            tag="$INPUT_TAG"
-          else
-            tag="manual-${GITHUB_SHA::7}"
-          fi
-          image="ghcr.io/${REPO_OWNER,,}/quantdinger-mcp:${tag}"
-          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "ghcr_image=$image" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push MCP image
-        uses: docker/build-push-action@v7
-        with:
-          context: ./mcp_server
-          file: ./mcp_server/Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.resolve.outputs.ghcr_image }}
-          cache-from: type=gha,scope=deploy-mcp
-          cache-to: type=gha,mode=max,scope=deploy-mcp
-          provenance: mode=max
-          sbom: true
-
-      - name: Upload MCP deployment files
-        if: ${{ !inputs.dry_run }}
-        uses: appleboy/scp-action@v1
-        with:
-          host: ${{ inputs.host || secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.DEPLOY_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT || 22 }}
-          command_timeout: 2m
-          source: "docker-compose.mcp.ghcr.yml,ops/deploy/deploy-mcp-remote.sh,ops/deploy/MCP_DEPLOY_CN.md"
-          target: ${{ inputs.deploy_dir }}
-
-      - name: Deploy MCP only
-        if: ${{ !inputs.dry_run }}
+      - name: Verify live tool and one approved notification
         uses: appleboy/ssh-action@v1
-        env:
-          IMAGE_TAG: ${{ steps.resolve.outputs.image_tag }}
-          GHCR_IMAGE: ${{ steps.resolve.outputs.ghcr_image }}
-          DEPLOY_DIR: ${{ inputs.deploy_dir }}
-          PRUNE: ${{ inputs.prune }}
         with:
-          host: ${{ inputs.host || secrets.SERVER_HOST }}
+          host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
-          command_timeout: 15m
+          command_timeout: 3m
           command_stop: true
-          envs: IMAGE_TAG,GHCR_IMAGE,DEPLOY_DIR,PRUNE
           script: |
-            set -euo pipefail
-            chmod +x "$DEPLOY_DIR/ops/deploy/deploy-mcp-remote.sh"
-            bash "$DEPLOY_DIR/ops/deploy/deploy-mcp-remote.sh"
+            set -eu
+            docker exec -i quantdinger-mcp python - <<'PY'
+            import asyncio
+            import json
+            import os
+            import httpx
+            from mcp import ClientSession
+            from mcp.client.streamable_http import streamablehttp_client
+
+            async def check():
+                base = os.environ['QUANTDINGER_BASE_URL'].rstrip('/')
+                primary = os.environ['QUANTDINGER_AGENT_TOKEN']
+                headers = {'Authorization': 'Bearer ' + os.environ['QUANTDINGER_MCP_AUTH_TOKEN']}
+                payload = {'title': 'QuantDinger MCP 上线测试', 'message': '这是一条经确认的上线测试通知，用于验证发送与同键去重，无需交易操作。', 'level': 'info'}
+                key = 'mcp-smoke-' + '20261013' + '-2f2c31d'
+                with httpx.Client(base_url=base, timeout=60) as api:
+                    identity = api.get('/api/agent/v1/whoami', headers={'Authorization': 'Bearer ' + primary})
+                    identity.raise_for_status()
+                    scopes = identity.json()['data']['scopes']
+                    async with streamablehttp_client('https://trade.yangyang.fun/mcp', headers=headers) as (reader, writer, _):
+                        async with ClientSession(reader, writer) as session:
+                            await session.initialize()
+                            tools = await session.list_tools()
+                            tool = next(t for t in tools.tools if t.name == 'send_notification')
+                            print('DISCOVERY', json.dumps({'tool': tool.name, 'required': tool.inputSchema.get('required'), 'meta': tool.meta}), flush=True)
+                            invalid = await session.call_tool('send_notification', {'title': '', 'message': 'validation only', 'idempotency_key': 'validation-only'})
+                            assert invalid.isError, 'Empty title should be rejected before delivery'
+                            print('INVALID_INPUT_REJECTED', True, flush=True)
+                            if 'N' in scopes:
+                                result = await session.call_tool('send_notification', {**payload, 'idempotency_key': key})
+                                assert not result.isError, 'MCP delivery failed; do not retry with a new key'
+                                first = json.loads(result.content[0].text)
+                                token = primary
+                                mode = 'public_mcp'
+                            else:
+                                token = os.environ['QUANTDINGER_MCP_OAUTH_AGENT_TOKEN']
+                                identity = api.get('/api/agent/v1/whoami', headers={'Authorization': 'Bearer ' + token})
+                                identity.raise_for_status()
+                                assert 'N' in identity.json()['data']['scopes']
+                                response = api.post('/api/agent/v1/notifications/send', headers={'Authorization': 'Bearer ' + token, 'Idempotency-Key': key}, json=payload)
+                                print('FIRST_HTTP_STATUS', response.status_code, flush=True)
+                                response.raise_for_status()
+                                first = response.json()['data']
+                                mode = 'oauth_agent_gateway'
+                            print('FIRST_RESULT', json.dumps({'mode': mode, **first}), flush=True)
+                            assert first['status'] == 'delivered'
+                            replay = api.post('/api/agent/v1/notifications/send', headers={'Authorization': 'Bearer ' + token, 'Idempotency-Key': key}, json=payload)
+                            replay.raise_for_status()
+                            assert replay.json()['data'] == first
+                            assert replay.headers.get('Idempotent-Replayed') == 'true'
+                            print('REPLAY_PROOF', json.dumps({'http_status': replay.status_code, 'idempotent_replayed': replay.headers.get('Idempotent-Replayed'), 'result': replay.json()['data']}), flush=True)
+                            print('SMOKE_TEST_PASSED', flush=True)
+            asyncio.run(check())
+            PY
