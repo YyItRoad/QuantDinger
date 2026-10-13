@@ -10,6 +10,7 @@ from .security import redact_secrets
 
 
 WRITE_TOOLS = {
+    "send_notification": False,
     "stop_strategy": True,
     "place_quick_order": True,
     "emergency_stop_trading": True,

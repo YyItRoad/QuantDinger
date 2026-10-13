@@ -113,3 +113,11 @@ docker compose --profile mcp up -d --build mcp
 pip install -e './mcp_server[dev]'
 pytest mcp_server/tests
 ```
+
+## Send-only notifications
+
+`send_notification(title, message, level="info", idempotency_key=None)` requires
+Agent scope `NS` and, in hybrid mode, OAuth `quantdinger.notify`. It uses only the
+saved user Webhook. Unlike alert lifecycle tools, its key is optional; reuse a
+key for retries. See [configuration, limits and local tests](../docs/agent/MCP_NOTIFICATIONS.md)
+and [中文说明](../docs/agent/MCP_NOTIFICATIONS_CN.md).

@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 import secrets
 import sys
-from typing import Any
+from typing import Annotated, Any, Literal
+
+from pydantic import Field
 
 import httpx
 from mcp.server.auth.provider import AccessToken
@@ -89,6 +91,7 @@ MCP_TOOL_NAMES = (
     "set_signal_alert_status",
     "delete_signal_alert",
     "run_signal_alert",
+    "send_notification",
 )
 
 
@@ -1022,6 +1025,26 @@ def list_agent_quick_trades(limit: int = 50, cursor: int = 0) -> Any:
 
 
 @_tool
+def send_notification(
+    title: Annotated[str, Field(min_length=1, max_length=200, strict=True)],
+    message: Annotated[str, Field(min_length=1, max_length=8000, strict=True)],
+    level: Literal["info", "warning", "critical"] = "info",
+    idempotency_key: Annotated[str, Field(min_length=1, max_length=120, strict=True)] | None = None,
+) -> Any:
+    """Send via the user's saved Webhook; requires NS / quantdinger.notify.
+
+    Reuse a key for retries (24-hour user-scoped deduplication). No key means
+    each call is a new send. Duplicate means reserved, not guaranteed delivered.
+    No destination or credentials can be supplied by the caller.
+    """
+    return _post("/api/agent/v1/notifications/send", json={
+        "title": title, "message": message, "level": level,
+        "idempotency_key": idempotency_key,
+    })
+
+
+
+@_tool
 def list_signal_alerts(limit: int = 50, cursor: int = 0) -> Any:
     """List indicator signal-alert tasks (scope N)."""
     return _get(
@@ -1187,6 +1210,9 @@ def main() -> None:
         _apply_http_settings_from_env()
         _validate_network_security(transport)
     mcp.run(transport=transport)
+
+
+
 
 
 if __name__ == "__main__":

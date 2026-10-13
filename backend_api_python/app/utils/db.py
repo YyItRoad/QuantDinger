@@ -281,6 +281,12 @@ def _apply_init_sql(logger, *, strict: bool = False):
             _apply_migration_component(
                 conn,
                 logger,
+                name="agent-notifications-20261013",
+                path=init_sql.parent / "20261013_agent_notifications.sql",
+            )
+            _apply_migration_component(
+                conn,
+                logger,
                 name="execution-fill-accounting-20260916",
                 path=Path(__file__).resolve().parent.parent.parent / "migrations" / "20260916_fill_accounting.sql",
             )

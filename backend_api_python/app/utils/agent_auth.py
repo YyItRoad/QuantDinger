@@ -36,10 +36,11 @@ TOKEN_PREFIX = "qd_agent_"
 SCOPE_R = "R"   # Read
 SCOPE_W = "W"   # Workspace write
 SCOPE_B = "B"   # Backtest / simulation
+SCOPE_NS = "NS"  # Send-only notifications; no alert lifecycle permissions
 SCOPE_N = "N"   # Notifications & misc side-effects
 SCOPE_C = "C"   # Credentials (admin only)
 SCOPE_T = "T"   # Trading / capital
-ALL_SCOPES = (SCOPE_R, SCOPE_W, SCOPE_B, SCOPE_N, SCOPE_C, SCOPE_T)
+ALL_SCOPES = (SCOPE_R, SCOPE_W, SCOPE_B, SCOPE_N, SCOPE_C, SCOPE_T, SCOPE_NS)
 
 
 _schema_ready = False
@@ -445,7 +446,9 @@ def _audit(scope_class: str, status_code: int, response_summary: Any, duration_m
         req_summary: dict[str, Any] = {
             "args": _redact(dict(request.args)),
         }
-        if request.is_json:
+        if request.path == "/api/agent/v1/notifications/send":
+            req_summary = {"notification_content": "<omitted>"}
+        elif request.is_json:
             try:
                 req_summary["json"] = _redact(request.get_json(silent=True) or {})
             except Exception:

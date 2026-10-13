@@ -60,7 +60,7 @@
           "name":                 { "type": "string" },
           "token":                { "type": "string", "description": "Full token; shown ONCE — store securely" },
           "token_prefix":         { "type": "string" },
-          "scopes":               { "type": "array", "items": { "type": "string", "enum": ["R","W","B","N","C","T"] } },
+          "scopes":               { "type": "array", "items": { "type": "string", "enum": ["R","W","B","N","C","T","NS"] } },
           "markets":              { "type": "array", "items": { "type": "string" } },
           "instruments":          { "type": "array", "items": { "type": "string" } },
           "paper_only":           { "type": "boolean" },
@@ -199,6 +199,113 @@
   },
   "security": [{ "AgentToken": [] }],
   "paths": {
+  "/api/agent/v1/notifications/send": {
+    "post": {
+      "summary": "Send a notification through the saved user Webhook",
+      "operationId": "sendNotification",
+      "x-scope-class": "NS",
+      "description": "Send-only permission. N does not grant this endpoint. User-scoped optional idempotency_key has a 24-hour TTL; duplicate denotes a previous reservation, not confirmed delivery. Maximum 10 new attempts per user per rolling minute. No caller-selected destination or headers.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "title",
+                "message"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "message": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 8000
+                },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warning",
+                    "critical"
+                  ],
+                  "default": "info"
+                },
+                "idempotency_key": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 120,
+                  "nullable": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Delivered or duplicate",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "integer"
+                  },
+                  "message": {
+                    "type": "string"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "status": {
+                        "type": "string",
+                        "enum": [
+                          "delivered",
+                          "duplicate",
+                          "failed"
+                        ]
+                      },
+                      "diagnostic": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "description": "Malformed input"
+        },
+        "401": {
+          "description": "Unauthenticated"
+        },
+        "403": {
+          "description": "Missing NS permission"
+        },
+        "409": {
+          "description": "Missing configuration or key conflict"
+        },
+        "429": {
+          "description": "Rate limit exceeded"
+        },
+        "502": {
+          "description": "Webhook failed or outcome unknown"
+        },
+        "503": {
+          "description": "Notification storage unavailable"
+        }
+      }
+    }
+  },
     "/api/agent/v1/health": {
       "get": {
         "summary": "Public liveness (no token required)",

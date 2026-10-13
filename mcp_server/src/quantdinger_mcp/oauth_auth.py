@@ -30,7 +30,8 @@ from mcp.types import CallToolResult, TextContent
 READ_SCOPE = "quantdinger.read"
 WRITE_SCOPE = "quantdinger.write"
 TRADE_SCOPE = "quantdinger.trade"
-STATIC_SCOPES = ("mcp", READ_SCOPE, WRITE_SCOPE, TRADE_SCOPE)
+NOTIFY_SCOPE = "quantdinger.notify"
+STATIC_SCOPES = ("mcp", READ_SCOPE, WRITE_SCOPE, TRADE_SCOPE, NOTIFY_SCOPE)
 TRADE_TOOLS = frozenset(
     {
         "stop_strategy",
@@ -113,20 +114,10 @@ class OAuthJWTVerifier:
         )
 
     def _verify_sync(self, token: str) -> AccessToken | None:
-        print(
-            "[quantdinger-mcp] _verify_sync entered",
-            file=sys.stderr,
-            flush=True,
-        )
 
         try:
             signing_key = self._jwks.get_signing_key_from_jwt(token)
 
-            print(
-                f"[quantdinger-mcp] signing key obtained kid={signing_key.key_id!r}",
-                file=sys.stderr,
-                flush=True,
-            )
             claims = jwt.decode(
                 token,
                 signing_key.key,
@@ -135,37 +126,11 @@ class OAuthJWTVerifier:
                 issuer=self.config.issuer,
                 options={"require": ["exp", "iat", "sub"]},
             )
-        except (PyJWTError, PyJWKClientError, KeyError, TypeError, ValueError) as exc:
-            print(
-                "[quantdinger-mcp] JWT VERIFICATION FAILED:",
-                type(exc).__name__,
-                repr(exc),
-                file=sys.stderr,
-                flush=True,
-            )
+        except (PyJWTError, PyJWKClientError, KeyError, TypeError, ValueError):
             return None
-
-        print(
-            "[quantdinger-mcp] OAuth token claims:",
-            {
-                "iss": claims.get("iss"),
-                "aud": claims.get("aud"),
-                "sub": claims.get("sub"),
-                "scope": claims.get("scope"),
-                "scp": claims.get("scp"),
-                "permissions": claims.get("permissions"),
-                "azp": claims.get("azp"),
-            },
-            file=sys.stderr,
-        )
 
         subject = str(claims.get("sub") or "").strip()
         if not subject or not secrets.compare_digest(subject, self.config.allowed_subject):
-            print(
-                f"[quantdinger-mcp] SUBJECT REJECTED: "
-                f"actual={subject!r}, expected={self.config.allowed_subject!r}",
-                file=sys.stderr,
-            )
             return None
         scopes = _normalize_scopes(claims.get("scope") or claims.get("scp"))
         # if READ_SCOPE not in scopes:
@@ -196,7 +161,6 @@ class HybridTokenVerifier:
         self.oauth = oauth
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        print(f"[quantdinger-mcp] Verifying hybrid token: {token!r}")
         if secrets.compare_digest(token, self.static_token):
             return AccessToken(
                 token=token,
@@ -210,7 +174,6 @@ class HybridTokenVerifier:
 def build_hybrid_http_auth(
     *, static_token: str, primary_agent_token: str
 ) -> tuple[AuthSettings, HybridTokenVerifier] | None:
-    print("build_hybrid_http_auth")
     if not hybrid_auth_enabled():
         return None
     config = _config(static_token, primary_agent_token)
@@ -239,6 +202,8 @@ def apply_oauth_upstream_token(
 
 
 def required_scope_for_tool(name: str, write_tools: Mapping[str, bool]) -> str:
+    if name == "send_notification":
+        return NOTIFY_SCOPE
     if name in TRADE_TOOLS:
         return TRADE_SCOPE
     if name in write_tools:

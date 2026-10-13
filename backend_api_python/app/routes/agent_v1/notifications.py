@@ -4,7 +4,7 @@ from __future__ import annotations
 from flask import request
 
 from app.services.indicator_signal_alerts import IndicatorSignalAlertService
-from app.utils.agent_auth import SCOPE_N, agent_required, current_user_id
+from app.utils.agent_auth import SCOPE_N, SCOPE_NS, agent_required, current_user_id
 
 from . import agent_v1_bp
 from ._helpers import clip_int, envelope, error, get_json_or_400
@@ -87,3 +87,19 @@ def run_signal_alert(task_id: int):
     if not _owned_task(task_id):
         return error(404, "Task not found", http=404)
     return envelope(_alerts.evaluate_task(task_id), message="evaluated")
+
+
+@agent_v1_bp.route("/notifications/send", methods=["POST"])
+@agent_required(SCOPE_NS)
+def send_notification():
+    from app.services.agent_notifications import send_notification as deliver, validate_notification
+
+    body, err = get_json_or_400()
+    if err:
+        return err
+    try:
+        payload = validate_notification(body)
+    except ValueError as exc:
+        return error(400, str(exc), http=400)
+    result, status = deliver(current_user_id(), payload)
+    return envelope(result, code=0 if status == 200 else status, status=status)

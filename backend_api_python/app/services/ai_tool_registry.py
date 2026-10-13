@@ -625,6 +625,7 @@ MCP_AGENT_TOOLS: tuple[ToolDefinition, ...] = (
 
 
 _MCP_EXTENSION_ROUTES = {
+    "send_notification": "/api/agent/v1/notifications/send",
     "emergency_stop_trading": "/api/agent/v1/quick-trade/kill-switch",
     "cancel_job": "/api/agent/v1/jobs/{job_id}/cancel",
     "link_indicator_config": "/api/agent/v1/indicators/link-config",
@@ -661,6 +662,7 @@ _MCP_EXTENSION_WRITES = {
     "set_signal_alert_status",
     "delete_signal_alert",
     "run_signal_alert",
+    "send_notification",
 }
 MCP_AGENT_TOOLS = MCP_AGENT_TOOLS + tuple(
     ToolDefinition(
@@ -671,7 +673,7 @@ MCP_AGENT_TOOLS = MCP_AGENT_TOOLS + tuple(
                 "list_factors", "get_factor", "list_watchlist", "add_watchlist",
                 "remove_watchlist",
             }
-            else "notifications" if "signal_alert" in name
+            else "notifications" if "signal_alert" in name or name == "send_notification"
             else "jobs" if name == "cancel_job"
             else "indicator" if name == "link_indicator_config"
             else "trading"
@@ -686,6 +688,8 @@ MCP_AGENT_TOOLS = MCP_AGENT_TOOLS + tuple(
         read_only=name not in _MCP_EXTENSION_WRITES,
         priority=80,
         safety=(
+            "Requires NS; optional user-scoped idempotency key. Uses only the saved Webhook."
+            if name == "send_notification" else
             "Mutating calls require an Idempotency-Key; destructive or delivery actions also require explicit confirmation."
             if name in _MCP_EXTENSION_WRITES
             else ""
