@@ -846,10 +846,10 @@ class SignalNotifier:
             logger.warning("webhook.timeout dialect=%s", dialect)
             return False, "timeout"
         except requests.exceptions.ConnectionError as e:
-            logger.warning("webhook.connection_error dialect=%s err=%s", dialect, str(e)[:200])
+            logger.warning("webhook.connection_error dialect=%s", dialect)
             return False, f"connection_error:{_shorten(str(e), 200)}"
         except Exception as e:
-            logger.exception("webhook.error dialect=%s", dialect)
+            logger.warning("webhook.error dialect=%s error_type=%s", dialect, type(e).__name__)
             return False, str(e)
 
     def _notify_discord(self, *, url: str, payload: Dict[str, Any], fallback_text: str) -> Tuple[bool, str]:

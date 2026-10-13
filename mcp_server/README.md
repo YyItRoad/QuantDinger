@@ -113,3 +113,14 @@ docker compose --profile mcp up -d --build mcp
 pip install -e './mcp_server[dev]'
 pytest mcp_server/tests
 ```
+
+## Notifications
+
+`send_notification(title, message, idempotency_key, level="info")` uses existing
+Agent scope `N` and hybrid OAuth `quantdinger.write`, like the alert tools.
+The key is required and forwarded as `Idempotency-Key`; the Agent Gateway
+replays the original response for retries. Only the saved, enabled user Webhook
+is used, with the existing sender's timeout and retry behavior. No notification
+schema migration or additional permission is needed. See
+[configuration and testing](../docs/agent/MCP_NOTIFICATIONS.md) and
+[中文说明](../docs/agent/MCP_NOTIFICATIONS_CN.md).

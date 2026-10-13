@@ -17,6 +17,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 
 from . import __version__
+from .notifications import register_notification_tools
 from .oauth_auth import apply_oauth_upstream_token, build_hybrid_http_auth
 from .tool_contract import register_tool
 from .security import (
@@ -89,6 +90,7 @@ MCP_TOOL_NAMES = (
     "set_signal_alert_status",
     "delete_signal_alert",
     "run_signal_alert",
+    "send_notification",
 )
 
 
@@ -1019,6 +1021,9 @@ def list_agent_quick_trades(limit: int = 50, cursor: int = 0) -> Any:
 
 
 # Notification automation
+
+
+send_notification = register_notification_tools(sys.modules[__name__])
 
 
 @_tool

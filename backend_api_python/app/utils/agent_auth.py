@@ -445,7 +445,9 @@ def _audit(scope_class: str, status_code: int, response_summary: Any, duration_m
         req_summary: dict[str, Any] = {
             "args": _redact(dict(request.args)),
         }
-        if request.is_json:
+        if request.path == "/api/agent/v1/notifications/send":
+            req_summary = {"notification_content": "<omitted>"}
+        elif request.is_json:
             try:
                 req_summary["json"] = _redact(request.get_json(silent=True) or {})
             except Exception:
