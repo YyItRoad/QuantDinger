@@ -1,84 +1,41 @@
-name: Approved MCP production notification smoke test
-
+name: MCP runtime configuration check
 on:
   workflow_dispatch:
-    inputs:
-      confirm_send:
-        description: "Send one approved test notification, then replay the same request"
-        required: true
-        default: false
-        type: boolean
-
 permissions:
   contents: read
-
 jobs:
-  smoke-test:
-    if: inputs.confirm_send
+  check:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 3
     steps:
-      - name: Verify live tool and one approved notification
+      - name: Check runtime credentials without exposing values
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
-          command_timeout: 3m
+          command_timeout: 1m
           script: |
             set -eu
+            python3 - <<'PY'
+            import hashlib,json,subprocess
+            from pathlib import Path
+            names=['QUANTDINGER_AGENT_TOKEN','QUANTDINGER_MCP_OAUTH_AGENT_TOKEN','QUANTDINGER_MCP_AUTH_TOKEN']
+            values={}
+            for line in Path('/opt/quantdinger/mcp.env').read_text().splitlines():
+                if '=' in line and not line.lstrip().startswith('#'):
+                    key,value=line.split('=',1)
+                    values[key.strip()]=value.strip().strip('"').strip("'")
+            code='import hashlib,json,os;names='+repr(names)+';print(json.dumps({k:hashlib.sha256(os.environ.get(k, "").encode()).hexdigest() for k in names}))'
+            hashes=json.loads(subprocess.check_output(['docker','exec','quantdinger-mcp','python','-c',code],text=True))
+            print('TOKEN_FILE_MATCH',json.dumps({k:hashlib.sha256(values.get(k,'').encode()).hexdigest()==hashes[k] for k in names}),flush=True)
+            PY
             docker exec -i quantdinger-mcp python - <<'PY'
-            import asyncio
-            import json
-            import os
-            import httpx
-            from mcp import ClientSession
-            from mcp.client.streamable_http import streamablehttp_client
-
-            async def check():
-                base = os.environ['QUANTDINGER_BASE_URL'].rstrip('/')
-                primary = os.environ['QUANTDINGER_AGENT_TOKEN']
-                headers = {'Authorization': 'Bearer ' + os.environ['QUANTDINGER_MCP_AUTH_TOKEN']}
-                payload = {'title': 'QuantDinger MCP 上线测试', 'message': '这是一条经确认的上线测试通知，用于验证发送与同键去重，无需交易操作。', 'level': 'info'}
-                key = 'mcp-smoke-' + '20261013' + '-2f2c31d'
-                with httpx.Client(base_url=base, timeout=60) as api:
-                    identity = api.get('/api/agent/v1/whoami', headers={'Authorization': 'Bearer ' + primary})
-                    print('PRIMARY_TOKEN_STATUS', identity.status_code, flush=True)
-                    scopes = (identity.json().get('data') or {}).get('scopes', []) if identity.status_code == 200 else []
-                    async with streamablehttp_client('https://trade.yangyang.fun/mcp', headers=headers) as (reader, writer, _):
-                        async with ClientSession(reader, writer) as session:
-                            await session.initialize()
-                            tools = await session.list_tools()
-                            tool = next(t for t in tools.tools if t.name == 'send_notification')
-                            print('DISCOVERY', json.dumps({'tool': tool.name, 'required': tool.inputSchema.get('required'), 'meta': tool.meta}), flush=True)
-                            invalid = await session.call_tool('send_notification', {'title': '', 'message': 'validation only', 'idempotency_key': 'validation-only'})
-                            assert invalid.isError, 'Empty title should be rejected before delivery'
-                            print('INVALID_INPUT_REJECTED', True, flush=True)
-                            if 'N' in scopes:
-                                result = await session.call_tool('send_notification', {**payload, 'idempotency_key': key})
-                                print('MCP_RESULT', result.content[0].text, flush=True)
-                                assert not result.isError, 'MCP delivery failed; do not retry with a new key'
-                                first = json.loads(result.content[0].text)
-                                token = primary
-                                mode = 'public_mcp'
-                            else:
-                                token = os.environ['QUANTDINGER_MCP_OAUTH_AGENT_TOKEN']
-                                identity = api.get('/api/agent/v1/whoami', headers={'Authorization': 'Bearer ' + token})
-                                identity.raise_for_status()
-                                assert 'N' in identity.json()['data']['scopes']
-                                response = api.post('/api/agent/v1/notifications/send', headers={'Authorization': 'Bearer ' + token, 'Idempotency-Key': key}, json=payload)
-                                print('FIRST_HTTP_STATUS', response.status_code, flush=True)
-                                response.raise_for_status()
-                                first = response.json()['data']
-                                mode = 'oauth_agent_gateway'
-                            print('FIRST_RESULT', json.dumps({'mode': mode, **first}), flush=True)
-                            assert first['status'] == 'delivered'
-                            replay = api.post('/api/agent/v1/notifications/send', headers={'Authorization': 'Bearer ' + token, 'Idempotency-Key': key}, json=payload)
-                            replay.raise_for_status()
-                            assert replay.json()['data'] == first
-                            assert replay.headers.get('Idempotent-Replayed') == 'true'
-                            print('REPLAY_PROOF', json.dumps({'http_status': replay.status_code, 'idempotent_replayed': replay.headers.get('Idempotent-Replayed'), 'result': replay.json()['data']}), flush=True)
-                            print('SMOKE_TEST_PASSED', flush=True)
-            asyncio.run(check())
+            import json,os,httpx
+            with httpx.Client(base_url=os.environ['QUANTDINGER_BASE_URL'],timeout=10) as client:
+                for name in ['QUANTDINGER_AGENT_TOKEN','QUANTDINGER_MCP_OAUTH_AGENT_TOKEN']:
+                    response=client.get('/api/agent/v1/whoami',headers={'Authorization':'Bearer '+os.environ[name]})
+                    data=(response.json().get('data') or {})
+                    print('TOKEN_STATUS',json.dumps({'name':name,'http':response.status_code,'agent_name':data.get('agent_name'),'scopes':data.get('scopes')}),flush=True)
             PY
