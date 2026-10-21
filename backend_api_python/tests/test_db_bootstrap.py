@@ -298,6 +298,10 @@ def test_bootstrap_applies_execution_accounting_after_schema(monkeypatch):
     assert names[7] == "quick-trade-client-order-id-20260926"
     assert names[8] == "signal-virtual-account-20260926"
     assert names[9] == "signal-virtual-limit-orders-20260926"
+    assert names[-1] == "position-management-history-ext-20261021"
+    ext_sql = calls[-1]["path"].read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS ext JSONB" in ext_sql
+    assert "UPDATE " not in ext_sql
     assert "qd_exchange_order_pnl" in calls[2]["path"].read_text(encoding="utf-8")
     assert "billing_json" in calls[3]["path"].read_text(encoding="utf-8")
     assert "qd_market_state_tasks" in calls[4]["path"].read_text(encoding="utf-8")

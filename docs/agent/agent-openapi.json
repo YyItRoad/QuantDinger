@@ -94,6 +94,20 @@
           "funding_fee_ccy": {"type": "string", "nullable": true},
           "entry_reason": {"type": "string", "nullable": true},
           "exit_reason": {"type": "string", "nullable": true},
+          "ext": {
+            "type": "object",
+            "description": "Extensible public archive snapshot. Empty when no reliable run snapshot is available; never contains account credentials.",
+            "additionalProperties": true,
+            "properties": {
+              "schema_version": {"type": "integer", "enum": [1]},
+              "snapshot_source": {"type": "string", "enum": ["strategy_run"]},
+              "params": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {"fixed_stop_price": {"type": "number", "exclusiveMinimum": true, "minimum": 0}}
+              }
+            }
+          },
           "archived_at": {"type": "string", "format": "date-time", "nullable": true}
         }
       },

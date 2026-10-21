@@ -25,9 +25,11 @@ def reader(monkeypatch):
     }.items():
         monkeypatch.setattr(agent_auth, name, fn)
     listing = Mock(return_value={'items': [{'id': 11, 'credential_id': 2, 'entry_reason': 'saved',
+                                            'ext': {'params': {'fixed_stop_price': 120.5}},
                                             'user_id': 7, 'encrypted_config': 'hidden'}],
                                  'total': 1, 'page': 1, 'page_size': 20})
     detail = Mock(return_value={'id': 11, 'credential_id': 2, 'fee_status': 'pending',
+                                'ext': {'params': {'fixed_stop_price': 120.5}},
                                 'exit_reason': 'saved', 'user_id': 7, 'new_private_field': 'hidden'})
     monkeypatch.setattr(history, 'list_position_management_trade_history', listing)
     monkeypatch.setattr(history, 'get_position_management_trade_history', detail)
@@ -48,9 +50,11 @@ def test_account_list_and_detail_use_identity_and_public_fields(archive_client, 
         symbol='BTC/USDT', market_type='swap', position_side='long', source_strategy_id=5,
         start_time='2026-10-01T00:00:00Z')
     assert r.json['data']['items'][0]['entry_reason'] == 'saved'
+    assert r.json['data']['items'][0]['ext']['params']['fixed_stop_price'] == 120.5
     assert 'hidden' not in r.text and 'user_id' not in r.text
     r = archive_client.get(BASE+'/11?credential_id=2', headers=HEADERS)
     assert r.status_code == 200 and r.json['data']['fee_status'] == 'pending'
+    assert r.json['data']['ext']['params']['fixed_stop_price'] == 120.5
     reader[2].assert_called_once_with(user_id=7, credential_id=2, history_id=11)
     assert 'hidden' not in r.text and 'user_id' not in r.text
     assert reader[3].call_count == 2
@@ -115,7 +119,10 @@ def test_mcp_through_http_gateway(archive_client, reader, monkeypatch):
         for tool, args in [('list_position_management_trade_history', {'credential_id': 2}),
                            ('get_position_management_trade_history', {'credential_id': 2, 'history_id': 11})]:
             result = asyncio.run(server.mcp.call_tool(tool, args))
-            assert 'hidden' not in result[0].text and json.loads(result[0].text)
+            assert 'hidden' not in result[0].text
+            payload = json.loads(result[0].text)
+            row = payload['items'][0] if tool.startswith('list_') else payload
+            assert row['ext']['params']['fixed_stop_price'] == 120.5
         reader[2].return_value = None
         denied = asyncio.run(server.mcp.call_tool('get_position_management_trade_history',
                              {'credential_id': 99, 'history_id': 11}))

@@ -241,6 +241,8 @@ def test_position_management_history_contract_is_account_scoped_and_read_only():
     assert set(fields) == ({'id', 'archived_at', *HISTORY_COLUMNS} - {'user_id'})
     assert fields['entry_time']['format'] == 'date-time'
     assert 'fee_status' in fields and 'entry_reason' in fields and 'exit_reason' in fields
+    assert fields['ext']['type'] == 'object'
+    assert fields['ext']['properties']['params']['properties']['fixed_stop_price']['type'] == 'number'
     names = {'list_position_management_trade_history', 'get_position_management_trade_history'}
     metadata = {tool.id.removeprefix('mcp.'): tool for tool in MCP_AGENT_TOOLS}
     assert all(metadata[name].read_only for name in names)

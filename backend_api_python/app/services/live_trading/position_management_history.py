@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.pnl import calc_pnl_percent
+from .position_management_history_ext import history_ext_from_run
 
 
 class PositionManagementHistorySyncError(ValueError):
@@ -78,6 +79,7 @@ HISTORY_COLUMNS = (
     "funding_fee_ccy",
     "entry_reason",
     "exit_reason",
+    "ext",
 )
 
 
@@ -338,6 +340,7 @@ def _history_row(
         "funding_fee_ccy": str(funding_currency or ""),
         "entry_reason": str(row.get("entry_reason") or ""),
         "exit_reason": str(row.get("exit_reason") or ""),
+        "ext": history_ext_from_run(row.get("parameter_snapshot_json"), row.get("trade_strategy_run_id")),
     }
 
 
@@ -350,7 +353,8 @@ def _insert_history_rows(cur: Any, rows: Iterable[Dict[str, Any]]) -> None:
         "ON CONFLICT (source_trade_id) DO NOTHING"
     )
     for row in rows:
-        cur.execute(sql, tuple(row[column] for column in HISTORY_COLUMNS))
+        cur.execute(sql, tuple(json.dumps(row[column]) if column == "ext" else row[column]
+                               for column in HISTORY_COLUMNS))
 
 
 def sync_position_management_trade_history(
@@ -453,6 +457,7 @@ def sync_position_management_trade_history(
                        r.started_at AS strategy_started_at,
                        r.stopped_at AS strategy_stopped_at,
                        r.stop_reason AS strategy_stop_reason,
+                       r.parameter_snapshot_json,
                        s.trading_config -> 'position_management' ->> 'entry_reason' AS entry_reason,
                        NULLIF(po.payload_json, '')::jsonb ->> 'exit_reason' AS exit_reason,
                        po.exchange_id AS order_exchange_id,
@@ -472,6 +477,8 @@ def sync_position_management_trade_history(
                 JOIN qd_strategies_trading s ON s.id = t.strategy_id
                 LEFT JOIN pending_orders po ON po.id = t.pending_order_id
                 LEFT JOIN strategy_runs r ON r.id = t.strategy_run_id
+                  AND r.strategy_id = t.strategy_id AND r.user_id = t.user_id
+                  AND r.credential_id = t.credential_id AND r.market_type = t.market_type
                 LEFT JOIN qd_exchange_credentials ec
                   ON ec.id = CASE WHEN COALESCE(t.credential_id, 0) > 0
                                   THEN t.credential_id ELSE po.credential_id END

@@ -3286,6 +3286,9 @@ CREATE INDEX IF NOT EXISTS idx_exchange_pnl_checked ON qd_exchange_order_pnl(cre
 -- 持仓管理沿用现有成交历史，仅增加两个个人原因字段。
 ALTER TABLE qd_position_management_trade_history ADD COLUMN IF NOT EXISTS entry_reason TEXT NOT NULL DEFAULT '';
 ALTER TABLE qd_position_management_trade_history ADD COLUMN IF NOT EXISTS exit_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE qd_position_management_trade_history
+    ADD COLUMN IF NOT EXISTS ext JSONB NOT NULL DEFAULT '{}'::jsonb
+    CHECK (jsonb_typeof(ext) = 'object');
 
 -- Keep strategy deletion atomic even when a caller bypasses the application service.
 CREATE OR REPLACE FUNCTION qd_cleanup_deleted_strategy()

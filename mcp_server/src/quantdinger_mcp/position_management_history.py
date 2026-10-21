@@ -26,6 +26,7 @@ def register_position_management_history_tools(server):
         timezone, filter exit_time, include start_time and exclude end_time.
         entry_time reflects strategy creation, not necessarily the entry fill.
         Fee status must be checked before treating missing fees as zero.
+        ext.params.fixed_stop_price is the saved run setting when available.
         """
         params = {"credential_id": credential_id, "page": page, "page_size": page_size}
         for key, value in (("symbol", symbol), ("market_type", market_type),
@@ -41,6 +42,7 @@ def register_position_management_history_tools(server):
         """Read an archived fill by account and history id (scope R).
 
         Includes saved entry/exit reasons, fee status and order references.
+        ext holds public configuration snapshots; absent settings are unknown.
         Deleted source strategies/accounts do not invalidate owned archives.
         This read neither synchronizes trades nor edits reasons. entry_time is
         strategy creation time; profit_rate is a percentage using existing

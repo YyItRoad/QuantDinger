@@ -351,6 +351,12 @@ def _apply_init_sql(logger, *, strict: bool = False):
                 baseline_table="qd_script_templates",
                 baseline_min_rows=1,
             )
+            _apply_migration_component(
+                conn,
+                logger,
+                name="position-management-history-ext-20261021",
+                path=init_sql.parent / "20261021_position_management_history_ext.sql",
+            )
         logger.info("Database bootstrap components are current")
         _migration_progress("all components complete")
     except Exception as exc:
