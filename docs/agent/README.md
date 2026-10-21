@@ -14,3 +14,5 @@ This folder holds **agent-facing** material for coding assistants (Cursor, Claud
 **Language policy:** Machine-readable schemas, route names, scopes, environment variables, and tool identifiers remain in English as the canonical contract. Human setup guides are maintained in paired editions: [中文入口](README_CN.md) and this English entry.
 
 Repository-level coding-agent instructions live in [`AGENTS.md`](../../AGENTS.md). Tool-specific entrypoints should load that file instead of duplicating repository rules under this documentation directory.
+
+[持仓管理交易历史 MCP 使用与数据口径](持仓管理交易历史_MCP.md)

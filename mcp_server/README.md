@@ -49,6 +49,7 @@ Never place an agent token in prompts, logs, screenshots, source control, or MCP
 | `list_jobs`, `get_job`, `wait_for_job`, `stream_job_until_done`, `cancel_job` | R/B | Bounded jobs and confirmed cancellation |
 | `runtime_overview`, `stop_strategy` | R/T | Runtime inspection and confirmed stop |
 | Broker account, strategy position/trade, and quick-trade observation tools | R | Secret-free execution observations |
+| `list_position_management_trade_history`, `get_position_management_trade_history` | R | 按账户读取持仓管理归档列表与详情；[使用说明](../docs/agent/持仓管理交易历史_MCP.md) |
 | Signal-alert tools | N | Notification task lifecycle and confirmed delivery evaluation |
 | `place_quick_order` | T | Confirmed order with token notional caps |
 | `list_portfolio_positions`, `list_paper_orders` | R | Portfolio and paper-order reads |

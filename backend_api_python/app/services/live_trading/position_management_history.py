@@ -102,12 +102,66 @@ def _public_history_row(row: Dict[str, Any]) -> Dict[str, Any]:
     return {key: _history_json_value(value) for key, value in dict(row).items()}
 
 
+def _history_filters(*, symbol=None, market_type=None, position_side=None,
+                     source_strategy_id=None, start_time=None, end_time=None):
+    """Build parameterized archive filters shared by Human and Agent reads."""
+    clauses, values = [], []
+    for column, value in (("symbol_canonical", symbol), ("market_type", market_type),
+                          ("position_side", position_side),
+                          ("source_strategy_id", source_strategy_id)):
+        if value is not None:
+            clauses.append(f" AND {column} = %s")
+            values.append(value)
+    bounds = []
+    for name, value, operator in (("start_time", start_time, ">="), ("end_time", end_time, "<")):
+        normalized = None
+        if value is not None:
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    raise ValueError()
+                normalized = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            except (ValueError, TypeError, AttributeError, OverflowError):
+                raise ValueError(f"{name} must be an ISO 8601 timestamp with timezone") from None
+            clauses.append(f" AND exit_time {operator} %s")
+            values.append(normalized)
+        bounds.append(normalized)
+    if all(value is not None for value in bounds) and bounds[0] >= bounds[1]:
+        raise ValueError("start_time must be before end_time")
+    return "".join(clauses), tuple(values)
+
+
+def get_position_management_trade_history(*, user_id: int, credential_id: int,
+                                          history_id: int) -> Dict[str, Any] | None:
+    """Read an owned account archive without depending on its source objects."""
+    if min(user_id, credential_id, history_id) <= 0:
+        raise ValueError("user_id, credential_id and history_id must be positive")
+    with get_db_connection() as db:
+        cur = db.cursor()
+        try:
+            cur.execute(
+                """SELECT * FROM qd_position_management_trade_history
+                   WHERE user_id = %s AND credential_id = %s AND id = %s""",
+                (user_id, credential_id, history_id),
+            )
+            row = cur.fetchone()
+            return _public_history_row(row) if row else None
+        finally:
+            cur.close()
+
+
 def list_position_management_trade_history(
     *,
     user_id: int,
     credential_id: int,
     page: int = 1,
     page_size: int = 20,
+    symbol: str | None = None,
+    market_type: str | None = None,
+    position_side: str | None = None,
+    source_strategy_id: int | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
 ) -> Dict[str, Any]:
     """Return one exchange account's archived trades using server pagination."""
     uid = int(user_id or 0)
@@ -119,28 +173,32 @@ def list_position_management_trade_history(
     if cid <= 0:
         raise PositionManagementHistorySyncError("credential_id 必须大于 0")
 
+    filter_sql, filter_values = _history_filters(
+        symbol=symbol, market_type=market_type, position_side=position_side,
+        source_strategy_id=source_strategy_id, start_time=start_time, end_time=end_time,
+    )
     offset = (current_page - 1) * per_page
     with get_db_connection() as db:
         cur = db.cursor()
         try:
             cur.execute(
-                """
+                f"""
                 SELECT COUNT(*) AS total
                 FROM qd_position_management_trade_history
-                WHERE user_id = %s AND credential_id = %s
+                WHERE user_id = %s AND credential_id = %s{filter_sql}
                 """,
-                (uid, cid),
+                (uid, cid, *filter_values),
             )
             total = int((cur.fetchone() or {}).get("total") or 0)
             cur.execute(
-                """
+                f"""
                 SELECT *
                 FROM qd_position_management_trade_history
-                WHERE user_id = %s AND credential_id = %s
+                WHERE user_id = %s AND credential_id = %s{filter_sql}
                 ORDER BY exit_time DESC NULLS LAST, id DESC
                 LIMIT %s OFFSET %s
                 """,
-                (uid, cid, per_page, offset),
+                (uid, cid, *filter_values, per_page, offset),
             )
             items = [_public_history_row(row) for row in (cur.fetchall() or [])]
             return {

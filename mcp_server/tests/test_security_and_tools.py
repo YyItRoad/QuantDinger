@@ -30,7 +30,7 @@ def fresh_module(monkeypatch):
 
 
 def test_mcp_tool_registry_complete(fresh_module):
-    assert len(fresh_module.MCP_TOOL_NAMES) == 59
+    assert len(fresh_module.MCP_TOOL_NAMES) == 61
     # Every exported name should correspond to a registered @mcp.tool function.
     for name in fresh_module.MCP_TOOL_NAMES:
         assert hasattr(fresh_module, name), f"missing tool function: {name}"
@@ -360,3 +360,41 @@ def test_redaction_handles_camel_case_and_deep_values():
     assert redact_secrets({"clientSecret": "hidden"})["clientSecret"] == "***"
     deep = {"a": {"b": {"c": {"d": {"e": {"f": {"g": {"value": "hidden"}}}}}}}}
     assert "hidden" not in repr(redact_secrets(deep))
+
+
+def test_position_management_history_transports_account_and_filters(fresh_module, monkeypatch):
+    from quantdinger_mcp.oauth_auth import required_scope_for_tool
+    from quantdinger_mcp.tool_contract import WRITE_TOOLS
+    from unittest.mock import Mock
+    get = Mock(return_value={'items': [], 'total': 0})
+    monkeypatch.setattr(fresh_module, '_get', get)
+    params = {'credential_id': 2, 'symbol': 'BTC/USDT', 'market_type': 'swap', 'position_side': 'long',
+        'source_strategy_id': 5, 'start_time': '2026-10-01T00:00:00Z',
+        'end_time': '2026-10-02T00:00:00Z', 'page': 2, 'page_size': 10}
+    result = asyncio.run(fresh_module.mcp.call_tool('list_position_management_trade_history', params))
+    get.assert_called_once_with('/api/agent/v1/trading/position-management/trade-history', params=params)
+    assert json.loads(result[0].text)['total'] == 0
+    asyncio.run(fresh_module.mcp.call_tool('get_position_management_trade_history', {'credential_id': 2, 'history_id': 11}))
+    assert get.call_args.args == ('/api/agent/v1/trading/position-management/trade-history/11',)
+    assert get.call_args.kwargs == {'params': {'credential_id': 2}}
+    for name in ('list_position_management_trade_history', 'get_position_management_trade_history'):
+        assert required_scope_for_tool(name, WRITE_TOOLS) == 'quantdinger.read'
+
+
+@pytest.mark.parametrize('tool,args', [
+    ('list_position_management_trade_history', {}),
+    ('list_position_management_trade_history', {'credential_id': 0}),
+    ('list_position_management_trade_history', {'credential_id': True}),
+    ('list_position_management_trade_history', {'credential_id': 2, 'page_size': 101}),
+    ('list_position_management_trade_history', {'credential_id': 2, 'position_side': 'both'}),
+    ('get_position_management_trade_history', {'credential_id': 2}),
+    ('get_position_management_trade_history', {'credential_id': 2, 'history_id': -1}),
+])
+def test_archive_tool_schema_rejects_bad_input(fresh_module, monkeypatch, tool, args):
+    from unittest.mock import Mock
+    get = Mock()
+    monkeypatch.setattr(fresh_module, '_get', get)
+    from mcp.server.fastmcp.exceptions import ToolError
+    with pytest.raises(ToolError, match='validation error'):
+        asyncio.run(fresh_module.mcp.call_tool(tool, args))
+    get.assert_not_called()

@@ -30,3 +30,5 @@
 - Human Web API 另见 [Web API 文档](../api/README_CN.md)，不要混用人类 JWT 与 Agent Token。
 
 仓库级编码 Agent 指令统一维护在根目录的 [`AGENTS.md`](../../AGENTS.md)。各工具的入口文件只负责加载这份规则，不在本目录重复维护。
+
+[持仓管理交易历史 MCP 使用与数据口径](持仓管理交易历史_MCP.md)

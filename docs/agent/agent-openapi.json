@@ -22,6 +22,91 @@
       }
     },
     "schemas": {
+      "PositionManagementTradeHistory": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {"type": "integer", "format": "int64", "nullable": true},
+          "source_trade_id": {"type": "integer", "format": "int64", "nullable": true},
+          "source_strategy_id": {"type": "integer", "format": "int64", "nullable": true},
+          "strategy_name": {"type": "string", "nullable": true},
+          "strategy_type": {"type": "string", "nullable": true},
+          "market_category": {"type": "string", "nullable": true},
+          "execution_mode": {"type": "string", "nullable": true},
+          "strategy_status": {"type": "string", "nullable": true},
+          "timeframe": {"type": "string", "nullable": true},
+          "leverage": {"type": "number", "nullable": true},
+          "entry_time": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Strategy creation time, not necessarily an exchange entry fill timestamp."
+          },
+          "strategy_run_id": {"type": "integer", "format": "int64", "nullable": true},
+          "strategy_started_at": {"type": "string", "format": "date-time", "nullable": true},
+          "strategy_stopped_at": {"type": "string", "format": "date-time", "nullable": true},
+          "strategy_stop_reason": {"type": "string", "nullable": true},
+          "exchange_id": {"type": "string", "nullable": true},
+          "credential_id": {"type": "integer", "format": "int64", "nullable": true},
+          "exchange_account_name": {"type": "string", "nullable": true},
+          "market_type": {"type": "string", "nullable": true},
+          "inst_id": {"type": "string", "nullable": true},
+          "settlement_ccy": {"type": "string", "nullable": true},
+          "pending_order_id": {"type": "integer", "format": "int64", "nullable": true},
+          "order_intent_id": {"type": "integer", "format": "int64", "nullable": true},
+          "order_type": {"type": "string", "nullable": true},
+          "order_status": {"type": "string", "nullable": true},
+          "requested_amount": {"type": "number", "nullable": true},
+          "filled_amount": {"type": "number", "nullable": true},
+          "exchange_order_id": {"type": "string", "nullable": true},
+          "client_order_id": {"type": "string", "nullable": true},
+          "signal_at": {"type": "string", "format": "date-time", "nullable": true},
+          "order_created_at": {"type": "string", "format": "date-time", "nullable": true},
+          "order_sent_at": {"type": "string", "format": "date-time", "nullable": true},
+          "exit_time": {"type": "string", "format": "date-time", "nullable": true},
+          "symbol": {"type": "string", "nullable": true},
+          "symbol_canonical": {"type": "string", "nullable": true},
+          "trade_type": {"type": "string", "nullable": true},
+          "position_side": {"type": "string", "nullable": true},
+          "entry_price": {"type": "number", "nullable": true},
+          "exit_price": {"type": "number", "nullable": true},
+          "trade_value": {"type": "number", "nullable": true},
+          "profit_rate": {
+            "type": "number",
+            "nullable": true,
+            "description": "Percentage using the existing PnL and leverage semantics; not guaranteed net of all fees."
+          },
+          "profit": {"type": "number", "nullable": true},
+          "profit_ccy": {"type": "string", "nullable": true},
+          "close_reason": {"type": "string", "nullable": true},
+          "trade_recorded_at": {"type": "string", "format": "date-time", "nullable": true},
+          "fill_source": {"type": "string", "nullable": true},
+          "grid_order_id": {"type": "integer", "format": "int64", "nullable": true},
+          "grid_matched_profit": {"type": "number", "nullable": true},
+          "execution_event_id": {"type": "integer", "format": "int64", "nullable": true},
+          "exchange_fill_id": {"type": "string", "nullable": true},
+          "commission": {"type": "number", "nullable": true},
+          "commission_ccy": {"type": "string", "nullable": true},
+          "commission_quote": {"type": "number", "nullable": true},
+          "fee_status": {"type": "string", "nullable": true, "description": "Inspect this before interpreting zero or missing fees as actual zero."},
+          "fee_source": {"type": "string", "nullable": true},
+          "funding_fee_total": {"type": "number", "nullable": true},
+          "funding_fee_ccy": {"type": "string", "nullable": true},
+          "entry_reason": {"type": "string", "nullable": true},
+          "exit_reason": {"type": "string", "nullable": true},
+          "archived_at": {"type": "string", "format": "date-time", "nullable": true}
+        }
+      },
+      "PositionManagementTradeHistoryPage": {
+        "type": "object",
+        "required": ["items", "total", "page", "page_size"],
+        "properties": {
+          "items": {"type": "array", "items": {"$ref": "#/components/schemas/PositionManagementTradeHistory"}},
+          "total": {"type": "integer", "minimum": 0},
+          "page": {"type": "integer", "minimum": 1},
+          "page_size": {"type": "integer", "minimum": 1, "maximum": 100}
+        }
+      },
       "Envelope": {
         "type": "object",
         "properties": {
@@ -763,6 +848,78 @@
           { "in": "query", "name": "cursor", "required": false, "schema": { "type": "integer" } }
         ],
         "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/agent/v1/trading/position-management/trade-history": {
+      "get": {
+        "summary": "List account position-management trade history",
+        "description": "Read only the current user account archive of stopped, flat position-management strategies, not all exchange trades. Requires credential_id (id from list_trading_accounts). Deleted source accounts and strategies do not invalidate archives. No synchronization or exchange access. Time filters apply to exit_time with inclusive start and exclusive end; timezone is required. Results sort by exit_time DESC NULLS LAST, id DESC; concurrent inserts can shift page boundaries.",
+        "security": [{"AgentToken": []}],
+        "x-scope-class": "R",
+        "parameters": [
+          {"in": "query", "name": "credential_id", "required": true, "schema": {"type": "integer", "minimum": 1}},
+          {"in": "query", "name": "page", "required": false, "schema": {"type": "integer", "minimum": 1, "default": 1}},
+          {"in": "query", "name": "page_size", "required": false, "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"in": "query", "name": "symbol", "required": false, "schema": {"type": "string", "minLength": 1, "maxLength": 80}},
+          {"in": "query", "name": "market_type", "required": false, "schema": {"type": "string", "enum": ["spot", "swap", "futures"]}},
+          {"in": "query", "name": "position_side", "required": false, "schema": {"type": "string", "enum": ["long", "short"]}},
+          {"in": "query", "name": "source_strategy_id", "required": false, "schema": {"type": "integer", "minimum": 1}},
+          {"in": "query", "name": "start_time", "required": false, "schema": {"type": "string", "format": "date-time"}},
+          {"in": "query", "name": "end_time", "required": false, "schema": {"type": "string", "format": "date-time"}}
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"type": "object", "properties": {"data": {"$ref": "#/components/schemas/PositionManagementTradeHistoryPage"}}}
+                  ]
+                }
+              }
+            }
+          },
+          "400": {"description": "Missing or invalid parameters"},
+          "401": {"description": "Authentication required"},
+          "403": {"description": "Read scope required"},
+          "429": {"description": "Rate limit exceeded"},
+          "500": {"description": "Archive read failed"}
+        }
+      }
+    },
+    "/api/agent/v1/trading/position-management/trade-history/{history_id}": {
+      "get": {
+        "summary": "Read one account position-management trade history record",
+        "description": "Read only the current user account archive of stopped, flat position-management strategies, not all exchange trades. Requires credential_id (id from list_trading_accounts). Deleted source accounts and strategies do not invalidate archives. No synchronization or exchange access. Time filters apply to exit_time with inclusive start and exclusive end; timezone is required. Results sort by exit_time DESC NULLS LAST, id DESC; concurrent inserts can shift page boundaries.",
+        "security": [{"AgentToken": []}],
+        "x-scope-class": "R",
+        "parameters": [
+          {"in": "query", "name": "credential_id", "required": true, "schema": {"type": "integer", "minimum": 1}},
+          {"in": "path", "name": "history_id", "required": true, "schema": {"type": "integer", "minimum": 1}}
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {"$ref": "#/components/schemas/Envelope"},
+                    {"type": "object", "properties": {"data": {"$ref": "#/components/schemas/PositionManagementTradeHistory"}}}
+                  ]
+                }
+              }
+            }
+          },
+          "400": {"description": "Missing or invalid parameters"},
+          "401": {"description": "Authentication required"},
+          "403": {"description": "Read scope required"},
+          "429": {"description": "Rate limit exceeded"},
+          "500": {"description": "Archive read failed"},
+          "404": {"description": "Record not found for the current user and account"}
+        }
       }
     },
     "/api/agent/v1/trading/quick-trades": {

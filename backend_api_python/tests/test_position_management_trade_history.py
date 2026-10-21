@@ -237,3 +237,115 @@ def test_periodic_sync_only_scans_stopped_strategies_with_missing_history(monkey
     assert result["inserted_count"] == 1
     assert result["skipped"] == [{"strategy_id": 25, "reason": "策略没有可同步的交易记录"}]
     assert result["deleted_count"] == 0
+
+
+@pytest.mark.parametrize('start,end', [
+    ('2026-10-01', None), ('bad', None), ('', None),
+    ('2026-10-02T00:00:00Z', '2026-10-01T00:00:00Z'),
+    ('2026-10-01T00:00:00Z', '2026-10-01T00:00:00+00:00'),
+])
+def test_archive_filter_rejects_invalid_time_bounds_before_database(monkeypatch, start, end):
+    def unexpected_connection():
+        pytest.fail('Invalid filters must not query the database')
+    monkeypatch.setattr(history, 'get_db_connection', unexpected_connection)
+    with pytest.raises(ValueError):
+        history.list_position_management_trade_history(user_id=7, credential_id=2,
+                                                       start_time=start, end_time=end)
+
+
+def test_archive_query_filters_are_bound_and_count_matches_list(monkeypatch):
+    from contextlib import contextmanager
+    from unittest.mock import Mock
+    cursor = Mock()
+    cursor.fetchone.return_value = {'total': 0}
+    cursor.fetchall.return_value = []
+    db = Mock()
+    db.cursor.return_value = cursor
+    @contextmanager
+    def connect():
+        yield db
+    monkeypatch.setattr(history, 'get_db_connection', connect)
+    symbol = "BTC/USDT' OR 1=1 --"
+    result = history.list_position_management_trade_history(user_id=7, credential_id=2,
+        symbol=symbol, market_type='swap', position_side='long', source_strategy_id=99,
+        start_time='2026-10-01T08:00:00+08:00', end_time='2026-10-02T00:00:00Z', page=2, page_size=5)
+    assert result == {'items': [], 'total': 0, 'page': 2, 'page_size': 5}
+    expected = (7, 2, symbol, 'swap', 'long', 99, datetime(2026, 10, 1), datetime(2026, 10, 2))
+    count, listing = cursor.execute.call_args_list
+    assert count.args[1] == expected
+    assert listing.args[1] == (*expected, 5, 5)
+    for call in (count, listing):
+        sql = call.args[0]
+        assert symbol not in sql
+        assert 'user_id = %s AND credential_id = %s' in sql
+        assert 'exit_time >= %s AND exit_time < %s' in sql
+        assert 'JOIN' not in sql
+    assert 'ORDER BY exit_time DESC NULLS LAST, id DESC' in listing.args[0]
+    db.commit.assert_not_called()
+    cursor.close.assert_called_once()
+
+
+@pytest.mark.parametrize('row', [None, {'id': 11, 'entry_time': datetime(2026, 10, 1), 'profit': Decimal('1.5')}])
+def test_detail_is_account_and_user_scoped_without_source_dependency(monkeypatch, row):
+    from contextlib import contextmanager
+    from unittest.mock import Mock
+    cursor = Mock()
+    cursor.fetchone.return_value = row
+    db = Mock()
+    db.cursor.return_value = cursor
+    @contextmanager
+    def connect():
+        yield db
+    monkeypatch.setattr(history, 'get_db_connection', connect)
+    result = history.get_position_management_trade_history(user_id=7, credential_id=2, history_id=11)
+    sql, params = cursor.execute.call_args.args
+    assert 'WHERE user_id = %s AND credential_id = %s AND id = %s' in sql
+    assert 'JOIN' not in sql and params == (7, 2, 11)
+    assert result == (None if row is None else {'id': 11, 'entry_time': '2026-10-01T00:00:00Z', 'profit': 1.5})
+    db.commit.assert_not_called()
+    cursor.close.assert_called_once()
+
+
+def test_real_archive_selects_cannot_cross_users_or_accounts(monkeypatch):
+    """Execute the archive SELECTs against an isolated SQL fixture."""
+    import sqlite3
+    from contextlib import contextmanager
+    db = sqlite3.connect(':memory:')
+    db.row_factory = sqlite3.Row
+    db.execute('CREATE TABLE qd_position_management_trade_history '
+               '(id INTEGER, user_id INTEGER, credential_id INTEGER, exit_time TEXT)')
+    db.executemany('INSERT INTO qd_position_management_trade_history VALUES (?, ?, ?, ?)', [
+        (11, 7, 2, '2026-10-01T00:00:00Z'), (12, 8, 2, '2026-10-01T00:00:00Z'),
+        (13, 7, 3, '2026-10-01T00:00:00Z'), (14, 7, 2, '2026-10-01T00:00:00Z'),
+    ])
+
+    class Cursor:
+        def __init__(self):
+            self.cursor = db.cursor()
+        def execute(self, sql, params):
+            self.cursor.execute(sql.replace('%s', '?'), params)
+        def fetchone(self):
+            row = self.cursor.fetchone()
+            return dict(row) if row else None
+        def fetchall(self):
+            return [dict(row) for row in self.cursor.fetchall()]
+        def close(self):
+            self.cursor.close()
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    @contextmanager
+    def connect():
+        yield Connection()
+    monkeypatch.setattr(history, 'get_db_connection', connect)
+    try:
+        result = history.list_position_management_trade_history(user_id=7, credential_id=2)
+        assert result['total'] == 2 and [row['id'] for row in result['items']] == [14, 11]
+        assert history.get_position_management_trade_history(user_id=7, credential_id=2, history_id=11)['id'] == 11
+        for foreign_id in (12, 13, 999):
+            assert history.get_position_management_trade_history(user_id=7, credential_id=2, history_id=foreign_id) is None
+        assert history.list_position_management_trade_history(user_id=7, credential_id=999)['total'] == 0
+    finally:
+        db.close()

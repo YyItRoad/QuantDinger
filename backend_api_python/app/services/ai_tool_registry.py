@@ -644,6 +644,8 @@ _MCP_EXTENSION_ROUTES = {
     "list_strategy_trades": "/api/agent/v1/trading/strategies/{strategy_id}/trades",
     "list_strategy_pending_orders": "/api/agent/v1/trading/strategies/{strategy_id}/pending-orders",
     "list_agent_quick_trades": "/api/agent/v1/trading/quick-trades",
+    "list_position_management_trade_history": "/api/agent/v1/trading/position-management/trade-history",
+    "get_position_management_trade_history": "/api/agent/v1/trading/position-management/trade-history/{history_id}",
     "list_signal_alerts": "/api/agent/v1/notifications/signal-alerts",
     "create_signal_alert": "/api/agent/v1/notifications/signal-alerts",
     "update_signal_alert": "/api/agent/v1/notifications/signal-alerts/{task_id}",

@@ -18,6 +18,7 @@ from mcp.server.fastmcp import FastMCP
 
 from . import __version__
 from .notifications import register_notification_tools
+from .position_management_history import register_position_management_history_tools
 from .oauth_auth import apply_oauth_upstream_token, build_hybrid_http_auth
 from .tool_contract import register_tool
 from .security import (
@@ -84,6 +85,8 @@ MCP_TOOL_NAMES = (
     "list_strategy_trades",
     "list_strategy_pending_orders",
     "list_agent_quick_trades",
+    "list_position_management_trade_history",
+    "get_position_management_trade_history",
     "list_signal_alerts",
     "create_signal_alert",
     "update_signal_alert",
@@ -1018,6 +1021,14 @@ def list_agent_quick_trades(limit: int = 50, cursor: int = 0) -> Any:
         "/api/agent/v1/trading/quick-trades",
         params={"limit": max(1, min(200, int(limit))), "cursor": max(0, int(cursor))},
     )
+
+
+# Position-management archive observations
+
+(
+    list_position_management_trade_history,
+    get_position_management_trade_history,
+) = register_position_management_history_tools(sys.modules[__name__])
 
 
 # Notification automation

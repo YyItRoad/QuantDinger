@@ -224,3 +224,23 @@ def test_installed_prompt_skill_is_always_non_executable(tmp_path, monkeypatch):
     installed = next(item for item in list_skills("en-US") if item["id"] == "safe_prompt")
     assert installed["action_type"] == "prompt"
     assert render_prompt_template(ai_skill_registry.get_skill("safe_prompt"), "en-US", {"symbol": "SPY"}) == "Review SPY"
+
+
+def test_position_management_history_contract_is_account_scoped_and_read_only():
+    from app.services.live_trading.position_management_history import HISTORY_COLUMNS
+    spec = json.loads((BACKEND_ROOT / 'docs/agent/agent-openapi.json').read_text(encoding='utf-8'))
+    base = '/api/agent/v1/trading/position-management/trade-history'
+    for path in (base, base+'/{history_id}'):
+        assert set(spec['paths'][path]) == {'get'}
+        operation = spec['paths'][path]['get']
+        assert operation['x-scope-class'] == 'R'
+        account = next(p for p in operation['parameters'] if p['name'] == 'credential_id')
+        assert account['required'] and account['schema']['minimum'] == 1
+        assert operation['responses']['200']['content']['application/json']['schema']
+    fields = spec['components']['schemas']['PositionManagementTradeHistory']['properties']
+    assert set(fields) == ({'id', 'archived_at', *HISTORY_COLUMNS} - {'user_id'})
+    assert fields['entry_time']['format'] == 'date-time'
+    assert 'fee_status' in fields and 'entry_reason' in fields and 'exit_reason' in fields
+    names = {'list_position_management_trade_history', 'get_position_management_trade_history'}
+    metadata = {tool.id.removeprefix('mcp.'): tool for tool in MCP_AGENT_TOOLS}
+    assert all(metadata[name].read_only for name in names)

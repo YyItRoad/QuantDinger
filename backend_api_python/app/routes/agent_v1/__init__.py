@@ -46,6 +46,7 @@ def register(app) -> None:
     from . import indicators  # noqa: F401
     from . import research  # noqa: F401
     from . import trading_data  # noqa: F401
+    from . import position_management_history  # noqa: F401
     from . import notifications  # noqa: F401
     from . import notification_send  # noqa: F401
     from . import admin  # noqa: F401
