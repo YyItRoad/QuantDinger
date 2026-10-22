@@ -22,6 +22,184 @@
       }
     },
     "schemas": {
+      "PositionManagementAdoptionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "symbol",
+          "market_type",
+          "side",
+          "source_id",
+          "name",
+          "initial_capital",
+          "confirm_adoption"
+        ],
+        "properties": {
+          "symbol": {
+            "type": "string",
+            "minLength": 1
+          },
+          "market_type": {
+            "type": "string",
+            "enum": [
+              "spot",
+              "swap"
+            ]
+          },
+          "side": {
+            "type": "string",
+            "enum": [
+              "long",
+              "short"
+            ]
+          },
+          "inst_id": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "initial_capital": {
+            "type": "number",
+            "minimum": 0,
+            "exclusiveMinimum": true
+          },
+          "timeframe": {
+            "type": "string",
+            "description": "Uses the existing source and management timeframe rules."
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Source parameters; fixed stop is params.fixed_stop_price."
+          },
+          "entry_reason": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "direction_mode": {
+            "type": "string"
+          },
+          "account_risk": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "notification_channels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "notification_targets": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "confirm_adoption": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "Explicit approval to adopt the whole position and start management."
+          }
+        }
+      },
+      "PositionManagementAdoptionResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "strategy_id",
+          "strategy_name",
+          "status",
+          "timeframe",
+          "symbol",
+          "side",
+          "size",
+          "entry_price",
+          "mark_price",
+          "leverage"
+        ],
+        "properties": {
+          "strategy_id": {
+            "type": "integer"
+          },
+          "strategy_name": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "starting",
+              "stopped"
+            ],
+            "description": "starting is a queued request, not proof of active Worker management."
+          },
+          "timeframe": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "size": {
+            "type": "string"
+          },
+          "entry_price": {
+            "type": "string"
+          },
+          "mark_price": {
+            "type": "string"
+          },
+          "leverage": {
+            "type": "string"
+          },
+          "warning": {
+            "type": "string"
+          }
+        }
+      },
+      "ManagedPositionAssignment": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "strategy_name": {
+            "type": "string"
+          },
+          "strategy_status": {
+            "type": "string"
+          },
+          "execution_mode": {
+            "type": "string"
+          },
+          "symbol": {
+            "type": "string"
+          },
+          "side": {
+            "type": "string"
+          },
+          "size": {
+            "type": "string"
+          },
+          "market_type": {
+            "type": "string"
+          },
+          "inst_id": {
+            "type": "string"
+          },
+          "strategy_id": {
+            "type": "integer"
+          },
+          "credential_id": {
+            "type": "integer"
+          }
+        }
+      },
       "PositionManagementTradeHistory": {
         "type": "object",
         "additionalProperties": false,
@@ -298,6 +476,167 @@
   },
   "security": [{ "AgentToken": [] }],
   "paths": {
+    "/api/agent/v1/trading/accounts/{credential_id}/managed-positions": {
+      "get": {
+        "summary": "Read strategy assignments for an owned account",
+        "description": "Account and token allowlists apply. Does not fetch exchange state; combine with account snapshot.",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-scope-class": "R",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "type": "object",
+                          "properties": {
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/components/schemas/ManagedPositionAssignment"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "R scope required"
+          },
+          "404": {
+            "description": "Account not owned or missing"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "description": "Read failed"
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trading/accounts/{credential_id}/managed-strategies": {
+      "post": {
+        "summary": "Adopt a whole existing position using the Web management workflow",
+        "description": "W authorizes whole-position registration and automatic strategy startup, including future live strategy exits. OAuth requires quantdinger.write. Does not submit a new entry, cancel orders or consume quick-order notional quota. T, paper_only and AGENT_LIVE_TRADING_ENABLED are quick-order controls and do not gate this explicitly confirmed W operation. Current exchange size, prices and leverage are authoritative; existing manual holdings are included. Pending fills are not guaranteed future allocation. Existing managed legs are rejected; exact idempotent retries replay the original result. Source, direction, stop, account and strategy checks use the shared Web service.",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-scope-class": "W",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "credential_id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PositionManagementAdoptionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Position registered; inspect status and optional startup warning",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    {
+                      "$ref": "#/components/schemas/Envelope"
+                    },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "data": {
+                          "$ref": "#/components/schemas/PositionManagementAdoptionResult"
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid configuration, missing confirmation or idempotency key"
+          },
+          "401": {
+            "description": "Authentication required"
+          },
+          "403": {
+            "description": "W scope or allowlist denied"
+          },
+          "404": {
+            "description": "Account not owned or missing"
+          },
+          "409": {
+            "description": "Position missing, already managed, busy or idempotency conflict"
+          },
+          "429": {
+            "description": "Rate limit exceeded"
+          },
+          "500": {
+            "description": "Adoption failed; inspect existing assignments before recovery"
+          },
+          "503": {
+            "description": "Idempotency service unavailable; request not executed"
+          }
+        }
+      }
+    },
   "/api/agent/v1/notifications/send": {
     "post": {
       "summary": "Send a notification through the saved user Webhook",

@@ -49,6 +49,8 @@ Never place an agent token in prompts, logs, screenshots, source control, or MCP
 | `list_jobs`, `get_job`, `wait_for_job`, `stream_job_until_done`, `cancel_job` | R/B | Bounded jobs and confirmed cancellation |
 | `runtime_overview`, `stop_strategy` | R/T | Runtime inspection and confirmed stop |
 | Broker account, strategy position/trade, and quick-trade observation tools | R | Secret-free execution observations |
+| `list_managed_positions` | R | Whole-position strategy assignments |
+| `adopt_position_management` | W | Existing Web whole-position adoption and automatic startup |
 | `list_position_management_trade_history`, `get_position_management_trade_history` | R | 按账户读取持仓管理归档列表与详情；[使用说明](../docs/agent/持仓管理交易历史_MCP.md) |
 | Signal-alert tools | N | Notification task lifecycle and confirmed delivery evaluation |
 | `place_quick_order` | T | Confirmed order with token notional caps |
@@ -58,6 +60,8 @@ Never place an agent token in prompts, logs, screenshots, source control, or MCP
 Every mutating W/B/N/T tool requires a caller-generated `idempotency_key`; retries of the same request must reuse it. `stop_strategy` requires `confirm_stop=true`. `place_quick_order` requires `confirm_order=true`; a live-capable token also requires `confirm_live_trading=true`. Optional `tp_price` and `sl_price` protection are forwarded to the shared Quick Trade execution path. Server-side trading flags, allowlists, and per-order/per-day notional caps still apply.
 
 ## Strategy API V2 workflow
+
+整仓接管工具要求 `confirm_adoption=true`，复用页面的整仓登记及自动启动；使用 W / `quantdinger.write`，不套用快捷开仓的 T、模拟模式或额度开关。参数与恢复边界见 [MCP 整仓接管](../docs/agent/MCP_POSITION_MANAGEMENT_CN.md)。
 
 Executable strategy code must define `initialize(context)` and declare its universe and subscriptions. It must provide `handle_data`, `on_rebalance`, or a scheduled callback. The manifest owns instruments, markets, frequencies, factor dependencies, warmup, and leverage policy.
 

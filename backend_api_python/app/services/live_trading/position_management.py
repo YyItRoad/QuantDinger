@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 import uuid
-from typing import Any, Dict, Iterator
+from typing import Any, Callable, Dict, Iterator
 
 from app.services.live_trading.account_snapshot import fetch_target_position_snapshot
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
@@ -403,6 +403,7 @@ def create_managed_strategy(
     user_id: int,
     position_ref: Dict[str, Any],
     strategy_payload: Dict[str, Any],
+    authorize_position: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     """重新读取交易所仓位，创建标准停止策略实例并登记整笔仓位。"""
     uid = int(user_id or 0)
@@ -420,6 +421,8 @@ def create_managed_strategy(
         market_type=_market_type(position_ref.get("market_type")),
     )
     fresh = _fresh_position(snapshot, position_ref)
+    if authorize_position is not None:
+        authorize_position(fresh)
     fresh = _complete_fresh_position_price(
         user_id=uid,
         credential_id=credential_id,

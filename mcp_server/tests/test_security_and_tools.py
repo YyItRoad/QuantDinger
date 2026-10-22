@@ -30,7 +30,7 @@ def fresh_module(monkeypatch):
 
 
 def test_mcp_tool_registry_complete(fresh_module):
-    assert len(fresh_module.MCP_TOOL_NAMES) == 61
+    assert len(fresh_module.MCP_TOOL_NAMES) == 63
     # Every exported name should correspond to a registered @mcp.tool function.
     for name in fresh_module.MCP_TOOL_NAMES:
         assert hasattr(fresh_module, name), f"missing tool function: {name}"
@@ -253,6 +253,49 @@ def test_place_quick_order_requires_confirmation(fresh_module):
     out = fresh_module.place_quick_order("Crypto", "BTC/USDT", "buy", 0.001)
     assert out.get("error") is True
     assert out.get("status") == 400
+
+
+def test_position_management_confirmation_and_write_oauth_scope(monkeypatch, fresh_module):
+    from quantdinger_mcp import oauth_auth
+    from quantdinger_mcp.tool_contract import WRITE_TOOLS
+    from mcp.server.auth.provider import AccessToken
+
+    name = "adopt_position_management"
+    assert oauth_auth.required_scope_for_tool(name, WRITE_TOOLS) == oauth_auth.WRITE_SCOPE
+    assert oauth_auth.required_scope_for_tool("list_managed_positions", WRITE_TOOLS) == oauth_auth.READ_SCOPE
+    monkeypatch.setenv("QUANTDINGER_MCP_AUTH_MODE", "hybrid")
+    token = AccessToken(token="test", client_id="fixture", scopes=[oauth_auth.WRITE_SCOPE])
+    monkeypatch.setattr(oauth_auth, "get_access_token", lambda: token)
+    assert oauth_auth.authorize_tool_call(name, WRITE_TOOLS) is None
+    token.scopes = [oauth_auth.TRADE_SCOPE]
+    assert oauth_auth.authorize_tool_call(name, WRITE_TOOLS).isError
+    tools = {tool.name: tool for tool in asyncio.run(fresh_module.mcp.list_tools())}
+    assert tools[name].annotations.readOnlyHint is False
+    assert tools[name].annotations.destructiveHint is True
+    assert tools["list_managed_positions"].annotations.readOnlyHint is True
+    assert tools[name].inputSchema["required"] == [
+        "credential_id", "symbol", "market_type", "side", "source_id", "name",
+        "initial_capital", "idempotency_key",
+    ]
+    assert oauth_auth.tool_security_meta(name, WRITE_TOOLS)["securitySchemes"][0]["scopes"] == [oauth_auth.WRITE_SCOPE]
+    monkeypatch.setattr(fresh_module, "_post", lambda *a, **kw: pytest.fail("No request before confirmation"))
+    args = dict(credential_id=2, symbol="BTC/USDT", market_type="swap", side="long",
+                source_id=9, name="Manage BTC", initial_capital=100, idempotency_key="adopt-1")
+    assert fresh_module.adopt_position_management(**args)["error"] is True
+
+
+@pytest.mark.parametrize("patch", [
+    {"credential_id": 0}, {"source_id": True}, {"initial_capital": -1},
+    {"confirm_adoption": "true"}, {"side": "buy"}, {"idempotency_key": ""},
+])
+def test_adoption_schema_rejects_bad_arguments(monkeypatch, fresh_module, patch):
+    monkeypatch.setenv("QUANTDINGER_MCP_AUTH_MODE", "static")
+    monkeypatch.setattr(fresh_module, "_post", lambda *a, **kw: pytest.fail("Invalid schema reached Gateway"))
+    args = dict(credential_id=2, symbol="BTC/USDT", market_type="swap", side="long",
+                source_id=9, name="Manage BTC", initial_capital=100, idempotency_key="adopt-1",
+                confirm_adoption=True)
+    with pytest.raises(Exception, match="validation error|Input validation"):
+        asyncio.run(fresh_module.mcp.call_tool("adopt_position_management", {**args, **patch}))
 
 
 def test_indicator_code_size_rejected_in_mcp(monkeypatch, fresh_module):

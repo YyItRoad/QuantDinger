@@ -114,6 +114,23 @@ def test_mcp_metadata_matches_exported_tools_and_documented_routes():
             assert _normalize_path(tool.route) in documented, tool.id
 
 
+def test_position_management_contract_uses_w_and_existing_strategy_fields():
+    from app.routes.agent_v1.position_management import _FIELDS
+    spec = json.loads((BACKEND_ROOT / "docs/agent/agent-openapi.json").read_text())
+    path = "/api/agent/v1/trading/accounts/{credential_id}/managed-strategies"
+    operation = spec["paths"][path]["post"]
+    assert operation["x-scope-class"] == "W"
+    assert spec["paths"][path.replace("managed-strategies", "managed-positions")]["get"]["x-scope-class"] == "R"
+    schema = spec["components"]["schemas"]["PositionManagementAdoptionRequest"]
+    assert set(schema["properties"]) == _FIELDS
+    assert schema["additionalProperties"] is False
+    assert set(schema["required"]) == {
+        "symbol", "market_type", "side", "source_id", "name", "initial_capital", "confirm_adoption",
+    }
+    assert schema["properties"]["confirm_adoption"]["enum"] == [True]
+    assert any(p["name"] == "Idempotency-Key" and p["required"] for p in operation["parameters"])
+
+
 def test_builtin_skill_registry_does_not_advertise_retired_experiments():
     skills = list_skills("en-US")
     by_id = {item["id"]: item for item in skills}

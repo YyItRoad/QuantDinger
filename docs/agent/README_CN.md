@@ -9,13 +9,14 @@
 3. [Cursor MCP 配置示例](cursor-mcp.example.json)：使用可替换地址与 Token 占位符的最小配置。
 4. [Agent OpenAPI](agent-openapi.json)：查看 `/api/agent/v1` 的机器可读契约。
 5. [API 约定](../architecture/API_CONVENTIONS.md)（英文）：理解响应、认证和接口分层。
+6. [MCP 整仓接管](MCP_POSITION_MANAGEMENT_CN.md)：W 权限接管及自动启动管理。
 
 ## 权限模型
 
 | Scope | 用途 | 典型操作 |
 |---|---|---|
 | `R` | 只读 | 行情、研究、账户与运行状态 |
-| `W` | 写入配置 | 保存策略源码、创建停止状态的部署 |
+| `W` | 写入配置与整仓接管 | 保存策略源码、创建停止部署；整仓接管会沿用现有流程自动启动管理 |
 | `B` | 回测 | 提交、查询或取消回测任务 |
 | `N` | 通知 | 管理和触发信号提醒 |
 | `T` | 交易与运行时 | 停止策略、下单、紧急停止 |

@@ -646,6 +646,8 @@ _MCP_EXTENSION_ROUTES = {
     "list_agent_quick_trades": "/api/agent/v1/trading/quick-trades",
     "list_position_management_trade_history": "/api/agent/v1/trading/position-management/trade-history",
     "get_position_management_trade_history": "/api/agent/v1/trading/position-management/trade-history/{history_id}",
+    "list_managed_positions": "/api/agent/v1/trading/accounts/{credential_id}/managed-positions",
+    "adopt_position_management": "/api/agent/v1/trading/accounts/{credential_id}/managed-strategies",
     "list_signal_alerts": "/api/agent/v1/notifications/signal-alerts",
     "create_signal_alert": "/api/agent/v1/notifications/signal-alerts",
     "update_signal_alert": "/api/agent/v1/notifications/signal-alerts/{task_id}",
@@ -654,6 +656,7 @@ _MCP_EXTENSION_ROUTES = {
     "run_signal_alert": "/api/agent/v1/notifications/signal-alerts/{task_id}/run",
 }
 _MCP_EXTENSION_WRITES = {
+    "adopt_position_management",
     "emergency_stop_trading",
     "cancel_job",
     "link_indicator_config",
@@ -690,6 +693,8 @@ MCP_AGENT_TOOLS = MCP_AGENT_TOOLS + tuple(
         read_only=name not in _MCP_EXTENSION_WRITES,
         priority=80,
         safety=(
+            "Requires W, explicit whole-position adoption approval and an Idempotency-Key. Starts live management using the existing Web workflow."
+            if name == "adopt_position_management" else
             "Requires N and an Idempotency-Key. Uses only the saved Webhook."
             if name == "send_notification" else
             "Mutating calls require an Idempotency-Key; destructive or delivery actions also require explicit confirmation."

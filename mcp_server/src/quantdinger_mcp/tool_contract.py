@@ -10,6 +10,7 @@ from .security import redact_secrets
 
 
 WRITE_TOOLS = {
+    "adopt_position_management": True,
     "send_notification": False,
     "stop_strategy": True,
     "place_quick_order": True,

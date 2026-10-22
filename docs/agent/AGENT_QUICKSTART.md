@@ -93,6 +93,8 @@ N-scope signal-alert endpoints under `/notifications/signal-alerts` reuse the ex
 
 ## Runtime and orders
 
+整仓接管是 W 权限的显式业务入口，复用页面的登记与自动启动，不受快捷下单的模拟模式或开仓额度控制；该授权包含后续真实策略退出。详见 [MCP 整仓接管](MCP_POSITION_MANAGEMENT_CN.md)。
+
 `GET /runtime/overview` returns compact tenant runtime state. Quick orders require T scope and an `Idempotency-Key`. Live execution additionally requires a live-capable token, server live-trading enablement, a credential reference, client-side explicit confirmation, and compliance with the token's `max_order_notional` and `max_daily_notional` caps.
 
 The emergency stop at `/quick-trade/kill-switch` requires `confirm=true`. It attempts to cancel open agent-originated live orders, cancels open paper orders, revokes all active T-scope tokens for the tenant, and returns any exchange cancellation failures for mandatory human review.
