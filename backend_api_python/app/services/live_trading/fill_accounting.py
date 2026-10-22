@@ -10,6 +10,10 @@ from typing import Any
 from app.services.live_trading.base import LiveTradingError
 
 
+_CUMULATIVE_QUANTITY_ABS_TOLERANCE = Decimal("1e-12")
+_CUMULATIVE_QUANTITY_REL_TOLERANCE = Decimal("1e-12")
+
+
 def positive_number(value: Any) -> float:
     try:
         number = float(value)
@@ -56,7 +60,11 @@ def cumulative_delta(
     prev, total = Decimal(str(previous_qty)), Decimal(str(total_qty))
     if not prev.is_finite() or not total.is_finite() or min(prev, total) < 0:
         raise LiveTradingError("strategyRuntime.invalidFillQuantity")
-    if total <= prev:
+    quantity_tolerance = max(
+        _CUMULATIVE_QUANTITY_ABS_TOLERANCE,
+        max(abs(prev), abs(total)) * _CUMULATIVE_QUANTITY_REL_TOLERANCE,
+    )
+    if total <= prev + quantity_tolerance:
         return 0.0, 0.0
     average = positive_number(total_avg)
     if prev > 0:

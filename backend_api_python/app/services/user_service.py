@@ -5,7 +5,6 @@ Handles user CRUD operations, password hashing, and role management.
 """
 import hashlib
 import re
-import time
 import os
 from typing import Optional, Dict, Any, List
 from app.utils.db import get_db_connection

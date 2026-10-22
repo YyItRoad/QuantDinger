@@ -450,33 +450,12 @@ def place_order():
         market_type = data.get('marketType', 'USStock')
         order_type = (data.get('orderType') or 'market').lower()
 
-        if bool(data.get('ai_decision_filter')):
-            from app.services.ai_decision_filter import AIDecisionFilter, AIDecisionRequest
-
-            decision_price = float(data.get('price') or data.get('reference_price') or 0)
-            decision = AIDecisionFilter().evaluate(
-                AIDecisionRequest(
-                    user_id=int(g.user_id),
-                    source_type="quick_trade",
-                    source_id=int(data.get("credential_id") or 0),
-                    symbol=str(symbol),
-                    action="open_long" if str(side).lower() == "buy" else "close_long",
-                    market_type=str(market_type),
-                    order_type=order_type,
-                    quantity=quantity if quantity > 0 else notional / decision_price if decision_price > 0 else 0,
-                    reference_price=decision_price,
-                    reason=str(data.get('source') or 'indicator'),
-                    context={"source": str(data.get('source') or 'indicator')},
-                ),
-                enabled=True,
-            )
-            if not decision.allowed:
-                return jsonify({
-                    "success": False,
-                    "ai_rejected": True,
-                    "error": "aiDecisionFilter.rejected",
-                    "data": {"ai_decision": decision.public_dict()},
-                })
+        try:
+            take_profit_price = float(data.get('take_profit_price') or 0)
+            stop_loss_price = float(data.get('stop_loss_price') or 0)
+        except (TypeError, ValueError):
+            return jsonify({"success": False, "error": "quickTrade.errorHints.invalidPrice"}), 400
+        protection_requested = take_profit_price > 0 or stop_loss_price > 0
 
         if order_type == 'limit':
             try:
@@ -492,10 +471,12 @@ def place_order():
             result = client.place_limit_order(
                 symbol=symbol, side=side, quantity=quantity, price=price,
                 market_type=market_type, extended_hours=bool(data.get('extendedHours', False)),
+                take_profit_price=take_profit_price, stop_loss_price=stop_loss_price,
             )
         else:
             result = client.place_market_order(
                 symbol=symbol, side=side, quantity=quantity, notional=notional, market_type=market_type,
+                take_profit_price=take_profit_price, stop_loss_price=stop_loss_price,
             )
 
         if result.success:
@@ -505,6 +486,11 @@ def place_order():
                 "data": {
                     "orderId": result.order_id, "filled": result.filled,
                     "avgPrice": result.avg_price, "status": result.status, "raw": result.raw,
+                    "protection_status": (
+                        "attached"
+                        if protection_requested and str(market_type).strip().lower() == "usstock"
+                        else "unsupported_market" if protection_requested else "not_requested"
+                    ),
                 },
             })
         return jsonify({"success": False, "error": result.message, "data": result.raw}), 400

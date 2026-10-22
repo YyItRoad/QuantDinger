@@ -10,6 +10,8 @@ Before coding, define the market, instruments, frequency, entries, exits, positi
 
 Start from a Strategy API V2 template. Keep `initialize`, subscriptions, universe setup, and `handle_data` responsibilities clear. Use full market identifiers and never infer a venue or product from a display name.
 
+An explicit venue is part of both the data and execution contract. For example, `Crypto:XAUT/USDT@okx:swap` reads the matching OKX product only; when that feed is unavailable the system reports a failure instead of silently switching exchanges. Research may use `Crypto:XAUT/USDT@swap` without pinning a venue, but a live deployment must select a real catalog product and venue.
+
 See the [Strategy API V2 development guide](../trading/STRATEGY_DEV_GUIDE.md) for the programming surface, manifest, and sandbox rules.
 
 ## 3. Validate and version
@@ -24,6 +26,8 @@ Choose a range that includes warmup and multiple market regimes. Check coverage,
 
 Create deployments in the stopped state. Confirm that credential, market, settlement currency, and product type match. Use `signal` mode to validate notifications and state restoration. Do not mix incompatible markets or accounts in one deployment.
 
+Changing from `signal` to `live` affects only entry orders created after the change. A signal order that was already queued is never promoted into a real order. Risk-reducing stop, take-profit, and close intents may still complete while the mode transition is taking place.
+
 ## 6. Start and monitor
 
 Complete the [live-trading safety checklist](../trading/LIVE_TRADING_SAFETY.md). After startup, monitor runtime state, orders, position ownership, unknown deltas, notifications, and errors. Stop new entries first when behavior is uncertain; stop the strategy or use emergency stop when required.
@@ -36,4 +40,3 @@ Complete the [live-trading safety checklist](../trading/LIVE_TRADING_SAFETY.md).
 - The credential matches the strategy market.
 - Signal mode has been observed for an adequate period.
 - Stop, recovery, and manual incident paths have been tested.
-

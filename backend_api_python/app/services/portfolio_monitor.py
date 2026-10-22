@@ -408,7 +408,6 @@ def _run_ai_analysis(positions: List[Dict[str, Any]], config: Dict[str, Any], us
                 for j, p in enumerate(positions)
                 if f"{p.get('market')}|{p.get('symbol')}" == key
             )
-            cur_price = float(base.get('current_price') or 0)
             combined_pnl = sum(
                 float(p.get('pnl') or 0)
                 for j, p in enumerate(positions)
@@ -1069,7 +1068,6 @@ def _send_batch_notification(
     channels = resolved_nc.get('channels') or ['browser']
     targets = resolved_nc.get('targets', {})
 
-    is_zh = language.startswith('zh')
     names = ', '.join(r.get('_meta', {}).get('monitor_name', '?') for r in successful)
     title = f"Scheduled Report: {names}"
     if len(title) > 255:
@@ -1704,9 +1702,6 @@ def notify_strategy_signal_for_positions(market: str, symbol: str, signal_type: 
             return
         
         # User has positions in this symbol - send notification
-        notifier = SignalNotifier()
-        now = _now_ts()
-        
         for pos in positions:
             pos_user_id = int(pos.get('user_id') or 1)
             pos_name = pos.get('name') or symbol

@@ -30,7 +30,11 @@ from .instruments import (
     normalize_pool_reference,
     parse_instrument,
 )
-from .frequencies import FREQUENCY_SECONDS, unique_frequencies
+from .frequencies import (
+    FREQUENCY_SECONDS,
+    SUPPORTED_SUBSCRIPTION_FREQUENCIES,
+    unique_frequencies,
+)
 from .models import (
     InstrumentSpec,
     ScheduleSpec,
@@ -38,6 +42,9 @@ from .models import (
     SubscriptionSpec,
     UniverseSpec,
 )
+
+
+PLATFORM_MAX_LEVERAGE = 100.0
 
 
 V2_HANDLER_NAMES = (
@@ -176,7 +183,7 @@ class DiscoveryContext:
     def allow_leverage(self, max_leverage: object = 1) -> None:
         value = max(1.0, float(max_leverage or 1.0))
         self.leverage_allowed = value > 1.0
-        self.max_leverage = value
+        self.max_leverage = PLATFORM_MAX_LEVERAGE if self.leverage_allowed else 1.0
 
     def set_metadata(self, *args: Any, **values: Any) -> None:
         if len(args) == 1 and isinstance(args[0], Mapping):
@@ -303,7 +310,7 @@ def compile_strategy_v2(code: str) -> CompiledStrategyV2:
     unsupported = [
         item
         for item in frequencies
-        if item not in FREQUENCY_SECONDS
+        if item not in SUPPORTED_SUBSCRIPTION_FREQUENCIES
     ]
     if unsupported:
         raise StrategyV2ContractError(

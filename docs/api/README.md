@@ -38,6 +38,8 @@ pip install -r requirements.txt
 python scripts/export_openapi.py
 ```
 
+Commit the regenerated `docs/api/openapi.yaml`; CI exports the application schema again and rejects any drift.
+
 ## Local interactive docs
 
 With the backend running in debug mode (or `OPENAPI_ENABLED=true`):

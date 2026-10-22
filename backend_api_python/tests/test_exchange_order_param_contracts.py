@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.grid.exchange_orders import place_grid_limit_order
-from app.services.live_trading.base import LiveOrderResult
+from app.services.live_trading.base import LiveOrderResult, LiveTradingError
 from app.services.live_trading.binance import BinanceFuturesClient
 from app.services.live_trading.binance_spot import BinanceSpotClient
 from app.services.live_trading.bitget import BitgetMixClient
@@ -252,20 +252,18 @@ def test_marketable_bitget_limit_disables_post_only():
 
 
 @pytest.mark.parametrize(
-    ("physical_side", "position_side", "reduce_only", "expected_side", "expected_trade"),
+    ("physical_side", "position_side", "reduce_only"),
     (
-        ("buy", "long", False, "buy", "open"),
-        ("sell", "short", False, "sell", "open"),
-        ("sell", "long", True, "buy", "close"),
-        ("buy", "short", True, "sell", "close"),
+        ("buy", "long", False),
+        ("sell", "short", False),
+        ("sell", "long", True),
+        ("buy", "short", True),
     ),
 )
-def test_bitget_v2_hedge_order_fields_follow_documented_position_direction(
+def test_bitget_v3_hedge_order_fields_follow_documented_position_direction(
     physical_side,
     position_side,
     reduce_only,
-    expected_side,
-    expected_trade,
 ):
     client = BitgetMixClient.__new__(BitgetMixClient)
     client.get_account_pos_mode = lambda **_kwargs: "hedge_mode"
@@ -279,8 +277,8 @@ def test_bitget_v2_hedge_order_fields_follow_documented_position_direction(
         hold_side=position_side,
     )
 
-    assert fields == {"side": expected_side, "tradeSide": expected_trade}
-    assert "holdSide" not in fields
+    assert fields == {"side": physical_side, "posSide": position_side}
+    assert "reduceOnly" not in fields
 
 
 @pytest.mark.parametrize(("position_mode", "expects_reduce_only"), (("net", True), ("long", False)))
@@ -305,3 +303,37 @@ def test_okx_reduce_only_is_only_sent_in_net_mode(position_mode, expects_reduce_
     )
 
     assert ("reduceOnly" in sent[0]) is expects_reduce_only
+
+
+def test_okx_close_refreshes_stale_position_mode_after_51169():
+    client = OkxClient.__new__(OkxClient)
+    client.broker_code = ""
+    client._acct_cfg_cache = {"account_config": (0.0, {"posMode": "long_short_mode"})}
+    client._normalize_order_size = lambda **_kwargs: (Decimal("1"), 0)
+    resolved = iter(("long", "net"))
+    client._resolve_pos_side = lambda **_kwargs: next(resolved)
+    sent = []
+
+    def submit(method, path, json_body=None, params=None):
+        sent.append(dict(json_body or {}))
+        if len(sent) == 1:
+            raise LiveTradingError("OKX error: sCode 51169 no position in this direction")
+        return {"data": [{"ordId": "2"}]}
+
+    client._signed_request = submit
+
+    result = client.place_market_order(
+        symbol="SOL/USDT",
+        side="sell",
+        size=1,
+        market_type="swap",
+        pos_side="long",
+        reduce_only=True,
+    )
+
+    assert result.exchange_order_id == "2"
+    assert sent[0]["posSide"] == "long"
+    assert "reduceOnly" not in sent[0]
+    assert sent[1]["posSide"] == "net"
+    assert sent[1]["reduceOnly"] == "true"
+    assert "account_config" not in client._acct_cfg_cache

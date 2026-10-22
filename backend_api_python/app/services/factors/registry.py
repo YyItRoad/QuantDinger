@@ -38,36 +38,75 @@ class FactorDefinition:
         return value
 
 
+def _int_param(params: Mapping[str, Any], key: str, default: int) -> int:
+    value = params.get(key)
+    if isinstance(value, bool) or value is None:
+        return default
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 1 else default
+
+
 def _technical_warmup(factor_id: str, params: Mapping[str, Any]) -> int:
-    period = int(params.get("period") or 1)
-    if factor_id in {"momentum", "roc", "rsi", "downside_volatility"}:
+    period = _int_param(params, "period", 1)
+    if factor_id in {
+        "momentum",
+        "roc",
+        "rsi",
+        "realized_volatility",
+        "downside_volatility",
+        "skewness",
+        "kurtosis",
+        "mfi",
+        "supertrend",
+        "force_index",
+        "amihud_illiquidity",
+    }:
         return period + 1
     if factor_id == "ema_slope":
-        return period + int(params.get("slope_period") or 1)
+        return period + _int_param(params, "slope_period", 1)
     if factor_id == "macd":
-        return int(params.get("slow_period") or 26) + int(params.get("signal_period") or 9)
+        return max(
+            _int_param(params, "fast_period", 12),
+            _int_param(params, "slow_period", 26),
+        ) + _int_param(params, "signal_period", 9)
     if factor_id == "stochastic":
-        return period + int(params.get("smooth_k") or 1) + int(params.get("smooth_d") or 1) - 2
+        return (
+            period
+            + _int_param(params, "smooth_k", 1)
+            + _int_param(params, "smooth_d", 1)
+            - 2
+        )
     if factor_id == "trix":
         return period * 3 + 1
     if factor_id == "dema":
         return period * 2
     if factor_id == "tema":
         return period * 3
+    if factor_id == "zlema":
+        return period + max(1, (period - 1) // 2)
     if factor_id == "hma":
         return period + int(math.sqrt(period))
+    if factor_id == "keltner_channels":
+        return max(period, _int_param(params, "atr_period", 10))
     if factor_id in {"cmo", "efficiency_ratio", "kama", "ulcer_index", "choppiness", "vortex"}:
         return period + 1
     if factor_id in {"ppo", "awesome_oscillator"}:
-        return int(params.get("slow_period") or period)
+        return max(_int_param(params, "fast_period", 2), _int_param(params, "slow_period", period))
     if factor_id == "ultimate_oscillator":
-        return int(params.get("slow_period") or 28) + 1
+        return max(
+            _int_param(params, "fast_period", 7),
+            _int_param(params, "medium_period", 14),
+            _int_param(params, "slow_period", 28),
+        ) + 1
     if factor_id == "tsi":
-        return int(params.get("slow_period") or 25) + int(params.get("fast_period") or 13) + 1
+        return _int_param(params, "slow_period", 25) + _int_param(params, "fast_period", 13) + 1
     if factor_id == "adx":
         return period * 2
     if factor_id == "chaikin_oscillator":
-        return int(params.get("slow_period") or 10)
+        return max(_int_param(params, "fast_period", 3), _int_param(params, "slow_period", 10))
     if factor_id in {"obv", "ad_line"}:
         return period + 1
     return max(1, period)
@@ -177,6 +216,8 @@ _FACTORS = {
         _technical("supertrend", "trend", ("high", "low", "close"), {"period": 10, "multiplier": 3.0, "output": "direction"}, "higher_is_bullish", lambda f, p: _supertrend(f, p)),
         _technical("atr", "volatility", ("high", "low", "close"), {"period": 14}, "neutral", lambda f, p: _atr(f, p)),
         _technical("realized_volatility", "risk", ("close",), {"period": 20}, "lower_is_bullish", lambda f, p: _realized_vol(f, p)),
+        _technical("skewness", "risk", ("close",), {"period": 20}, "neutral", lambda f, p: _skewness(f, p)),
+        _technical("kurtosis", "risk", ("close",), {"period": 20}, "lower_is_bullish", lambda f, p: _kurtosis(f, p)),
         _technical("ema_slope", "trend", ("close",), {"period": 20, "slope_period": 5}, "higher_is_bullish", lambda f, p: _ema_slope(f, p)),
         _technical("atr_pct", "risk", ("high", "low", "close"), {"period": 14}, "lower_is_bullish", lambda f, p: _atr_pct(f, p)),
         _technical("downside_volatility", "risk", ("close",), {"period": 20}, "lower_is_bullish", lambda f, p: _downside_volatility(f, p)),
@@ -238,6 +279,14 @@ def get_factor(factor_id: str) -> FactorDefinition:
     if definition is None:
         raise FactorError("factor.notFound")
     return definition
+
+
+def factor_warmup_bars(factor_id: str, params: Optional[Mapping[str, Any]] = None) -> int:
+    definition = get_factor(factor_id)
+    if definition.factor_type != "technical":
+        return definition.default_warmup_bars
+    merged = {**definition.default_params, **dict(params or {})}
+    return _technical_warmup(definition.factor_id, merged)
 
 
 def compute_factor(factor_id: str, frame: pd.DataFrame, params: Optional[Mapping[str, Any]] = None) -> float:
@@ -305,6 +354,22 @@ def _realized_vol(frame: pd.DataFrame, params: Mapping[str, Any]) -> float:
     if len(returns) < period:
         raise FactorError("factor.insufficientHistory")
     return float(returns.iloc[-period:].std(ddof=1) * math.sqrt(252))
+
+
+def _skewness(frame: pd.DataFrame, params: Mapping[str, Any]) -> float:
+    period = _period(params)
+    returns = _numeric(frame["close"]).pct_change().dropna()
+    if len(returns) < period:
+        raise FactorError("factor.insufficientHistory")
+    return float(returns.iloc[-period:].skew())
+
+
+def _kurtosis(frame: pd.DataFrame, params: Mapping[str, Any]) -> float:
+    period = _period(params)
+    returns = _numeric(frame["close"]).pct_change().dropna()
+    if len(returns) < period:
+        raise FactorError("factor.insufficientHistory")
+    return float(returns.iloc[-period:].kurt())
 
 
 def _ema_slope(frame: pd.DataFrame, params: Mapping[str, Any]) -> float:

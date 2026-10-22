@@ -47,7 +47,7 @@ def test_binance_spot_fee_rate_uses_concatenated_symbol():
     assert client.seen[-1]["params"] == {"symbol": "ETHUSDT"}
 
 
-def test_bitget_mix_fee_rate_uses_official_business_type_mix():
+def test_bitget_mix_fee_rate_uses_uta_category():
     client = _fake_client(
         BitgetMixClient,
         {"data": {"makerFeeRate": "0.0002", "takerFeeRate": "0.0006"}},
@@ -56,11 +56,11 @@ def test_bitget_mix_fee_rate_uses_official_business_type_mix():
     result = client.get_fee_rate("SOL/USDT:USDT", market_type="swap")
 
     assert result == {"maker": 0.0002, "taker": 0.0006}
-    assert client.seen[-1]["path"] == "/api/v2/common/trade-rate"
-    assert client.seen[-1]["params"] == {"symbol": "SOLUSDT", "businessType": "mix"}
+    assert client.seen[-1]["path"] == "/api/v3/account/fee-rate"
+    assert client.seen[-1]["params"] == {"symbol": "SOLUSDT", "category": "USDT-FUTURES"}
 
 
-def test_bitget_spot_fee_rate_uses_official_business_type_spot():
+def test_bitget_spot_fee_rate_uses_uta_category():
     client = _fake_client(
         BitgetSpotClient,
         {"data": {"makerFeeRate": "0.001", "takerFeeRate": "0.001"}},
@@ -69,8 +69,8 @@ def test_bitget_spot_fee_rate_uses_official_business_type_spot():
     result = client.get_fee_rate("SOL/USDT:USDT", market_type="spot")
 
     assert result == {"maker": 0.001, "taker": 0.001}
-    assert client.seen[-1]["path"] == "/api/v2/common/trade-rate"
-    assert client.seen[-1]["params"] == {"symbol": "SOLUSDT", "businessType": "spot"}
+    assert client.seen[-1]["path"] == "/api/v3/account/fee-rate"
+    assert client.seen[-1]["params"] == {"symbol": "SOLUSDT", "category": "SPOT"}
 
 
 def test_bybit_fee_rate_uses_category_and_concatenated_symbol():

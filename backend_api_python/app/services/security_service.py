@@ -6,7 +6,7 @@ import json
 import hashlib
 import requests
 from datetime import datetime, timedelta
-from typing import Tuple, Optional, Dict, Any
+from typing import Tuple, Dict, Any
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from app.config.settings import Config
 from app.utils.db import get_db_connection
@@ -411,6 +411,69 @@ class SecurityService:
         except Exception as e:
             logger.error(f"Failed to check verification code rate limit: {e}")
             return True, 'allowed'  # Fail open on DB errors
+
+    def reserve_registration_slot(
+        self,
+        ip_address: str,
+        user_agent: str = None,
+        email: str = None,
+    ) -> Tuple[bool, str]:
+        """Atomically reserve one account-creation slot for an IP address.
+
+        Verification-code throttling alone is insufficient because a client can
+        request codes through several egress addresses and submit every final
+        registration through one address.  The same hourly setting therefore
+        also caps completed account-creation attempts per registration IP.
+        """
+        ip = str(ip_address or '').strip()
+        if not ip:
+            return False, 'Unable to verify the registration source. Try again later.'
+
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                lock_key = f'registration-rate:{ip}'
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    (lock_key,),
+                )
+
+                hour_ago = datetime.now() - timedelta(hours=1)
+                cur.execute(
+                    """
+                    SELECT COUNT(*) as count FROM qd_security_logs
+                    WHERE action = 'registration_rate_slot'
+                      AND ip_address = ?
+                      AND created_at > ?
+                    """,
+                    (ip, hour_ago),
+                )
+                row = cur.fetchone()
+                registration_count = int((row or {}).get('count') or 0)
+                if registration_count >= self.code_ip_hourly_limit:
+                    db.rollback()
+                    cur.close()
+                    return False, 'Too many accounts created from this IP. Try again later.'
+
+                details = {
+                    'email_hash': hashlib.sha256(
+                        str(email or '').strip().lower().encode('utf-8')
+                    ).hexdigest()
+                }
+                cur.execute(
+                    """
+                    INSERT INTO qd_security_logs
+                    (user_id, action, ip_address, user_agent, details)
+                    VALUES (?, 'registration_rate_slot', ?, ?, ?)
+                    """,
+                    (None, ip, user_agent, json.dumps(details)),
+                )
+                db.commit()
+                cur.close()
+                return True, 'allowed'
+        except Exception as e:
+            logger.error(f"Failed to reserve registration rate-limit slot: {e}")
+            return False, 'Registration protection is temporarily unavailable. Try again later.'
     
     # =========================================================================
     # Password Strength Validation

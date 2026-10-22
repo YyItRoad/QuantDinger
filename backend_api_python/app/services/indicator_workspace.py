@@ -55,7 +55,7 @@ def get_indicator_authoring_contract() -> Dict[str, Any]:
             "globals": ["my_indicator_name", "my_indicator_description"],
             "dataframe": "Use df = df.copy() before computations/mutations. Expected columns: open, high, low, close, volume.",
             "output": "output = {'name', 'plots', 'signals', 'layers'}; every plot['data'] and signal['data'] length must equal len(df).",
-            "plots": "Each plot has name, data, color, overlay; use overlay=True for price-scale lines and overlay=False for oscillators/lamp panels.",
+            "plots": "Each plot has name, data, color, overlay. Supported types are line, bar, circle, and cloud. A cloud point is None or {'upper': number, 'lower': number, 'color': '#RRGGBB'}; use opacity 0.02-0.30 and None for gaps. Prefer one cloud plot over repeated per-bar zone or box layers.",
             "signals": "Chart markers only. Prefer one-bar edge/transition events, not continuous state markers, so notifications do not repeat every bar.",
             "layers": "Optional sparse zones/lines/labels only when explicitly useful; default [] for normal indicators.",
             "params": "Declare knobs with # @param name type default label and read each via params.get('name', default) with matching fallback.",

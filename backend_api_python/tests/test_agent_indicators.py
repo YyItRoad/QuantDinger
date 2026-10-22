@@ -57,6 +57,8 @@ def test_authoring_contract_ok(client, monkeypatch):
     assert "minimal_backtest_snippet" not in data
     assert any("open_long" in item for item in data["forbidden"])
     assert "Indicator-to-Strategy" in " ".join(data["workflow"])
+    assert "Supported types are line, bar, circle, and cloud" in data["required_fields"]["plots"]
+    assert "repeated per-bar zone or box layers" in data["required_fields"]["plots"]
 
 
 def test_save_indicator_requires_w_scope(client, monkeypatch):

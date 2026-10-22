@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 
+from app.services.factors import compute_factor, list_factors
 from app.services.strategy_v2.factor_research import FactorResearchEngine
 
 
@@ -76,6 +77,139 @@ def test_factor_research_preserves_warmup_before_selected_start():
     )
 
     assert pd.Timestamp(result["icSeries"][0]["time"]) == index[25]
+
+
+def test_factor_research_builds_talib_081_panel_with_selected_parameters():
+    pytest.importorskip("talib")
+    index = pd.date_range("2025-01-01", periods=80, freq="B")
+    frames = {}
+    for offset, symbol in enumerate(["A", "B", "C"]):
+        close = pd.Series(
+            [100 + offset * 5 + day * 0.2 + ((day + offset * 3) % 11) for day in range(len(index))],
+            index=index,
+            dtype=float,
+        )
+        frames[symbol] = pd.DataFrame({
+            "open": close - 0.2,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": 1000 + close * (offset + 1),
+        }, index=index)
+    close_panel = FactorResearchEngine._panel(frames, "close")
+
+    panel = FactorResearchEngine()._factor_panel(
+        frames,
+        "talib:percentrank",
+        close_panel,
+        {"timeperiod": 15},
+    )
+
+    assert panel.shape == close_panel.shape
+    assert panel.iloc[-1].notna().all()
+    assert FactorResearchEngine.warmup_bars("talib:PERCENTRANK", {"timeperiod": 150}) >= 150
+
+
+def test_factor_research_builds_registered_factor_panel_with_selected_parameters():
+    index = pd.date_range("2025-01-01", periods=60, freq="B")
+    frames = {}
+    for offset, symbol in enumerate(["A", "B", "C"]):
+        close = pd.Series(
+            [100 + offset * 4 + day * 0.15 + ((day + offset) % 7) for day in range(len(index))],
+            index=index,
+            dtype=float,
+        )
+        frames[symbol] = pd.DataFrame({
+            "open": close - 0.2,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": 1000 + close * (offset + 1),
+        }, index=index)
+    close_panel = FactorResearchEngine._panel(frames, "close")
+    timestamp = index[40]
+
+    panel = FactorResearchEngine()._factor_panel(
+        frames,
+        "rsi",
+        close_panel,
+        {"period": 7},
+        [timestamp],
+    )
+
+    assert panel.loc[timestamp].notna().all()
+    for symbol, frame in frames.items():
+        expected = compute_factor("rsi", frame.loc[:timestamp], {"period": 7})
+        assert panel.at[timestamp, symbol] == pytest.approx(expected)
+    assert panel.drop(index=timestamp).isna().all().all()
+
+
+def test_registered_factor_research_is_point_in_time_and_uses_canonical_fundamentals():
+    index = pd.date_range("2025-01-01", periods=50, freq="B")
+    timestamp = index[30]
+    clean = {}
+    changed = {}
+    for offset, symbol in enumerate(["A", "B", "C"]):
+        prices = [100.0 + offset * 3 + day * 0.2 + ((day + offset) % 5) for day in range(len(index))]
+        altered = list(prices)
+        for day in range(31, len(index)):
+            altered[day] *= 2.0 if offset % 2 == 0 else 0.5
+        clean[symbol] = pd.DataFrame({"open": prices, "close": prices}, index=index)
+        changed[symbol] = pd.DataFrame({"open": altered, "close": altered}, index=index)
+
+    engine = FactorResearchEngine()
+    clean_panel = engine._factor_panel(
+        clean,
+        "skewness",
+        engine._panel(clean, "close"),
+        {"period": 10},
+        [timestamp],
+    )
+    changed_panel = engine._factor_panel(
+        changed,
+        "skewness",
+        engine._panel(changed, "close"),
+        {"period": 10},
+        [timestamp],
+    )
+
+    pd.testing.assert_series_equal(clean_panel.loc[timestamp], changed_panel.loc[timestamp])
+    assert FactorResearchEngine.required_fields("book_to_price") == {
+        "shareholder_equity",
+        "market_cap",
+    }
+    assert FactorResearchEngine.required_fields("free_cash_flow_yield") == {
+        "free_cash_flow",
+        "market_cap",
+    }
+
+
+def test_factor_research_supports_every_registered_technical_factor():
+    index = pd.date_range("2025-01-01", periods=260, freq="B")
+    step = pd.Series(range(len(index)), index=index, dtype=float)
+    frames = {}
+    for offset, symbol in enumerate(["A", "B", "C"]):
+        close = 100.0 + step * (0.15 + offset * 0.01) + ((step + offset) % 11)
+        frames[symbol] = pd.DataFrame({
+            "open": close - 0.3,
+            "high": close + 1.2,
+            "low": close - 1.1,
+            "close": close,
+            "volume": 1000.0 + step * 3.0 + offset * 100.0,
+        }, index=index)
+    engine = FactorResearchEngine()
+    close_panel = engine._panel(frames, "close")
+    timestamp = index[-1]
+
+    for definition in list_factors(factor_type="technical"):
+        panel = engine._factor_panel(
+            frames,
+            definition["factor_id"],
+            close_panel,
+            definition["default_params"],
+            [timestamp],
+        )
+        assert panel.loc[timestamp].notna().all(), definition["factor_id"]
 
 
 def test_factor_research_applies_membership_intervals_on_each_research_date():
@@ -197,3 +331,53 @@ def test_factor_research_sizes_groups_from_usable_factor_cross_section():
 
     assert result["effectiveGroups"] == 2
     assert result["sampleDiagnostics"]["medianCrossSectionSize"] == 4
+
+
+def test_factor_research_warmup_bars_handles_shorthand_and_custom_multistage_factors():
+    index = pd.date_range("2025-01-01", periods=200, freq="B")
+    step = pd.Series(range(len(index)), index=index, dtype=float)
+    frames = {}
+    for offset, symbol in enumerate(["A", "B", "C"]):
+        close = 100.0 + step * (0.15 + offset * 0.01) + ((step + offset) % 11)
+        frames[symbol] = pd.DataFrame({
+            "open": close - 0.3,
+            "high": close + 1.2,
+            "low": close - 1.1,
+            "close": close,
+            "volume": 1000.0 + step * 3.0 + offset * 100.0,
+        }, index=index)
+    engine = FactorResearchEngine()
+
+    cases = [
+        ("momentum_20", None, 21),
+        ("momentum_60", None, 61),
+        ("volatility_45", None, 46),
+        ("reversal", None, 6),
+        ("reversal_5", None, 6),
+        ("tema", {"period": 50}, 150),
+        ("trix", {"period": 30}, 91),
+        ("dema", {"period": 50}, 100),
+        ("adx", {"period": 30}, 60),
+        ("zlema", {"period": 40}, 59),
+        ("hma", {"period": 100}, 110),
+        ("kama", {"period": 20}, 21),
+        ("ema_slope", {"slope_period": 15}, 35),
+        ("macd", {"signal_period": 20}, 46),
+        ("stochastic", {"smooth_k": 10, "smooth_d": 10}, 32),
+        ("tsi", {"fast_period": 20}, 46),
+        ("keltner_channels", {"atr_period": 30}, 30),
+    ]
+    for factor_id, params, expected_warmup in cases:
+        warmup = FactorResearchEngine.warmup_bars(factor_id, params)
+        assert warmup == expected_warmup, factor_id
+        sliced_frames = {symbol: frame.iloc[:warmup] for symbol, frame in frames.items()}
+        sliced_close = engine._panel(sliced_frames, "close")
+        timestamp = sliced_close.index[-1]
+        panel = engine._factor_panel(
+            sliced_frames,
+            factor_id,
+            sliced_close,
+            params,
+            [timestamp],
+        )
+        assert panel.loc[timestamp].notna().all(), factor_id

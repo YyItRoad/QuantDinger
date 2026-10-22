@@ -15,7 +15,7 @@ from typing import Any
 
 from app.events.dispatcher import StrategyDueDispatcher
 from app.events.evaluator import StrategyEvaluationBatchHandler
-from app.events.protocol import MarketBarClosedV1, StrategyEvaluationBatchV1
+from app.events.protocol import MarketBarClosedV1
 from app.services.event_inbox import InboxClaim
 from app.services.strategy_event_subscriptions import strategy_shard
 from app.services.strategy_runtime.scheduler import CooperativeRuntimeScheduler

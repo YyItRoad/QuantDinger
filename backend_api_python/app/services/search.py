@@ -1,8 +1,6 @@
 """Search service with provider fallback and API-key rotation."""
 import os
 import requests
-import json
-import time
 import re
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Callable

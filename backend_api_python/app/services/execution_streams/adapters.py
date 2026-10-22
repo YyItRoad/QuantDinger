@@ -511,17 +511,13 @@ class BitgetExecutionAdapter(PrivateWebSocketAdapter):
 
     def url(self) -> str:
         if exchange_trading_environment(self.config, "bitget") != "live":
-            return "wss://wspap.bitget.com/v2/ws/private"
-        return "wss://ws.bitget.com/v2/ws/private"
+            return "wss://wspap.bitget.com/v3/ws/private"
+        return "wss://ws.bitget.com/v3/ws/private"
 
     def on_open_messages(self) -> List[Dict[str, Any]]:
-        timestamp = str(int(time.time()))
+        timestamp = str(int(time.time() * 1000))
         secret = str(self.config.get("secret_key") or self.config.get("secret") or "")
         sign = _b64_hmac(secret, f"{timestamp}GET/user/verify")
-        inst_type = "SPOT" if self.market_type == "spot" else str(
-            self.config.get("product_type") or self.config.get("productType") or "USDT-FUTURES"
-        ).upper()
-        self._inst_type = inst_type
         return [{
             "op": "login",
             "args": [{
@@ -538,7 +534,7 @@ class BitgetExecutionAdapter(PrivateWebSocketAdapter):
                 self.mark_ready()
                 ws.send(json.dumps({
                     "op": "subscribe",
-                    "args": [{"instType": self._inst_type, "channel": "fill", "instId": "default"}],
+                    "args": [{"instType": "UTA", "topic": "fill"}],
                 }))
             else:
                 self.on_state("error", f"Bitget login failed: {payload}", False)

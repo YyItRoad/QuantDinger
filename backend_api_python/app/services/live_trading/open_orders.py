@@ -28,10 +28,10 @@ def _compact_orders(rows: list[dict], exchange: str, market_type: str) -> list[d
             "exchange_order_id": str(row.get("orderId") or ""),
             "side": str(row.get("side") or "").lower(),
             "order_type": str(row.get("orderType") or ""),
-            "price": float(row.get("priceAvg" if exchange == "bitget" and market_type == "spot" else "price") or row.get("price") or 0),
-            "amount": float(row.get("qty" if exchange == "bybit" else "size") or 0),
-            "filled": float(row.get("cumExecQty" if exchange == "bybit" else "baseVolume") or 0),
-            "status": str(row.get("orderStatus" if exchange == "bybit" else "status") or ""),
+            "price": float(row.get("avgPrice") or row.get("priceAvg") or row.get("price") or 0),
+            "amount": float(row.get("qty") or row.get("size") or 0),
+            "filled": float(row.get("cumExecQty") or row.get("baseVolume") or 0),
+            "status": str(row.get("orderStatus") or row.get("status") or ""),
         })
     return result
 
@@ -60,10 +60,8 @@ def fetch_exchange_open_orders(client, *, exchange_id: str, market_type: str, sy
         elif mt == "swap":
             params["settleCoin"] = "USDT"
     elif ex == "bitget":
-        path = "/api/v2/spot/trade/unfilled-orders" if mt == "spot" else "/api/v2/mix/order/orders-pending"
-        params = {"limit": 100}
-        if mt == "swap":
-            params["productType"] = "USDT-FUTURES"
+        path = "/api/v3/trade/unfilled-orders"
+        params = {"limit": 100, "category": "SPOT" if mt == "spot" else "USDT-FUTURES"}
         if symbol:
             params["symbol"] = compact
     elif ex == "okx":
@@ -102,15 +100,11 @@ def fetch_exchange_open_orders(client, *, exchange_id: str, market_type: str, sy
             normalized = _compact_orders(rows, ex, mt)
         elif ex == "bitget":
             payload = raw.get("data") if isinstance(raw, dict) else None
-            if mt == "spot":
-                rows = _rows(payload)
-            else:
-                if not isinstance(payload, dict) or "entrustedList" not in payload:
-                    raise LiveTradingError("invalid_open_orders_response")
-                entrusted = payload.get("entrustedList")
-                rows = _rows([] if entrusted is None else entrusted)
-            more = len(rows) >= 100
-            cursor = str((rows[-1].get("orderId") if mt == "spot" else payload.get("endId")) or "") if rows else ""
+            if not isinstance(payload, dict) or "list" not in payload:
+                raise LiveTradingError("invalid_open_orders_response")
+            rows = _rows(payload.get("list"))
+            cursor = str(payload.get("cursor") or "")
+            more = bool(cursor)
             normalized = _compact_orders(rows, ex, mt)
         elif ex == "okx":
             rows = _rows(raw.get("data") if isinstance(raw, dict) else None)
@@ -152,5 +146,5 @@ def fetch_exchange_open_orders(client, *, exchange_id: str, market_type: str, sy
             if not cursor or cursor in cursors:
                 raise LiveTradingError("open_orders_pagination_stalled")
             cursors.add(cursor)
-            params[{"bybit": "cursor", "bitget": "idLessThan", "okx": "after"}[ex]] = cursor
+            params[{"bybit": "cursor", "bitget": "cursor", "okx": "after"}[ex]] = cursor
     raise LiveTradingError("open_orders_pagination_limit")

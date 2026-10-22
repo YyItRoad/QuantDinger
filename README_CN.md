@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/OpenByteInc/QuantDinger">
-    <img src="docs/screenshots/logo.jpg" alt="QuantDinger logo" width="180" height="180">
+    <img src="docs/screenshots/logo.png" alt="QuantDinger logo" width="420">
   </a>
 
   <h1>QuantDinger</h1>
@@ -393,7 +393,7 @@ docker compose \
 ## JEV 驱动的交易前决策
 
 QuantDinger 可以在实盘开仓订单之前设置结构化 AI 决策门。创建普通实盘策略时可启用
-**AI 决策过滤**，也可以在闪电交易中开启。开仓指令到达交易所前，QuantDinger 会将订单、
+**AI 决策过滤**。策略开仓指令到达交易所前，QuantDinger 会将订单、
 策略上下文、资金敞口、持仓和预算状态发送给
 [TypeSafe Jev](https://docs.typesafe.ai/introduction)。Jev 返回类型化 Choice 结果、概率和
 置信度，无需从自然语言中解析决策。应用会在可审计的决策时间线中展示提供商、检查项、结果、
@@ -414,7 +414,7 @@ QuantDinger 可以在实盘开仓订单之前设置结构化 AI 决策门。创�
 
 ```mermaid
 flowchart TD
-    A["策略信号 / 闪电交易指令"] --> B["确定性风控与订单预算检查"]
+    A["策略开仓信号"] --> B["确定性风控与订单预算检查"]
     B -->|"基础检查不通过"| R["拒绝下单"]
     B -->|"基础检查通过"| C["构造 Decision Context V2"]
 

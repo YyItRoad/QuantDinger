@@ -69,6 +69,19 @@ from app.services.instrument_rules import (
             (0.001, 0.002, 5.0, 0.5, 0.001),
         ),
         (
+            "bitget",
+            "swap",
+            {
+                "quantityMultiplier": "0.0001",
+                "quantityPrecision": "4",
+                "minOrderQty": "0.0002",
+                "minOrderAmount": "5",
+                "priceMultiplier": "0.1",
+                "pricePrecision": "1",
+            },
+            (0.0001, 0.0002, 5.0, 0.1, 1.0),
+        ),
+        (
             "gate",
             "swap",
             {
@@ -94,6 +107,19 @@ from app.services.instrument_rules import (
                 "minTradeUSDT": "1",
             },
             (0.000001, 0.0001, 1.0, 0.01, 1.0),
+        ),
+        (
+            "bitget",
+            "spot",
+            {
+                "quantityMultiplier": "0.00001",
+                "quantityPrecision": "5",
+                "minOrderQty": "0.0001",
+                "minOrderAmount": "5",
+                "priceMultiplier": "0.01",
+                "pricePrecision": "2",
+            },
+            (0.00001, 0.0001, 5.0, 0.01, 1.0),
         ),
         (
             "gate",

@@ -14,7 +14,9 @@ from app.utils.config_loader import clear_config_cache
 from app.utils.auth import login_required, admin_required
 from app.services.settings.branding import build_brand_config
 from app.services.settings.env_file import read_env_file, write_env_file
+from app.utils.redaction import redact_secrets
 from app.services.settings.runtime import reload_runtime_env, refresh_runtime_services
+from app.services.settings.capabilities import get_feature_flags
 
 logger = get_logger(__name__)
 
@@ -46,10 +48,34 @@ STRATEGY_RUNTIME_SETTINGS = {
     'BAR_IDLE_WAKE_INTERVAL_SEC',
 }
 
+TRADING_RUNTIME_SETTINGS = {
+    'ORDER_MODE',
+    'MAKER_WAIT_SEC',
+    'ALLOW_LOCAL_DESKTOP_BROKERS',
+    'ENABLE_PENDING_ORDER_WORKER',
+    'DISABLE_RESTORE_RUNNING_STRATEGIES',
+}
+
+AGENT_RUNTIME_SETTINGS = {
+    'AGENT_LIVE_TRADING_ENABLED',
+    'QUANTDINGER_DEPLOYMENT_MODE',
+    'AGENT_JOBS_MAX_WORKERS',
+    'ENABLE_REFLECTION_WORKER',
+    'REFLECTION_WORKER_INTERVAL_SEC',
+    'REFLECTION_MIN_AGE_DAYS',
+    'REFLECTION_VALIDATE_LIMIT',
+    'ENABLE_CONFIDENCE_CALIBRATION',
+    'ENABLE_AI_ENSEMBLE',
+    'AI_ENSEMBLE_MODELS',
+    'AI_CALIBRATION_MARKETS',
+    'AI_CALIBRATION_LOOKBACK_DAYS',
+    'AI_CALIBRATION_MIN_SAMPLES',
+}
+
 RESTART_REQUIRED_SETTINGS = {
     'SECRET_KEY',
     'CREDENTIAL_ENCRYPTION_KEY',
-} | STRATEGY_RUNTIME_SETTINGS
+} | STRATEGY_RUNTIME_SETTINGS | TRADING_RUNTIME_SETTINGS | AGENT_RUNTIME_SETTINGS
 
 # ---------------------------------------------------------------
 # ---------------------------------------------------------------
@@ -72,18 +98,17 @@ ADVANCED_KEYS = {
     'ALPHA_VANTAGE_API_KEY', 'ALPHA_VANTAGE_BASE_URL', 'ALPHA_VANTAGE_TIMEOUT', 'ALPHA_VANTAGE_NEWS_LIMIT',
     'AI_CODE_GEN_MODEL', 'LLM_PROXY_URL', 'LLM_USE_SYSTEM_PROXY',
     'JEV_BASE_URL', 'JEV_MODEL', 'JEV_TIMEOUT_SECONDS', 'JEV_MIN_CONFIDENCE', 'AI_DECISION_TIMEOUT_SECONDS',
-    'EVENT_RADAR_JEV_MIN_CONFIDENCE', 'EVENT_RADAR_NEWS_LOOKBACK_DAYS', 'EVENT_RADAR_MAX_EVENTS',
     'SEC_EDGAR_USER_AGENT',
     'OPENAI_BASE_URL', 'DEEPSEEK_BASE_URL', 'GROK_BASE_URL', 'ATLASCLOUD_BASE_URL', 'MINIMAX_BASE_URL',
     # Trading internals
     'ORDER_MODE', 'MAKER_WAIT_SEC',
-    'SPOT_CLOSE_SAFETY_RATIO', 'SPOT_OPEN_QUOTE_BUFFER',
     'FINNHUB_API_KEY', 'FINNHUB_FREE_ONLY',
     'TRADING_ECONOMICS_CLIENT', 'TRADING_ECONOMICS_KEY',
     'COINGLASS_API_KEY', 'CRYPTOQUANT_API_KEY', 'TIINGO_API_KEY',
     'TWELVE_DATA_API_KEY', 'ADANOS_API_KEY',
     # Agent gateway (operator-level)
     'AGENT_JOBS_MAX_WORKERS',
+    'QUANTDINGER_DEPLOYMENT_MODE', 'AI_ENSEMBLE_MODELS',
     'ENABLE_PENDING_ORDER_WORKER', 'DISABLE_RESTORE_RUNNING_STRATEGIES',
     # Distributed strategy runtime tuning
     'SHARED_PUBLIC_MARKET_FALLBACK_TTL_SEC',
@@ -123,6 +148,35 @@ ADVANCED_KEYS = {
 }
 
 CONFIG_SCHEMA = {
+
+    'features': {
+        'title': 'settings.group.features',
+        'icon': 'control',
+        'order': -1,
+        'items': [
+            {
+                'key': 'BILLING_ENABLED',
+                'label': 'settings.field.BILLING_ENABLED',
+                'type': 'boolean',
+                'default': 'False',
+                'description': 'settings.desc.BILLING_ENABLED'
+            },
+            {
+                'key': 'MARKETPLACE_ENABLED',
+                'label': 'settings.field.MARKETPLACE_ENABLED',
+                'type': 'boolean',
+                'default': 'False',
+                'description': 'settings.desc.MARKETPLACE_ENABLED'
+            },
+            {
+                'key': 'ENABLE_REGISTRATION',
+                'label': 'settings.field.ENABLE_REGISTRATION',
+                'type': 'boolean',
+                'default': 'True',
+                'description': 'settings.desc.ENABLE_REGISTRATION'
+            },
+        ]
+    },
 
     # Frontend reads these via /api/settings/brand-config (no auth) so logos,
     # social links, version label and legal modals can be rebranded without
@@ -390,55 +444,6 @@ CONFIG_SCHEMA = {
                 'type': 'number',
                 'default': 0.55,
                 'description': 'settings.desc.JEV_MIN_CONFIDENCE'
-            },
-            {
-                'key': 'EVENT_RADAR_ENABLED',
-                'label': 'settings.field.EVENT_RADAR_ENABLED',
-                'type': 'boolean',
-                'default': 'True',
-                'description': 'settings.desc.EVENT_RADAR_ENABLED'
-            },
-            {
-                'key': 'EVENT_RADAR_JEV_MIN_CONFIDENCE',
-                'label': 'settings.field.EVENT_RADAR_JEV_MIN_CONFIDENCE',
-                'type': 'number',
-                'default': 0.65,
-                'description': 'settings.desc.EVENT_RADAR_JEV_MIN_CONFIDENCE'
-            },
-            {
-                'key': 'EVENT_RADAR_NEWS_LOOKBACK_DAYS',
-                'label': 'settings.field.EVENT_RADAR_NEWS_LOOKBACK_DAYS',
-                'type': 'number',
-                'default': 2,
-                'description': 'settings.desc.EVENT_RADAR_NEWS_LOOKBACK_DAYS'
-            },
-            {
-                'key': 'EVENT_RADAR_MAX_EVENTS',
-                'label': 'settings.field.EVENT_RADAR_MAX_EVENTS',
-                'type': 'number',
-                'default': 8,
-                'description': 'settings.desc.EVENT_RADAR_MAX_EVENTS'
-            },
-            {
-                'key': 'EVENT_RADAR_CRYPTO_RSS_ENABLED',
-                'label': 'settings.field.EVENT_RADAR_CRYPTO_RSS_ENABLED',
-                'type': 'boolean',
-                'default': 'True',
-                'description': 'settings.desc.EVENT_RADAR_CRYPTO_RSS_ENABLED'
-            },
-            {
-                'key': 'EVENT_RADAR_YAHOO_FINANCE_RSS_ENABLED',
-                'label': 'settings.field.EVENT_RADAR_YAHOO_FINANCE_RSS_ENABLED',
-                'type': 'boolean',
-                'default': 'True',
-                'description': 'settings.desc.EVENT_RADAR_YAHOO_FINANCE_RSS_ENABLED'
-            },
-            {
-                'key': 'EVENT_RADAR_SEC_EDGAR_ENABLED',
-                'label': 'settings.field.EVENT_RADAR_SEC_EDGAR_ENABLED',
-                'type': 'boolean',
-                'default': 'True',
-                'description': 'settings.desc.EVENT_RADAR_SEC_EDGAR_ENABLED'
             },
             {
                 'key': 'SEC_EDGAR_USER_AGENT',
@@ -777,20 +782,6 @@ CONFIG_SCHEMA = {
                 'description': 'Wait time for limit order fill before switching to market order'
             },
             {
-                'key': 'SPOT_CLOSE_SAFETY_RATIO',
-                'label': 'Spot Close Safety Ratio',
-                'type': 'number',
-                'default': '1.0',
-                'description': 'When closing spot long, sell qty is capped to (exchange free base × this ratio), then floored to lot step. Base-asset fees are already deducted from strategy inventory; lower only if a venue still rejects full closes (valid range 0.9–1.0).'
-            },
-            {
-                'key': 'SPOT_OPEN_QUOTE_BUFFER',
-                'label': 'Spot Open Quote Buffer',
-                'type': 'number',
-                'default': '0.995',
-                'description': 'Fraction of USDT/notional used on spot open (reserve headroom for buy fees). Example 0.995 uses 99.5% of allocated quote (valid range 0.9–1.0).'
-            },
-            {
                 'key': 'ALLOW_LOCAL_DESKTOP_BROKERS',
                 'label': 'Allow IBKR (local desktop broker)',
                 'type': 'boolean',
@@ -823,7 +814,7 @@ CONFIG_SCHEMA = {
                 'key': 'STRATEGY_MAX_ACTIVE',
                 'label': 'settings.field.STRATEGY_MAX_ACTIVE',
                 'type': 'number',
-                'default': '100000',
+                'default': '3000',
                 'description': 'settings.desc.STRATEGY_MAX_ACTIVE',
             },
             {
@@ -1378,11 +1369,11 @@ CONFIG_SCHEMA = {
                 'label': 'Deployment Mode',
                 'type': 'select',
                 'options': [
-                    {'value': '', 'label': 'Single-tenant / self-hosted'},
+                    {'value': 'self_hosted', 'label': 'Single-tenant / self-hosted'},
                     {'value': 'saas', 'label': 'SaaS / hosted (multi-tenant)'},
                     {'value': 'hosted', 'label': 'Hosted (alias of saas)'},
                 ],
-                'default': '',
+                'default': 'self_hosted',
                 'description': 'Set to "saas" on multi-tenant hosted instances. Users self-manage Agent Tokens in Profile; T scope is allowed with in-app risk disclosure. Live trading still requires AGENT_LIVE_TRADING_ENABLED.'
             },
             {
@@ -1485,13 +1476,6 @@ CONFIG_SCHEMA = {
         'icon': 'safety',
         'order': 10,
         'items': [
-            {
-                'key': 'ENABLE_REGISTRATION',
-                'label': 'Enable Registration',
-                'type': 'boolean',
-                'default': 'True',
-                'description': 'Allow new users to register accounts'
-            },
             {
                 'key': 'MFA_ENABLED',
                 'label': 'Enable Authenticator App MFA',
@@ -1649,10 +1633,10 @@ CONFIG_SCHEMA = {
             },
             {
                 'key': 'VERIFICATION_CODE_IP_HOURLY_LIMIT',
-                'label': 'Verification Code IP Hourly Limit',
+                'label': 'settings.field.VERIFICATION_CODE_IP_HOURLY_LIMIT',
                 'type': 'number',
                 'default': '10',
-                'description': 'Maximum verification codes one IP may request per hour.'
+                'description': 'settings.desc.VERIFICATION_CODE_IP_HOURLY_LIMIT'
             },
             {
                 'key': 'VERIFICATION_CODE_MAX_ATTEMPTS',
@@ -1690,14 +1674,6 @@ CONFIG_SCHEMA = {
         'icon': 'dollar',
         'order': 11,
         'items': [
-            {
-                'key': 'BILLING_ENABLED',
-                'label': 'Enable Billing',
-                'type': 'boolean',
-                'default': 'False',
-                'description': 'Enable billing system. Users need credits to use certain features'
-            },
-
             # ===== USDT Pay (v3.0.6+: one fixed address per chain + amount-suffix matching) =====
             # Model: each chain has a single receiving address. Orders are
             # disambiguated by a unique amount suffix in the low decimals
@@ -2006,13 +1982,6 @@ CONFIG_SCHEMA = {
                 'description': 'settings.desc.BILLING_COST_AI_DECISION_FILTER'
             },
             {
-                'key': 'BILLING_COST_EVENT_RADAR',
-                'label': 'settings.field.BILLING_COST_EVENT_RADAR',
-                'type': 'number',
-                'default': '5',
-                'description': 'settings.desc.BILLING_COST_EVENT_RADAR'
-            },
-            {
                 'key': 'MARKETPLACE_PLATFORM_FEE_RATE',
                 'label': 'Marketplace Platform Fee Rate',
                 'type': 'text',
@@ -2096,7 +2065,11 @@ def _effective_schema(env_values=None):
     dotenv file because changing them from a running application cannot be
     applied safely or atomically.
     """
-    return _schema_with_advanced_flags()
+    values = env_values if env_values is not None else read_env_file()
+    schema = _schema_with_advanced_flags()
+    if not get_feature_flags(values)['billing_enabled']:
+        schema.pop('billing', None)
+    return schema
 
 
 @settings_blp.route('/schema', methods=['GET'])
@@ -2107,7 +2080,7 @@ def get_settings_schema():
     return jsonify({
         'code': 1,
         'msg': 'success',
-        'data': _effective_schema()
+        'data': _effective_schema(read_env_file())
     })
 
 
@@ -2116,10 +2089,12 @@ def get_settings_schema():
 def get_public_config():
     """Return non-sensitive config values needed by frontend widgets."""
     from app.config.data_sources import CryptoPublicConfig
+    feature_flags = get_feature_flags(read_env_file())
     return jsonify({
         'code': 1,
         'data': {
             'crypto_public_default_exchange': (CryptoPublicConfig.DEFAULT_EXCHANGE or 'binance').lower(),
+            **feature_flags,
         }
     })
 
@@ -2450,13 +2425,10 @@ def test_connection():
         service = data.get('service')
         
         if service == 'openrouter':
-            from app.services.llm import LLMService
-            llm = LLMService()
-            result = llm.test_connection()
-            if result:
-                return jsonify({'code': 1, 'msg': 'OpenRouter connection successful'})
-            else:
-                return jsonify({'code': 0, 'msg': 'OpenRouter connection failed'})
+            from app.services.llm import LLMProvider, LLMService
+            llm = LLMService(provider=LLMProvider.OPENROUTER)
+            ok, detail = llm.test_connection(LLMProvider.OPENROUTER)
+            return jsonify({'code': 1 if ok else 0, 'msg': detail})
         
         elif service == 'finnhub':
             import requests
@@ -2475,8 +2447,10 @@ def test_connection():
         return jsonify({'code': 0, 'msg': 'Unknown service'})
     
     except Exception as e:
-        logger.error(f"Connection test failed: {e}")
-        return jsonify({'code': 0, 'msg': f'Test failed: {str(e)}'})
+        # The Finnhub endpoint carries the key as a query parameter, and requests
+        # embeds the URL in exception text, so scrub before logging/returning it.
+        logger.error(f"Connection test failed: {redact_secrets(e)}")
+        return jsonify({'code': 0, 'msg': f'Test failed: {redact_secrets(e)}'})
 
 # openapi-compat: legacy import name
 settings_bp = settings_blp

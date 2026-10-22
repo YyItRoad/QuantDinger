@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
+from app.services.live_trading.ws_order_transport import submit_bybit_order
 from app.utils.numeric_precision import floor_decimal_to_step, format_decimal
 
 logger = logging.getLogger(__name__)
@@ -317,6 +318,19 @@ class BybitClient(BaseRestClient):
             payload = payload_get if m == "GET" else payload_post
             prehash = f"{ts_ms}{self.api_key}{self.recv_window_ms}{payload}"
             sign = self._sign(prehash)
+
+            if m == "POST" and path == "/v5/order/create" and isinstance(json_body, dict):
+                ws_result = submit_bybit_order(
+                    api_key=self.api_key,
+                    secret_key=self.secret_key,
+                    body=json_body,
+                    base_url=self.base_url,
+                    recv_window_ms=self.recv_window_ms,
+                    broker_referer=self.broker_referer,
+                    timestamp_ms=int(ts_ms),
+                )
+                if ws_result is not None:
+                    return ws_result
 
             code, data, text = self._request(
                 m,

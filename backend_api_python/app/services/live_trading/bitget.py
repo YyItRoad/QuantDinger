@@ -10,14 +10,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import json
 import logging
 import time
 from decimal import Decimal, ROUND_DOWN
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode
 
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
+from app.services.live_trading.ws_order_transport import submit_bitget_order
 from app.utils.numeric_precision import floor_decimal_to_step, format_decimal
 
 logger = logging.getLogger(__name__)
@@ -40,14 +40,12 @@ class BitgetMixClient(BaseRestClient):
     _CHANNEL_API_CODE = "qvz9x"
 
     _CHANNEL_API_CODE_ORDER_PATHS = {
-        "/api/v2/mix/order/place-order",
-        "/api/v2/mix/order/batch-place-order",
-        "/api/v2/mix/order/modify-order",
-        "/api/v2/mix/order/place-plan-order",
-        "/api/v2/mix/order/place-tpsl-order",
         "/api/v3/trade/place-order",
         "/api/v3/trade/place-batch",
         "/api/v3/trade/modify-order",
+        "/api/v3/trade/cancel-order",
+        "/api/v3/trade/cancel-batch",
+        "/api/v3/trade/place-strategy-order",
     }
 
     def __init__(
@@ -80,7 +78,7 @@ class BitgetMixClient(BaseRestClient):
         self._lev_cache: Dict[str, Tuple[float, bool]] = {}
         self._lev_cache_ttl_sec = 60.0
 
-        # posMode from GET /api/v2/mix/account/account (hedge_mode vs one_way_mode), cached per contract.
+        # holdMode from GET /api/v3/account/settings, cached per contract.
         self._pos_mode_cache: Dict[str, Tuple[float, str]] = {}
         self._pos_mode_cache_ttl_sec = 60.0
 
@@ -94,7 +92,11 @@ class BitgetMixClient(BaseRestClient):
     @staticmethod
     def _parse_fee_detail(raw_fd: Any, *, received_currency: str = "") -> Tuple[Decimal, str]:
         from app.services.live_trading.bitget_fees import fee_storage
-        return fee_storage(raw_fd, received_currency=received_currency)
+        return fee_storage(
+            raw_fd,
+            received_currency=received_currency,
+            v3_positive_cost=True,
+        )
 
     @staticmethod
     def _dec_str(d: Decimal, max_decimals: int = 18, strict_precision: Optional[int] = None) -> str:
@@ -259,28 +261,47 @@ class BitgetMixClient(BaseRestClient):
         return data if isinstance(data, dict) else {"raw": data}
 
     def get_funding_payments(self, *, symbol: str, start_time_ms: int, end_time_ms: int, limit: int = 100):
-        raw = self._signed_request(
-            "GET",
-            "/api/v2/mix/account/bill",
-            params={
-                "productType": "USDT-FUTURES",
-                "businessType": "contract_settle_fee",
-                "startTime": int(start_time_ms),
-                "endTime": int(end_time_ms),
-                "limit": min(100, max(1, int(limit or 100))),
-            },
+        funding_types = (
+            "CONTRACT_MAIN_SETTLE_FEE_USER_IN",
+            "CONTRACT_MAIN_SETTLE_FEE_USER_OUT",
+            "MARGIN_SETTLE_FEE_USER_IN",
+            "MARGIN_SETTLE_FEE_USER_OUT",
         )
-        data = raw.get("data") or {}
-        rows = data.get("bills") if isinstance(data, dict) else []
+        rows = []
+        for record_type in funding_types:
+            raw = self._signed_request(
+                "GET",
+                "/api/v3/account/financial-records",
+                params={
+                    "type": record_type,
+                    "startTime": int(start_time_ms),
+                    "endTime": int(end_time_ms),
+                    "limit": min(100, max(1, int(limit or 100))),
+                },
+            )
+            data = raw.get("data") or {}
+            if isinstance(data, dict):
+                records = data.get("list")
+                if not isinstance(records, list):
+                    records = data.get("bills")
+                if isinstance(records, list):
+                    rows.extend(records)
         out = []
+        seen = set()
         for item in rows or []:
             if not isinstance(item, dict):
                 continue
-            amount = float(item.get("amount") or 0.0)
+            amount = float(item.get("amount") or item.get("balanceChange") or 0.0)
+            record_id = str(item.get("id") or item.get("billId") or "")
+            record_time = int(item.get("ts") or item.get("cTime") or 0)
+            dedupe_key = record_id or f"{record_time}:{amount}:{item.get('symbol') or symbol}"
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
             out.append({
-                "id": str(item.get("billId") or f"{item.get('cTime')}:{amount}"),
+                "id": record_id or f"{record_time}:{amount}",
                 "symbol": str(item.get("symbol") or symbol), "amount": amount,
-                "asset": str(item.get("coin") or "USDT").upper(), "time": int(item.get("cTime") or 0),
+                "asset": str(item.get("coin") or "USDT").upper(), "time": record_time,
                 "raw": item,
             })
         return out
@@ -292,23 +313,18 @@ class BitgetMixClient(BaseRestClient):
         original_side: str,
         reduce_only: bool,
     ) -> Dict[str, Any]:
-        """
-        POST place-order; on 40774 (hedge vs one-way mismatch) retry with alternate position fields.
-        """
-        sd = (original_side or "").lower()
-        try:
-            return self._signed_request("POST", "/api/v2/mix/order/place-order", json_body=body)
-        except LiveTradingError as e:
-            if "40774" not in str(e):
-                raise
-            b2: Dict[str, Any] = {k: v for k, v in body.items() if k not in ("side", "tradeSide", "reduceOnly")}
-            if "tradeSide" in body:
-                b2["side"] = sd
-                b2["reduceOnly"] = "YES" if reduce_only else "NO"
-            else:
-                b2["tradeSide"] = "close" if reduce_only else "open"
-                b2["side"] = ("sell" if sd == "buy" else "buy") if reduce_only else sd
-            return self._signed_request("POST", "/api/v2/mix/order/place-order", json_body=b2)
+        del original_side, reduce_only
+        ws_result = submit_bitget_order(
+            api_key=self.api_key,
+            secret_key=self.secret_key,
+            passphrase=self.passphrase,
+            body=body,
+            simulated=self.simulated_trading,
+            api_code=self.channel_api_code,
+        )
+        if ws_result is not None:
+            return ws_result
+        return self._signed_request("POST", "/api/v3/trade/place-order", json_body=body)
 
     def _public_request(self, method: str, path: str, *, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         code, data, text = self._request(method, path, params=params, headers=None, json_body=None, data=None)
@@ -324,7 +340,7 @@ class BitgetMixClient(BaseRestClient):
         """
         Public mix ticker (for USDT-notional -> base size conversion in quick trade).
 
-        Endpoint: GET /api/v2/mix/market/ticker
+        Endpoint: GET /api/v3/market/tickers
         """
         sym = to_bitget_um_symbol(symbol)
         pt = str(kwargs.get("product_type") or "USDT-FUTURES")
@@ -333,8 +349,8 @@ class BitgetMixClient(BaseRestClient):
         try:
             raw = self._public_request(
                 "GET",
-                "/api/v2/mix/market/ticker",
-                params={"symbol": sym, "productType": pt},
+                "/api/v3/market/tickers",
+                params={"symbol": sym, "category": pt},
             )
         except Exception:
             return {}
@@ -345,7 +361,8 @@ class BitgetMixClient(BaseRestClient):
             return {}
         try:
             last = float(
-                data.get("lastPr")
+                data.get("lastPrice")
+                or data.get("lastPr")
                 or data.get("last")
                 or data.get("close")
                 or data.get("markPrice")
@@ -368,7 +385,7 @@ class BitgetMixClient(BaseRestClient):
         """
         Returns Bitget posMode for the contract account: 'hedge_mode', 'one_way_mode', or '' if unknown.
 
-        GET /api/v2/mix/account/account
+        GET /api/v3/account/settings
         """
         sym = to_bitget_um_symbol(symbol)
         if not sym:
@@ -386,17 +403,12 @@ class BitgetMixClient(BaseRestClient):
         try:
             resp = self._signed_request(
                 "GET",
-                "/api/v2/mix/account/account",
-                params={
-                    "symbol": sym.lower(),
-                    "productType": pt,
-                    "marginCoin": mc.lower() or "usdt",
-                },
+                "/api/v3/account/settings",
             )
             d = resp.get("data") if isinstance(resp, dict) else None
             mode = ""
             if isinstance(d, dict):
-                mode = str(d.get("posMode") or "").strip().lower()
+                mode = str(d.get("holdMode") or "").strip().lower()
             self._pos_mode_cache[key] = (now, mode)
             return mode
         except Exception:
@@ -413,10 +425,7 @@ class BitgetMixClient(BaseRestClient):
         hold_side: str = "",
     ) -> Dict[str, Any]:
         """
-        Bitget mix place-order: hedge_mode requires tradeSide open/close and
-        uses ``side`` as the position direction; one_way_mode requires
-        reduceOnly YES/NO and must not send tradeSide. ``holdSide`` belongs to
-        other Bitget endpoints and is not a v2 place-order parameter.
+        Build UTA V3 position fields for one-way or hedge mode.
         """
         sd = (side or "").lower()
         if sd not in ("buy", "sell"):
@@ -436,18 +445,17 @@ class BitgetMixClient(BaseRestClient):
                     ("sell" if sd == "buy" else "buy") if reduce_only else sd
                 )
             out: Dict[str, Any] = {
-                "tradeSide": "close" if reduce_only else "open",
-                "side": direction_side,
+                "side": sd,
+                "posSide": "long" if direction_side == "buy" else "short",
             }
             return out
-        return {"side": sd, "reduceOnly": "YES" if reduce_only else "NO"}
+        return {"side": sd, "reduceOnly": "yes" if reduce_only else "no"}
 
     def get_contract(self, *, symbol: str, product_type: str = "USDT-FUTURES") -> Dict[str, Any]:
         """
         Fetch contract metadata (best-effort) from public endpoint.
 
-        Endpoint (Bitget v2 mix): GET /api/v2/mix/market/contracts
-        Params: productType, symbol(optional)
+        Endpoint: GET /api/v3/market/instruments
         """
         sym = to_bitget_um_symbol(symbol)
         pt = str(product_type or "USDT-FUTURES")
@@ -461,7 +469,11 @@ class BitgetMixClient(BaseRestClient):
             if obj and (now - float(ts or 0.0)) <= float(self._contract_cache_ttl_sec or 300.0):
                 return obj
 
-        raw = self._public_request("GET", "/api/v2/mix/market/contracts", params={"productType": pt, "symbol": sym})
+        raw = self._public_request(
+            "GET",
+            "/api/v3/market/instruments",
+            params={"category": pt, "symbol": sym},
+        )
         data = raw.get("data") if isinstance(raw, dict) else None
         items = data if isinstance(data, list) else ([data] if isinstance(data, dict) else [])
         first: Dict[str, Any] = items[0] if isinstance(items, list) and items else {}
@@ -471,11 +483,10 @@ class BitgetMixClient(BaseRestClient):
 
     def _normalize_size(self, *, symbol: str, product_type: str, base_size: float) -> Tuple[Decimal, Optional[int]]:
         """
-        Normalize Bitget mix order size.
+        Normalize a Bitget UTA order quantity in base-asset units.
 
-        This system computes `amount` as base-asset quantity (e.g. BTC amount).
-        Bitget mix `size` is typically in contracts; convert using contractSize if available,
-        then align to size step / min trade number (best-effort).
+        UTA v3 accepts ``qty`` directly and publishes its increment through
+        ``quantityMultiplier`` (or ``quantityPrecision`` as a fallback).
         
         Returns:
             Tuple of (normalized_size, precision) where precision is the number of decimal places required.
@@ -490,17 +501,17 @@ class BitgetMixClient(BaseRestClient):
         except Exception:
             contract = {}
 
-        # Convert base qty -> contracts if contractSize is provided.
-        ct = self._to_dec(contract.get("contractSize") or contract.get("contractSz") or contract.get("ctVal") or "0")
         qty = req_base
-        if ct > 0:
-            qty = req_base / ct
 
         # Determine step size.
-        step = self._to_dec(contract.get("sizeMultiplier") or contract.get("sizeStep") or contract.get("lotSize") or "0")
+        step = self._to_dec(
+            contract.get("quantityMultiplier")
+            or contract.get("sizeMultiplier")
+            or "0"
+        )
         size_precision = None
         if step <= 0:
-            sp = contract.get("sizePlace")
+            sp = contract.get("quantityPrecision")
             try:
                 places = int(sp) if sp is not None else 0
             except Exception:
@@ -521,7 +532,7 @@ class BitgetMixClient(BaseRestClient):
                     pass
 
         # Enforce min trade number if present.
-        mn = self._to_dec(contract.get("minTradeNum") or contract.get("minSize") or contract.get("minQty") or "0")
+        mn = self._to_dec(contract.get("minOrderQty") or "0")
         if mn > 0 and qty < mn:
             return (Decimal("0"), size_precision)
         return (qty, size_precision)
@@ -533,12 +544,7 @@ class BitgetMixClient(BaseRestClient):
         product_type: str = "USDT-FUTURES",
         base_size: float,
     ) -> float:
-        """Return the base-asset quantity Bitget can actually submit.
-
-        ``_normalize_size`` returns the exchange order unit (contracts on some
-        instruments).  Fill APIs are normalized back to base quantity, so the
-        durable completion check must compare against the same unit.
-        """
+        """Return the base-asset quantity Bitget UTA can submit."""
         normalized_size, _precision = self._normalize_size(
             symbol=symbol,
             product_type=product_type,
@@ -546,19 +552,7 @@ class BitgetMixClient(BaseRestClient):
         )
         if normalized_size <= 0:
             return 0.0
-        contract: Dict[str, Any] = {}
-        try:
-            contract = self.get_contract(symbol=symbol, product_type=product_type) or {}
-        except Exception:
-            contract = {}
-        contract_size = self._to_dec(
-            contract.get("contractSize")
-            or contract.get("contractSz")
-            or contract.get("ctVal")
-            or "0"
-        )
-        base_quantity = normalized_size * contract_size if contract_size > 0 else normalized_size
-        return float(base_quantity)
+        return float(normalized_size)
 
     def _normalize_price(self, *, symbol: str, product_type: str, price: float) -> Tuple[Decimal, Optional[int]]:
         """
@@ -585,8 +579,8 @@ class BitgetMixClient(BaseRestClient):
         price_precision = None
         step = Decimal("0")
 
-        pp = contract.get("pricePlace")
-        pes = contract.get("priceEndStep")
+        pp = contract.get("pricePrecision")
+        pes = contract.get("priceMultiplier")
         try:
             places = int(pp) if pp is not None else None
         except Exception:
@@ -598,11 +592,10 @@ class BitgetMixClient(BaseRestClient):
 
         if places is not None and 0 <= places <= 18:
             price_precision = places
-            base_tick = Decimal("1").scaleb(-places)
             if end_step > 0:
-                step = base_tick * end_step
+                step = end_step
             else:
-                step = base_tick
+                step = Decimal("1").scaleb(-places)
 
         if step <= 0:
             step = self._to_dec(
@@ -628,42 +621,60 @@ class BitgetMixClient(BaseRestClient):
         return (px, price_precision)
 
     def ping(self) -> bool:
-        code, data, _ = self._request("GET", "/api/v2/public/time")
+        code, data, _ = self._request("GET", "/api/v3/market/time")
         return code == 200 and isinstance(data, dict)
 
     def get_accounts(self, *, product_type: str = "USDT-FUTURES") -> Dict[str, Any]:
         """
         Private endpoint to validate credentials (best-effort).
         """
-        return self._signed_request("GET", "/api/v2/mix/account/accounts", params={"productType": str(product_type or "USDT-FUTURES")})
+        del product_type
+        resp = self._signed_request("GET", "/api/v3/account/assets")
+        if not isinstance(resp, dict):
+            return resp
+        data = resp.get("data")
+        assets = data.get("assets") if isinstance(data, dict) else None
+        if not isinstance(assets, list):
+            return resp
+        if not assets:
+            settings = self._signed_request("GET", "/api/v3/account/settings")
+            settings_data = settings.get("data") if isinstance(settings, dict) else None
+            account_mode = str(
+                settings_data.get("accountMode") if isinstance(settings_data, dict) else ""
+            ).strip().lower()
+            if account_mode in ("hybrid", "switching", "upgrading"):
+                raise LiveTradingError("BITGET_UTA_HYBRID_BALANCE_UNAVAILABLE")
+        out = dict(resp)
+        out["data"] = assets
+        return out
 
     def get_positions(self, *, product_type: str = "USDT-FUTURES", symbol: str = "") -> Dict[str, Any]:
         """
         Get positions (best-effort).
 
-        Endpoint: GET /api/v2/mix/position/all-position
+        Endpoint: GET /api/v3/position/current-position
         When ``symbol`` is set (e.g. ETH/USDT), filters the response list to that contract only.
         """
         resp = self._signed_request(
             "GET",
-            "/api/v2/mix/position/all-position",
-            params={"productType": str(product_type or "USDT-FUTURES")},
+            "/api/v3/position/current-position",
+            params={"category": str(product_type or "USDT-FUTURES")},
         )
-        want = (symbol or "").strip()
-        if not want:
-            return resp
-        sym_key = to_bitget_um_symbol(want).upper()
         if not isinstance(resp, dict):
             return resp
         data = resp.get("data")
-        if not isinstance(data, list):
-            return resp
-        filtered = [
-            p for p in data
-            if isinstance(p, dict) and str(p.get("symbol") or "").strip().upper() == sym_key
-        ]
+        rows = data.get("list") if isinstance(data, dict) else data
+        rows = rows if isinstance(rows, list) else []
+        want = (symbol or "").strip()
+        if want:
+            sym_key = to_bitget_um_symbol(want).upper()
+            rows = [
+                p for p in rows
+                if isinstance(p, dict)
+                and str(p.get("symbol") or "").strip().upper() == sym_key
+            ]
         out = dict(resp)
-        out["data"] = filtered
+        out["data"] = rows
         return out
 
     def get_fee_rate(self, symbol: str, market_type: str = "swap") -> Optional[Dict[str, float]]:
@@ -671,9 +682,13 @@ class BitgetMixClient(BaseRestClient):
         if mt in ("futures", "future", "perp", "perpetual"):
             mt = "swap"
         sym = to_bitget_um_symbol(symbol)
-        business_type = "spot" if mt == "spot" else "mix"
+        category = "SPOT" if mt == "spot" else "USDT-FUTURES"
         try:
-            raw = self._signed_request("GET", "/api/v2/common/trade-rate", params={"symbol": sym, "businessType": business_type})
+            raw = self._signed_request(
+                "GET",
+                "/api/v3/account/fee-rate",
+                params={"symbol": sym, "category": category},
+            )
             data = raw.get("data") if isinstance(raw, dict) else None
             if isinstance(data, dict):
                 maker = abs(float(data.get("makerFeeRate") or 0))
@@ -681,7 +696,13 @@ class BitgetMixClient(BaseRestClient):
                 if maker > 0 or taker > 0:
                     return {"maker": maker, "taker": taker}
         except Exception as e:
-            logger.warning(f"Bitget get_fee_rate({symbol}, businessType={business_type}, symbol_param={sym}) failed: {e}")
+            logger.warning(
+                "Bitget UTA get_fee_rate(%s, category=%s, symbol=%s) failed: %s",
+                symbol,
+                category,
+                sym,
+                e,
+            )
         return None
 
     def set_leverage(
@@ -698,7 +719,7 @@ class BitgetMixClient(BaseRestClient):
         Best-effort set leverage for Bitget mix.
 
         NOTE: Bitget requires leverage configured via a private endpoint; order placement may otherwise use defaults.
-        Endpoint (v2 mix): POST /api/v2/mix/account/set-leverage (best-effort).
+        Endpoint: POST /api/v3/account/set-leverage.
         """
         sym = to_bitget_um_symbol(symbol)
         pt = str(product_type or "USDT-FUTURES")
@@ -739,17 +760,19 @@ class BitgetMixClient(BaseRestClient):
 
         body: Dict[str, Any] = {
             "symbol": sym,
-            "productType": pt,
-            "marginCoin": mc,
+            "category": pt,
             "marginMode": mm,
             "leverage": str(lv),
         }
-        # Some Bitget accounts require holdSide for hedge mode; keep best-effort.
         if hs in ("long", "short"):
-            body["holdSide"] = hs
+            body["posSide"] = hs
 
         try:
-            resp = self._signed_request("POST", "/api/v2/mix/account/set-leverage", json_body=body)
+            resp = self._signed_request(
+                "POST",
+                "/api/v3/account/set-leverage",
+                json_body=body,
+            )
             ok = isinstance(resp, dict) and str(resp.get("code") or "") in ("00000", "0", "")
             data = resp.get("data") if isinstance(resp, dict) else None
             if ok and isinstance(data, dict):
@@ -805,11 +828,10 @@ class BitgetMixClient(BaseRestClient):
 
         body: Dict[str, Any] = {
             "symbol": sym,
-            "productType": str(product_type or "USDT-FUTURES"),
-            "marginCoin": str(margin_coin or "USDT"),
+            "category": str(product_type or "USDT-FUTURES"),
             "marginMode": self._normalize_margin_mode(margin_mode),
             "orderType": "market",
-            "size": self._dec_str(sz_dec, strict_precision=sz_precision),
+            "qty": self._dec_str(sz_dec, strict_precision=sz_precision),
         }
         body.update(
             self._mix_order_position_fields(
@@ -874,12 +896,11 @@ class BitgetMixClient(BaseRestClient):
 
         body: Dict[str, Any] = {
             "symbol": sym,
-            "productType": str(product_type or "USDT-FUTURES"),
-            "marginCoin": str(margin_coin or "USDT"),
+            "category": str(product_type or "USDT-FUTURES"),
             "marginMode": self._normalize_margin_mode(margin_mode),
             "orderType": "limit",
             "price": self._dec_str(px_dec, strict_precision=px_precision),
-            "size": self._dec_str(sz_dec, strict_precision=sz_precision),
+            "qty": self._dec_str(sz_dec, strict_precision=sz_precision),
         }
         body.update(
             self._mix_order_position_fields(
@@ -893,9 +914,9 @@ class BitgetMixClient(BaseRestClient):
         )
         # Force maker behavior when requested (avoid taker fills).
         if post_only:
-            body["force"] = "post_only"
+            body["timeInForce"] = "post_only"
         else:
-            body["force"] = "gtc"
+            body["timeInForce"] = "gtc"
         if client_order_id:
             body["clientOid"] = str(client_order_id)
         raw = self._post_mix_place_order(body, original_side=sd, reduce_only=reduce_only)
@@ -906,8 +927,7 @@ class BitgetMixClient(BaseRestClient):
     def cancel_order(self, *, symbol: str, product_type: str, margin_coin: str = "USDT", order_id: str = "", client_oid: str = "") -> Dict[str, Any]:
         body: Dict[str, Any] = {
             "symbol": to_bitget_um_symbol(symbol),
-            "productType": str(product_type or "USDT-FUTURES"),
-            "marginCoin": str(margin_coin or "USDT"),
+            "category": str(product_type or "USDT-FUTURES"),
         }
         if order_id:
             body["orderId"] = str(order_id)
@@ -915,7 +935,7 @@ class BitgetMixClient(BaseRestClient):
             body["clientOid"] = str(client_oid)
         else:
             raise LiveTradingError("Bitget cancel_order requires order_id or client_oid")
-        return self._signed_request("POST", "/api/v2/mix/order/cancel-order", json_body=body)
+        return self._signed_request("POST", "/api/v3/trade/cancel-order", json_body=body)
 
     def get_order_detail(
         self,
@@ -925,17 +945,24 @@ class BitgetMixClient(BaseRestClient):
         order_id: str = "",
         client_oid: str = "",
     ) -> Dict[str, Any]:
-        params: Dict[str, Any] = {
-            "symbol": to_bitget_um_symbol(symbol),
-            "productType": str(product_type or "USDT-FUTURES"),
-        }
+        del symbol, product_type
+        params: Dict[str, Any] = {}
         if order_id:
             params["orderId"] = str(order_id)
         elif client_oid:
             params["clientOid"] = str(client_oid)
         else:
             raise LiveTradingError("Bitget get_order_detail requires order_id or client_oid")
-        return self._signed_request("GET", "/api/v2/mix/order/detail", params=params)
+        raw = self._signed_request("GET", "/api/v3/trade/order-info", params=params)
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if isinstance(data, dict):
+            row = dict(data)
+            row.setdefault("baseVolume", row.get("cumExecQty"))
+            row.setdefault("filledQty", row.get("cumExecQty"))
+            row.setdefault("priceAvg", row.get("avgPrice"))
+            row.setdefault("state", row.get("orderStatus"))
+            return {**raw, "data": row}
+        return raw
 
     def get_order_fills(
         self,
@@ -944,23 +971,34 @@ class BitgetMixClient(BaseRestClient):
         product_type: str,
         order_id: str,
     ) -> Dict[str, Any]:
+        del symbol
         params: Dict[str, Any] = {
             "orderId": str(order_id),
-            "productType": str(product_type or "USDT-FUTURES"),
-            "symbol": to_bitget_um_symbol(symbol),
+            "category": str(product_type or "USDT-FUTURES"),
         }
         rows = []
         for _ in range(10):
-            raw = self._signed_request("GET", "/api/v2/mix/order/fills", params={**params, "limit": 100})
+            raw = self._signed_request("GET", "/api/v3/trade/fills", params={**params, "limit": 100})
             data = raw.get('data') or {}
-            page = data.get('fillList') or []
+            page = data.get('list') or []
+            normalized = []
+            for item in page:
+                if not isinstance(item, dict):
+                    continue
+                row = dict(item)
+                row.setdefault("baseVolume", row.get("execQty"))
+                row.setdefault("fillPrice", row.get("execPrice"))
+                row.setdefault("tradeId", row.get("execId"))
+                row.setdefault("cTime", row.get("createdTime"))
+                normalized.append(row)
+            page = normalized
             rows.extend(page)
             if len(page) < 100:
                 return {**raw, 'data': {**data, 'fillList': rows}}
-            cursor = str(data.get('endId') or page[-1].get('tradeId') or '')
-            if not cursor or cursor == params.get('idLessThan'):
+            cursor = str(data.get('cursor') or page[-1].get('tradeId') or '')
+            if not cursor or cursor == params.get('cursor'):
                 break
-            params['idLessThan'] = cursor
+            params['cursor'] = cursor
         raise LiveTradingError('strategyRuntime.fillSnapshotNotReady')
 
     def get_order(
@@ -1026,7 +1064,7 @@ class BitgetMixClient(BaseRestClient):
         state = ""
 
         def _fee_from_order_detail_row(drow: Dict[str, Any]) -> Tuple[Decimal, str]:
-            """Best-effort fee on order detail (varies by Bitget API version)."""
+            """Read a Bitget UTA order-level fee using the v3 cost convention."""
             if not isinstance(drow, dict):
                 return Decimal("0"), ""
             fv = drow.get("fee")
@@ -1039,7 +1077,7 @@ class BitgetMixClient(BaseRestClient):
                 or drow.get("deductFeeCoin")
                 or ""
             ).strip()
-            # Bitget V2: feeDetail nested structure (may be list, dict, or JSON string)
+            # feeDetail may be a list, mapping, or JSON string.
             if fv is None or str(fv).strip() in ("", "0", "0.0"):
                 fd_fee, fd_ccy = self._parse_fee_detail(
                     drow.get("feeDetail"),
@@ -1048,7 +1086,7 @@ class BitgetMixClient(BaseRestClient):
                 if fd_ccy:
                     logger.debug("Bitget order detail fee via feeDetail: %.8f %s", fd_fee, fd_ccy)
                     return fd_fee, fd_ccy or ccy
-            fee = -self._to_dec(fv or "0")
+            fee = self._to_dec(fv or "0")
             return fee, ccy
 
         while True:
@@ -1080,9 +1118,13 @@ class BitgetMixClient(BaseRestClient):
                             native = fee_breakdown(
                                 f.get("feeDetail"),
                                 received_currency=settlement_currency,
+                                v3_positive_cost=True,
                             )
                             if not native and f.get("fee") is not None:
-                                native = fee_breakdown({"fee": f["fee"], "feeCoin": f.get("feeCoin") or f.get("feeCcy")})
+                                native = fee_breakdown(
+                                    {"fee": f["fee"], "feeCoin": f.get("feeCoin") or f.get("feeCcy")},
+                                    v3_positive_cost=True,
+                                )
                             for currency, amount in native.items():
                                 fees_by_ccy[currency] = fees_by_ccy.get(currency, 0.0) + amount
                             total_fee = sum(fees_by_ccy.values()) if len(fees_by_ccy) == 1 else 0
@@ -1130,6 +1172,7 @@ class BitgetMixClient(BaseRestClient):
                     detail_fees = fee_breakdown(
                         d.get("feeDetail"),
                         received_currency=settlement_currency,
+                        v3_positive_cost=True,
                     )
                     if not detail_fees and dccy and dccy != "MIXED":
                         detail_fees = {str(dccy).upper(): float(dfee)}

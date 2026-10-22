@@ -245,7 +245,7 @@ class PublicMarketPriceFeed:
         if self.exchange_id == "bybit":
             return f"wss://stream.bybit.com/v5/public/{'linear' if swap else 'spot'}"
         if self.exchange_id == "bitget":
-            return "wss://ws.bitget.com/v2/ws/public"
+            return "wss://ws.bitget.com/v3/ws/public"
         if self.exchange_id == "gate":
             return "wss://fx-ws.gateio.ws/v4/ws/usdt" if swap else "wss://api.gateio.ws/ws/v4/"
         return "wss://api.hbdm.com/swap-ws" if swap else "wss://api.huobi.pro/ws"
@@ -268,7 +268,11 @@ class PublicMarketPriceFeed:
             return [{"op": "subscribe", "args": [f"tickers.{_normalized_symbol(symbol)}" for symbol in self._symbols()]}]
         if self.exchange_id == "bitget":
             return [{"op": "subscribe", "args": [
-                {"instType": "USDT-FUTURES" if swap else "SPOT", "channel": "ticker", "instId": _normalized_symbol(symbol)}
+                {
+                    "instType": "usdt-futures" if swap else "spot",
+                    "topic": "ticker",
+                    "symbol": _normalized_symbol(symbol),
+                }
                 for symbol in self._symbols()
             ]}]
         if self.exchange_id == "gate":
@@ -318,7 +322,7 @@ class PublicMarketPriceFeed:
             ]
         if self.exchange_id == "bitget":
             return [
-                (str(item.get("instId") or ""), float(
+                (str(item.get("symbol") or ""), float(
                     (
                         (item.get("lastPr") or item.get("lastPrice") or item.get("markPrice"))
                         if self.market_type == "spot"

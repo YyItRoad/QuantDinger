@@ -98,6 +98,65 @@ def test_agent_openapi_matches_registered_route_source():
     assert _agent_route_operations() == documented
 
 
+def _agent_route_scopes() -> dict[tuple[str, str], str | None]:
+    """Map (method, path) to the scope letter declared by @agent_required(SCOPE_X)."""
+    routes_root = BACKEND_ROOT / "backend_api_python" / "app" / "routes" / "agent_v1"
+    scopes: dict[tuple[str, str], str | None] = {}
+    for route_file in routes_root.glob("*.py"):
+        if route_file.name == "me_tokens.py":
+            continue
+        tree = ast.parse(route_file.read_text(encoding="utf-8-sig"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            path: str | None = None
+            methods = {"GET"}
+            scope: str | None = None
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                func = decorator.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr == "route"
+                    and decorator.args
+                    and isinstance(decorator.args[0], ast.Constant)
+                ):
+                    suffix = re.sub(r"<(?:[^:>]+:)?([^>]+)>", r"{\1}", str(decorator.args[0].value))
+                    path = f"/api/agent/v1{suffix}"
+                    for keyword in decorator.keywords:
+                        if keyword.arg == "methods":
+                            methods = {str(value).upper() for value in ast.literal_eval(keyword.value)}
+                elif isinstance(func, ast.Name) and func.id == "agent_required" and decorator.args:
+                    arg = decorator.args[0]
+                    name = arg.id if isinstance(arg, ast.Name) else getattr(arg, "attr", "")
+                    scope = name.removeprefix("SCOPE_") or None
+            if path is not None:
+                for method in methods:
+                    scopes[(method, path)] = scope
+    return scopes
+
+
+def test_agent_openapi_scope_classes_match_route_decorators():
+    agent_paths = json.loads(
+        (BACKEND_ROOT / "docs" / "agent" / "agent-openapi.json").read_text(encoding="utf-8")
+    )["paths"]
+    documented = {
+        (method.upper(), path): item[method].get("x-scope-class")
+        for path, item in agent_paths.items()
+        for method in item
+        if method.upper() in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+    }
+    actual = _agent_route_scopes()
+    assert set(actual) == set(documented)
+    mismatches = {
+        key: (actual[key], scope)
+        for key, scope in documented.items()
+        if actual[key] != scope
+    }
+    assert not mismatches, f"route scope != documented x-scope-class: {mismatches}"
+
+
 def test_mcp_metadata_matches_exported_tools_and_documented_routes():
     metadata_names = {tool.id.removeprefix("mcp.") for tool in MCP_AGENT_TOOLS}
     assert metadata_names == _mcp_tool_names()
@@ -171,7 +230,6 @@ def test_billing_settings_only_expose_costs_with_real_charge_paths():
         "BILLING_COST_AI_COPILOT_CHAT",
         "BILLING_COST_AI_COPILOT_IMAGE",
         "BILLING_COST_AI_DECISION_FILTER",
-        "BILLING_COST_EVENT_RADAR",
     }
     assert set(DEFAULT_BILLING_CONFIG) == {
         "enabled",
@@ -182,7 +240,6 @@ def test_billing_settings_only_expose_costs_with_real_charge_paths():
         "cost_ai_copilot_chat",
         "cost_ai_copilot_image",
         "cost_ai_decision_filter",
-        "cost_event_radar",
     }
     assert "ai_indicator_to_strategy" not in FEATURE_NAMES
     assert "ai_copilot_radar" not in FEATURE_NAMES
@@ -195,7 +252,6 @@ def test_billing_settings_only_expose_costs_with_real_charge_paths():
         "ai_copilot_chat": "app/routes/ai_chat.py",
         "ai_copilot_image": "app/routes/ai_chat.py",
         "ai_decision_filter": "app/services/ai_decision_filter.py",
-        "event_radar": "app/services/event_radar.py",
     }
     backend_root = BACKEND_ROOT / "backend_api_python"
     for feature, relative_path in charge_paths.items():

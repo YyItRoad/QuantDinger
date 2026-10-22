@@ -23,17 +23,17 @@ def test_bitget_signed_request_sends_the_same_query_order_it_signs(monkeypatch, 
 
     client._signed_request(
         "GET",
-        "/api/v2/mix/account/account",
-        params={"symbol": "btcusdt", "productType": "USDT-FUTURES", "marginCoin": "usdt"},
+        "/api/v3/account/fee-rate",
+        params={"symbol": "btcusdt", "category": "USDT-FUTURES"},
     )
 
     sent_params = captured["params"]
-    assert list(sent_params) == ["marginCoin", "productType", "symbol"]
+    assert list(sent_params) == ["category", "symbol"]
     query = urlencode(list(sent_params.items()))
     expected = client._sign(
         "1700000000000",
         "GET",
-        f"/api/v2/mix/account/account?{query}",
+        f"/api/v3/account/fee-rate?{query}",
         "",
     )
     assert captured["headers"]["ACCESS-SIGN"] == expected

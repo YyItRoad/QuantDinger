@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from flask import g, jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
@@ -563,7 +563,7 @@ def summary():
         # Calendar data: organized by month for monthly calendar view
         # Format: { "2024-01": { "days": { "01": 123.45, "02": -50.0, ... }, "total": 500.0 }, ... }
         import calendar as cal_module
-        from datetime import datetime, timedelta
+        from datetime import datetime
 
         calendar_data: Dict[str, Dict[str, Any]] = {}
         for d, p in day_to_profit.items():

@@ -159,7 +159,11 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str, *, currency: str
                 if isinstance(data, list) and data:
                     row = None
                     for item in data:
-                        if isinstance(item, dict) and str(item.get("marginCoin") or "").upper() == target_currency:
+                        if (
+                            isinstance(item, dict)
+                            and str(item.get("marginCoin") or item.get("coin") or "").upper()
+                            == target_currency
+                        ):
                             row = item
                             break
                     if row is None and isinstance(data[0], dict):
@@ -172,7 +176,13 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str, *, currency: str
                             or row.get("isolatedMaxAvailable")
                             or 0
                         )
-                        equity = row.get("accountEquity") or row.get("usdtEquity") or row.get("equity") or available
+                        equity = (
+                            row.get("accountEquity")
+                            or row.get("usdtEquity")
+                            or row.get("equity")
+                            or row.get("balance")
+                            or available
+                        )
                         result["available"] = float(available or 0)
                         result["total"] = float(equity or 0) if equity is not None else result["available"]
                         return result
@@ -185,7 +195,9 @@ def parse_balance(raw: Any, exchange_id: str, market_type: str, *, currency: str
                             available = float(item.get("available") or 0)
                             frozen = float(item.get("frozen") or item.get("locked") or 0)
                             result["available"] = available
-                            result["total"] = available + frozen
+                            result["total"] = float(item.get("equity") or item.get("balance") or 0)
+                            if result["total"] <= 0:
+                                result["total"] = available + frozen
                             return result
                     return result
 

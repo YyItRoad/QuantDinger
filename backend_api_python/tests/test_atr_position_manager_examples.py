@@ -4,6 +4,7 @@ import unittest
 import pandas as pd
 
 from app.services.strategy_v2.runtime import StrategyV2LiveSession, compile_strategy_v2
+from app.services.strategy_v2.contract import PLATFORM_MAX_LEVERAGE
 from app.services.strategy_v2.position_management_timeframe import (
     position_management_candidate,
 )
@@ -93,7 +94,7 @@ class AtrPositionManagerExamplesTest(unittest.TestCase):
                 manifest = compile_strategy_v2(_source(path)).manifest
                 self.assertEqual(manifest.driving_frequency, "1h")
                 self.assertEqual(manifest.direction_mode, direction)
-                self.assertEqual(manifest.max_leverage, 125)
+                self.assertEqual(manifest.max_leverage, PLATFORM_MAX_LEVERAGE)
                 self.assertIs(
                     manifest.metadata()["metadata"]["position_management_generic"],
                     True,

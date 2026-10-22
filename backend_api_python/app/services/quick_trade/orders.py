@@ -9,6 +9,24 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def normalize_order_status(status: str, order: Any = None) -> str:
+    """Use native terminal evidence before comparing pre-rounding quantities."""
+    status = str(status or "").strip().lower()
+    order = order if isinstance(order, dict) else {}
+    finish = str(order.get("finish_as") or "").lower()
+    if status in {"finished", "closed"}:
+        if finish == "filled":
+            return "filled"
+        if finish:
+            return "cancelled"
+        try:
+            if order.get("left") is not None and abs(float(order.get("size") or 0)) > 0:
+                return "filled" if float(order["left"]) == 0 else "cancelled"
+        except (TypeError, ValueError):
+            pass
+    return status
+
+
 def enrich_fill(
     client: Any,
     *,
@@ -16,9 +34,19 @@ def enrich_fill(
     symbol: str,
     market_type: str,
     max_wait_sec: float = 8.0,
+    initial_order: Any = None,
+    include_fees: bool = True,
 ) -> Dict[str, Any]:
     """Best-effort post-place fill enrichment for a Quick Trade order."""
-    out = {"filled": 0.0, "avg_price": 0.0, "fee": 0.0, "fee_ccy": "", "status": ""}
+    out = {
+        "filled": 0.0,
+        "avg_price": 0.0,
+        "fee": 0.0,
+        "fee_ccy": "",
+        "fees_by_ccy": {},
+        "fee_status": "pending",
+        "status": "",
+    }
     oid = str(order_id or "").strip()
     if not oid:
         return out
@@ -40,11 +68,47 @@ def enrich_fill(
         elif isinstance(client, GateSpotClient):
             fill_result = client.wait_for_fill(order_id=oid, symbol=sym, max_wait_sec=max_wait_sec)
         elif isinstance(client, GateUsdtFuturesClient):
+            if isinstance(initial_order, dict) and str(initial_order.get("id") or "") == oid:
+                native_status = str(initial_order.get("status") or "").lower()
+                if native_status in {"finished", "open"} and "left" in initial_order and "size" in initial_order:
+                    contracts = max(0.0, abs(float(initial_order["size"])) - abs(float(initial_order["left"])))
+                    out["filled"] = abs(client.contracts_signed_to_base_qty(contract=to_gate_currency_pair(sym), contracts_signed=contracts)) if contracts else 0.0
+                    out["avg_price"] = float(initial_order.get("fill_price") or 0)
+                    out["status"] = normalize_order_status(native_status, initial_order)
+                    if out["filled"] > 0 and include_fees:
+                        fee, currency = client.get_futures_trades_for_order(order_id=oid, contract=to_gate_currency_pair(sym))
+                        out["fee"], out["fee_ccy"] = abs(float(fee or 0)), currency
+                        if currency:
+                            out["fees_by_ccy"] = {str(currency).upper(): out["fee"]}
+                            out["fee_status"] = "actual" if out["fee"] else "actual_zero"
+                    return out
             fill_result = client.wait_for_fill(
                 order_id=oid,
                 contract=to_gate_currency_pair(sym),
                 max_wait_sec=max_wait_sec,
             )
+        elif type(client).__module__.startswith(("app.services.alpaca_trading", "app.services.ibkr_trading")):
+            result = client.get_order_status(oid)
+            raw = getattr(result, "raw", {}) or {}
+            fill_result = {
+                "filled": getattr(result, "filled", 0.0),
+                "avg_price": getattr(result, "avg_price", 0.0),
+                "status": getattr(result, "status", ""),
+                "fee": raw.get("commission") or 0.0,
+                "fee_ccy": raw.get("commission_ccy") or "",
+                "fees_by_ccy": raw.get("fees_by_ccy") or {},
+                "fee_status": raw.get("fee_status") or "pending",
+                "order": raw,
+            }
+            if (
+                type(client).__module__.startswith("app.services.alpaca_trading")
+                and str(fill_result["status"] or "").lower() == "filled"
+                and "/" not in sym
+                and not fill_result["fee_ccy"]
+            ):
+                fill_result["fee_ccy"] = "USD"
+                fill_result["fees_by_ccy"] = {"USD": 0.0}
+                fill_result["fee_status"] = "actual_zero"
         elif hasattr(client, "wait_for_fill"):
             try:
                 fill_result = client.wait_for_fill(order_id=oid, max_wait_sec=max_wait_sec)
@@ -75,12 +139,34 @@ def enrich_fill(
             except Exception:
                 out["fee"] = 0.0
             out["fee_ccy"] = str(fill_result.get("fee_ccy") or "").strip()
+            raw_fees = fill_result.get("fees_by_ccy")
+            if isinstance(raw_fees, dict):
+                for currency, amount in raw_fees.items():
+                    try:
+                        value = float(amount or 0.0)
+                    except (TypeError, ValueError):
+                        continue
+                    key = str(currency or "").strip().upper() or "UNKNOWN"
+                    out["fees_by_ccy"][key] = out["fees_by_ccy"].get(key, 0.0) + value
+            if not out["fees_by_ccy"] and out["fee_ccy"] and "fee" in fill_result:
+                out["fees_by_ccy"] = {out["fee_ccy"].upper(): out["fee"]}
+            out["fee_status"] = str(fill_result.get("fee_status") or "").strip().lower()
+            if not out["fee_status"]:
+                if out["fees_by_ccy"]:
+                    out["fee_status"] = (
+                        "actual"
+                        if any(abs(float(value or 0.0)) > 1e-18 for value in out["fees_by_ccy"].values())
+                        else "actual_zero"
+                    )
+                else:
+                    out["fee_status"] = "pending"
             out["status"] = str(
                 fill_result.get("status")
                 or fill_result.get("state")
                 or fill_result.get("orderStatus")
                 or ""
             ).strip().lower()
+            out["status"] = normalize_order_status(out["status"], fill_result.get("order"))
     except Exception as exc:
         logger.info("enrich_fill skipped: %s", exc)
     return out
@@ -107,6 +193,30 @@ def quick_order_status(
     if filled > 0:
         return "partially_filled"
     return "submitted"
+
+
+def quick_trade_protection_status(
+    *,
+    requested: bool,
+    market_type: str,
+    filled_qty: float,
+    avg_price: float,
+    responses: list[Dict[str, Any]],
+    error: str = "",
+) -> tuple[str, str]:
+    """Summarize whether native protection is active for a Quick Trade order."""
+    normalized_error = str(error or "").strip()
+    if normalized_error:
+        return "failed", normalized_error
+    if responses:
+        return "attached", ""
+    if not requested:
+        return "not_requested", ""
+    if str(market_type or "").strip().lower() != "swap":
+        return "unsupported_market", ""
+    if float(filled_qty or 0.0) <= 0 or float(avg_price or 0.0) <= 0:
+        return "pending_fill", ""
+    return "failed", "native_protection_empty_response"
 
 
 def attach_quick_trade_protection(

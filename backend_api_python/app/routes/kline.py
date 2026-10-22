@@ -3,7 +3,6 @@ K-line (OHLCV) API routes.
 """
 from flask import jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
-from datetime import datetime
 import traceback
 
 from app.services.kline import KlineService
@@ -83,27 +82,30 @@ def get_kline():
         exchange_id = (request.args.get('exchange_id') or request.args.get('exchangeId') or '').strip() or None
         market_type = (request.args.get('market_type') or request.args.get('marketType') or '').strip() or None
         instrument_id = (request.args.get('instrument_id') or request.args.get('instrumentId') or '').strip()
-        if market == 'Crypto':
-            context = MarketContext.from_mapping({
-                'market': market,
-                'symbol': symbol,
-                'exchange_id': exchange_id,
-                'market_type': market_type,
-                'instrument_id': instrument_id,
-                'timeframe': timeframe,
-            })
-            if context.exchange_id not in SUPPORTED_CRYPTO_EXCHANGE_IDS:
-                return jsonify({'code': 0, 'msg': 'Unsupported crypto exchange', 'data': None}), 400
-        
-        if before_time:
-            before_time = int(before_time)
-        
         if not symbol:
             return jsonify({
                 'code': 0,
-                'msg': 'Missing symbol parameter',
+                'msg': 'marketData.symbolRequired',
                 'data': None
             }), 400
+
+        context = MarketContext.from_mapping({
+            'market': market,
+            'symbol': symbol,
+            'exchange_id': exchange_id,
+            'market_type': market_type,
+            'instrument_id': instrument_id,
+            'timeframe': timeframe,
+        }, apply_crypto_defaults=False)
+        if market == 'Crypto':
+            if context.exchange_id and context.exchange_id not in SUPPORTED_CRYPTO_EXCHANGE_IDS:
+                return jsonify({'code': 0, 'msg': 'marketData.unsupportedCryptoExchange', 'data': None}), 400
+            symbol = context.symbol
+            exchange_id = context.exchange_id or None
+            market_type = context.market_type
+
+        if before_time:
+            before_time = int(before_time)
 
         validation_err = validate_watchlist_pair(market, symbol)
         if validation_err:
@@ -147,14 +149,6 @@ def get_kline():
                 'hint': 'tiingo_subscription' if (market == 'Forex' and timeframe == '1m') else None
             })
         
-        context = MarketContext.from_mapping({
-            'market': market,
-            'symbol': symbol,
-            'exchange_id': exchange_id,
-            'market_type': market_type,
-            'instrument_id': instrument_id,
-            'timeframe': timeframe,
-        })
         return jsonify({
             'code': 1,
             'msg': 'success',
@@ -165,6 +159,12 @@ def get_kline():
             },
         })
         
+    except ValueError as e:
+        return jsonify({
+            'code': 0,
+            'msg': str(e),
+            'data': None,
+        }), 400
     except RequestGuardError as e:
         return jsonify({
             'code': 0,

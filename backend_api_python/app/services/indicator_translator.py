@@ -24,11 +24,10 @@ LLM 调用本身是网络密集且偶尔会失败的：
 4. 翻译是 "best-effort"：即使所有语言都翻译失败，只要 source_language 设置正确，
    接口仍然能展示原文（只是非原生用户体验下降，不会 5xx）。
 
-性能考虑
-========
-- 同步阻塞：save_indicator 等待翻译完成再返回。一次 LLM 调用约 2-5s，
-  对作者发布操作来说在可接受范围。如果以后 P99 拖太长，可改成后台 worker。
-- 单次调用：一次 prompt 让 LLM 输出所有目标语言的 JSON，比 10 次单独调用快得多。
+Performance
+===========
+- Marketplace publishing enqueues translation on the AI worker and never waits for the LLM.
+- One model call returns every target language instead of making one call per language.
 """
 from __future__ import annotations
 

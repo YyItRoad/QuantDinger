@@ -62,4 +62,10 @@ def create_exchange_client(exchange_config: Dict[str, Any], market_type: str = "
     """Create an exchange client from config."""
     from app.services.live_trading.factory import create_client
 
-    return create_client(exchange_config, market_type=market_type)
+    client = create_client(exchange_config, market_type=market_type)
+    from flask import g, has_request_context
+    if has_request_context():
+        session = getattr(g, "quick_trade_session", None)
+        if session is not None:
+            client._request_session = session
+    return client

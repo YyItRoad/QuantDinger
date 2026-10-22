@@ -138,7 +138,10 @@ def test_every_robot_uses_total_equity_take_profit_stop_and_trailing(executor_ty
         equity_peak_return=0.0,
         equity_trailing_armed=False,
     )
-    context = SimpleNamespace(portfolio=SimpleNamespace(starting_cash=1000.0, total_value=1050.0))
+    context = SimpleNamespace(
+        portfolio=SimpleNamespace(starting_cash=1000.0, total_value=1050.0),
+        params={},
+    )
     assert namespace["_equity_risk_reason"](context) == ""
     assert namespace["g"].equity_trailing_armed is True
     context.portfolio.total_value = 1029.0
@@ -196,6 +199,65 @@ def test_system_robot_equity_risk_can_run_between_bars_and_rearm_after_rejection
     session.release_equity_risk_exit()
     assert session.program.state.equity_exit_pending is False
     assert session.program.state.equity_stop_reason == ""
+
+
+@pytest.mark.parametrize("executor_type", ["grid", "dca", "martingale", "layered_martingale"])
+def test_deployment_equity_limits_override_robot_fixed_limits(executor_type):
+    payload = build_executor_strategy_payload(
+        _robot_payload(executor_type, equity_stop_loss_pct=0.10),
+        user_id=7,
+    )
+    frame = _runtime_frame()
+    instrument = next(iter(compile_strategy_v2(payload["code"]).manifest.universe.instruments)).key
+    session = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame},
+        initial_capital=1000,
+        deployment_risk={
+            "equity_stop_loss_pct": 0.30,
+            "equity_take_profit_pct": 0.50,
+        },
+    )
+    session.portfolio.total_value = 850
+
+    orders, messages, reason = session.evaluate_equity_risk(timestamp=frame.index[-1])
+
+    assert orders == []
+    assert messages == []
+    assert reason == ""
+
+    session.portfolio.total_value = 650
+    _orders, _messages, reason = session.evaluate_equity_risk(timestamp=frame.index[-1])
+    assert reason == "strategy_equity_stop_loss"
+
+
+def test_deployment_fixed_limits_keep_robot_trailing_equity_protection():
+    payload = build_executor_strategy_payload(
+        _robot_payload(
+            "grid",
+            equity_stop_loss_pct=0.10,
+            equity_trailing_enabled=True,
+            equity_trailing_activation_pct=0.04,
+            equity_trailing_callback_pct=0.02,
+        ),
+        user_id=7,
+    )
+    frame = _runtime_frame()
+    instrument = next(iter(compile_strategy_v2(payload["code"]).manifest.universe.instruments)).key
+    session = StrategyV2LiveSession(
+        code=payload["code"],
+        frames={instrument: frame},
+        initial_capital=1000,
+        deployment_risk={
+            "equity_stop_loss_pct": 0.30,
+            "equity_take_profit_pct": 0.50,
+        },
+    )
+    session.portfolio.total_value = 1050
+    assert session.evaluate_equity_risk(timestamp=frame.index[-1])[2] == ""
+
+    session.portfolio.total_value = 1029
+    assert session.evaluate_equity_risk(timestamp=frame.index[-1])[2] == "grid_equity_trailing_stop"
 
 
 def _runtime_frame():

@@ -1,27 +1,19 @@
-"""
-Bitget Spot (direct REST) client.
-
-Endpoints are aligned with hummingbot constants:
-- POST /api/v2/spot/trade/place-order
-- POST /api/v2/spot/trade/cancel-order
-- GET  /api/v2/spot/trade/orderInfo
-- GET  /api/v2/spot/trade/fills
-"""
+"""Bitget UTA V3 spot trading client."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
-import json
 import logging
 import time
 from decimal import Decimal, ROUND_DOWN
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode
 
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
 from app.services.live_trading.symbols import to_bitget_um_symbol
+from app.services.live_trading.ws_order_transport import submit_bitget_order
 from app.utils.numeric_precision import floor_decimal_to_step, format_decimal
 
 logger = logging.getLogger(__name__)
@@ -31,12 +23,10 @@ class BitgetSpotClient(BaseRestClient):
     _CHANNEL_API_CODE = "qvz9x"
 
     _CHANNEL_API_CODE_ORDER_PATHS = {
-        "/api/v2/spot/trade/place-order",
-        "/api/v2/spot/trade/batch-orders",
-        "/api/v2/spot/trade/place-plan-order",
         "/api/v3/trade/place-order",
         "/api/v3/trade/place-batch",
         "/api/v3/trade/modify-order",
+        "/api/v3/trade/cancel-order",
     }
 
     def __init__(
@@ -74,7 +64,20 @@ class BitgetSpotClient(BaseRestClient):
     @staticmethod
     def _parse_fee_detail(raw_fd: Any) -> Tuple[Decimal, str]:
         from app.services.live_trading.bitget_fees import fee_storage
-        return fee_storage(raw_fd)
+        return fee_storage(raw_fd, v3_positive_cost=True)
+
+    def _post_place_order(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        ws_result = submit_bitget_order(
+            api_key=self.api_key,
+            secret_key=self.secret_key,
+            passphrase=self.passphrase,
+            body=body,
+            simulated=self.simulated_trading,
+            api_code=self.channel_api_code,
+        )
+        if ws_result is not None:
+            return ws_result
+        return self._signed_request("POST", "/api/v3/trade/place-order", json_body=body)
 
     @staticmethod
     def _dec_str(d: Decimal, max_decimals: int = 18, strict_precision: Optional[int] = None) -> str:
@@ -227,8 +230,8 @@ class BitgetSpotClient(BaseRestClient):
         try:
             raw = self._signed_request(
                 "GET",
-                "/api/v2/common/trade-rate",
-                params={"symbol": sym, "businessType": "spot"},
+                "/api/v3/account/fee-rate",
+                params={"symbol": sym, "category": "SPOT"},
             )
             data = raw.get("data") if isinstance(raw, dict) else None
             if isinstance(data, dict):
@@ -237,14 +240,14 @@ class BitgetSpotClient(BaseRestClient):
                 if maker > 0 or taker > 0:
                     return {"maker": maker, "taker": taker}
         except Exception as e:
-            logger.warning(f"BitgetSpot get_fee_rate({symbol}, businessType=spot, symbol_param={sym}) failed: {e}")
+            logger.warning("Bitget UTA spot fee lookup failed for %s (%s): %s", symbol, sym, e)
         return None
 
     def get_symbol_meta(self, *, symbol: str) -> Dict[str, Any]:
         """
         Fetch spot symbol metadata (best-effort).
 
-        Endpoint (Bitget v2 spot): GET /api/v2/spot/public/symbols
+        Endpoint: GET /api/v3/market/instruments
         """
         sym = to_bitget_um_symbol(symbol)
         if not sym:
@@ -256,7 +259,11 @@ class BitgetSpotClient(BaseRestClient):
             if obj and (now - float(ts or 0.0)) <= float(self._sym_meta_cache_ttl_sec or 300.0):
                 return obj
 
-        raw = self._public_request("GET", "/api/v2/spot/public/symbols")
+        raw = self._public_request(
+            "GET",
+            "/api/v3/market/instruments",
+            params={"category": "SPOT", "symbol": sym},
+        )
         data = raw.get("data") if isinstance(raw, dict) else None
         items = data if isinstance(data, list) else []
         found: Dict[str, Any] = {}
@@ -302,10 +309,9 @@ class BitgetSpotClient(BaseRestClient):
         except Exception:
             meta = {}
 
-        # Bitget v2: ``quantityPrecision`` is decimal places (e.g. 6 for BTC), not a step multiplier.
         step = Decimal("0")
         size_precision = None
-        for key in ("quantityStep", "sizeStep", "minTradeIncrement"):
+        for key in ("quantityMultiplier", "quantityStep", "sizeStep", "minTradeIncrement"):
             raw = meta.get(key)
             if raw is not None and str(raw).strip() not in ("", "0"):
                 try:
@@ -324,7 +330,8 @@ class BitgetSpotClient(BaseRestClient):
             req = self._floor_to_step(req, step)
 
         mn = self._to_dec(
-            meta.get("minTradeAmount")
+            meta.get("minOrderQty")
+            or meta.get("minTradeAmount")
             or meta.get("minTradeNum")
             or meta.get("minQty")
             or meta.get("minSize")
@@ -335,7 +342,7 @@ class BitgetSpotClient(BaseRestClient):
         return (req, size_precision)
 
     def _normalize_quote_size(self, *, symbol: str, quote_size: float) -> Tuple[Decimal, Optional[int]]:
-        """Normalize USDT (quote) size for market BUY — Bitget ``size`` is quote coin amount."""
+        """Normalize the quote-denominated ``qty`` used by UTA market buys."""
         req = self._to_dec(quote_size)
         if req <= 0:
             return (Decimal("0"), None)
@@ -353,7 +360,12 @@ class BitgetSpotClient(BaseRestClient):
             req = self._floor_to_step(req, step)
 
         try:
-            min_usdt = self._to_dec(meta.get("minTradeUSDT") or meta.get("minTradeAmount") or "0")
+            min_usdt = self._to_dec(
+                meta.get("minOrderAmount")
+                or meta.get("minTradeUSDT")
+                or meta.get("minTradeAmount")
+                or "0"
+            )
         except Exception:
             min_usdt = Decimal("0")
         if min_usdt > 0 and req < min_usdt:
@@ -373,7 +385,7 @@ class BitgetSpotClient(BaseRestClient):
 
         step = Decimal("0")
         price_precision = None
-        for key in ("priceStep", "tickSize", "priceTick", "minPriceIncrement"):
+        for key in ("priceMultiplier", "priceStep", "tickSize", "priceTick", "minPriceIncrement"):
             raw = meta.get(key)
             if raw is not None and str(raw).strip() not in ("", "0"):
                 try:
@@ -413,16 +425,17 @@ class BitgetSpotClient(BaseRestClient):
             )
 
         body: Dict[str, Any] = {
+            "category": "SPOT",
             "side": sd,
             "symbol": sym,
-            "size": self._dec_str(sz_dec, strict_precision=sz_precision),
+            "qty": self._dec_str(sz_dec, strict_precision=sz_precision),
             "orderType": "limit",
-            "force": "gtc",
+            "timeInForce": "gtc",
             "price": self._dec_str(px_dec, strict_precision=px_precision),
         }
         if client_order_id:
             body["clientOid"] = str(client_order_id)
-        raw = self._signed_request("POST", "/api/v2/spot/trade/place-order", json_body=body)
+        raw = self._post_place_order(body)
         data = raw.get("data") if isinstance(raw, dict) else None
         order_id = str(data.get("orderId") or "") if isinstance(data, dict) else ""
         return LiveOrderResult(exchange_id="bitget", exchange_order_id=order_id, filled=0.0, avg_price=0.0, raw=raw)
@@ -457,55 +470,76 @@ class BitgetSpotClient(BaseRestClient):
             sz_str = self._dec_str(sz_dec, strict_precision=sz_precision)
 
         body: Dict[str, Any] = {
+            "category": "SPOT",
             "side": sd,
             "symbol": sym,
-            "size": sz_str,
+            "qty": sz_str,
             "orderType": "market",
-            "force": "gtc",
         }
         if client_order_id:
             body["clientOid"] = str(client_order_id)
-        raw = self._signed_request("POST", "/api/v2/spot/trade/place-order", json_body=body)
+        raw = self._post_place_order(body)
         data = raw.get("data") if isinstance(raw, dict) else None
         order_id = str(data.get("orderId") or "") if isinstance(data, dict) else ""
         return LiveOrderResult(exchange_id="bitget", exchange_order_id=order_id, filled=0.0, avg_price=0.0, raw=raw)
 
     def cancel_order(self, *, symbol: str, order_id: str = "", client_order_id: str = "") -> Dict[str, Any]:
         sym = to_bitget_um_symbol(symbol)
-        body = {"symbol": sym}
+        body = {"category": "SPOT", "symbol": sym}
         if order_id:
             body["orderId"] = str(order_id)
         elif client_order_id:
             body["clientOid"] = str(client_order_id)
         else:
             raise LiveTradingError("BitgetSpot cancel_order requires order_id or client_order_id")
-        return self._signed_request("POST", "/api/v2/spot/trade/cancel-order", json_body=body)
+        return self._signed_request("POST", "/api/v3/trade/cancel-order", json_body=body)
 
     def get_order(self, *, symbol: str, order_id: str = "", client_order_id: str = "") -> Dict[str, Any]:
-        sym = to_bitget_um_symbol(symbol)
-        params: Dict[str, Any] = {"symbol": sym}
+        del symbol
+        params: Dict[str, Any] = {}
         if order_id:
             params["orderId"] = str(order_id)
         elif client_order_id:
             params["clientOid"] = str(client_order_id)
         else:
             raise LiveTradingError("BitgetSpot get_order requires order_id or client_order_id")
-        return self._signed_request("GET", "/api/v2/spot/trade/orderInfo", params=params)
+        raw = self._signed_request("GET", "/api/v3/trade/order-info", params=params)
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if isinstance(data, dict):
+            row = dict(data)
+            row.setdefault("baseVolume", row.get("cumExecQty"))
+            row.setdefault("quoteVolume", row.get("cumExecValue"))
+            row.setdefault("priceAvg", row.get("avgPrice"))
+            row.setdefault("status", row.get("orderStatus"))
+            return {**raw, "data": row}
+        return raw
 
     def get_fills(self, *, symbol: str, order_id: str) -> Dict[str, Any]:
-        sym = to_bitget_um_symbol(symbol)
-        params: Dict[str, Any] = {"symbol": sym, "orderId": str(order_id)}
+        del symbol
+        params: Dict[str, Any] = {"category": "SPOT", "orderId": str(order_id)}
         rows = []
         for _ in range(10):
-            raw = self._signed_request("GET", "/api/v2/spot/trade/fills", params={**params, 'limit': 100})
-            page = raw.get('data') or []
+            raw = self._signed_request("GET", "/api/v3/trade/fills", params={**params, 'limit': 100})
+            data = raw.get('data') or {}
+            page = data.get('list') if isinstance(data, dict) else []
+            normalized = []
+            for item in page or []:
+                if not isinstance(item, dict):
+                    continue
+                row = dict(item)
+                row.setdefault("size", row.get("execQty"))
+                row.setdefault("priceAvg", row.get("execPrice"))
+                row.setdefault("tradeId", row.get("execId"))
+                row.setdefault("cTime", row.get("createdTime"))
+                normalized.append(row)
+            page = normalized
             rows.extend(page)
             if len(page) < 100:
                 return {**raw, 'data': rows}
-            cursor = str(page[-1].get('tradeId') or '')
-            if not cursor or cursor == params.get('idLessThan'):
+            cursor = str(data.get('cursor') or page[-1].get('tradeId') or '')
+            if not cursor or cursor == params.get('cursor'):
                 break
-            params['idLessThan'] = cursor
+            params['cursor'] = cursor
         raise LiveTradingError('strategyRuntime.fillSnapshotNotReady')
 
     def wait_for_fill(
@@ -562,9 +596,13 @@ class BitgetSpotClient(BaseRestClient):
                             native = fee_breakdown(
                                 f.get("feeDetail"),
                                 received_currency=received_currency,
+                                v3_positive_cost=True,
                             )
                             if not native and f.get("fee") is not None:
-                                native = fee_breakdown({"fee": f["fee"], "feeCoin": f.get("feeCoin") or f.get("feeCcy")})
+                                native = fee_breakdown(
+                                    {"fee": f["fee"], "feeCoin": f.get("feeCoin") or f.get("feeCcy")},
+                                    v3_positive_cost=True,
+                                )
                             for currency, amount in native.items():
                                 fees_by_ccy[currency] = fees_by_ccy.get(currency, 0.0) + amount
                             total_fee = sum(fees_by_ccy.values()) if len(fees_by_ccy) == 1 else 0
@@ -576,6 +614,18 @@ class BitgetSpotClient(BaseRestClient):
                     if not fees_by_ccy and not timed_out:
                         time.sleep(float(poll_interval_sec or 0.5))
                         continue
+                    if not state:
+                        try:
+                            last_order = self.get_order(
+                                symbol=symbol,
+                                order_id=str(order_id or ""),
+                                client_order_id=str(client_order_id or ""),
+                            )
+                            row = _spot_order_row(last_order)
+                            if row:
+                                state = str(row.get("status") or row.get("state") or "")
+                        except Exception:
+                            pass
                     logger.debug(
                         "Bitget Spot fill result: filled=%.8f avg=%.8f fee=%.8f %s (order=%s)",
                         total_base, total_quote / total_base, total_fee, fee_ccy, order_id,
@@ -634,7 +684,11 @@ class BitgetSpotClient(BaseRestClient):
                 from app.services.live_trading.bitget_fees import fee_breakdown
                 from app.services.live_trading.fee_quote import symbol_currencies
                 base, quote = symbol_currencies(symbol)
-                native_fees = fee_breakdown(row.get('feeDetail'), received_currency=base if row.get('side') == 'buy' else quote)
+                native_fees = fee_breakdown(
+                    row.get('feeDetail'),
+                    received_currency=base if row.get('side') == 'buy' else quote,
+                    v3_positive_cost=True,
+                )
                 if not native_fees and fee_ccy:
                     native_fees = {fee_ccy.upper(): fee}
                 if len(native_fees) == 1:
@@ -657,13 +711,29 @@ class BitgetSpotClient(BaseRestClient):
         """
         Spot assets/balances.
 
-        Endpoint: GET /api/v2/spot/account/assets
+        Endpoint: GET /api/v3/account/assets
         """
-        return self._signed_request("GET", "/api/v2/spot/account/assets")
+        raw = self._signed_request("GET", "/api/v3/account/assets")
+        data = raw.get("data") if isinstance(raw, dict) else None
+        if isinstance(data, dict) and isinstance(data.get("assets"), list):
+            if not data["assets"]:
+                settings = self._signed_request("GET", "/api/v3/account/settings")
+                settings_data = settings.get("data") if isinstance(settings, dict) else None
+                account_mode = str(
+                    settings_data.get("accountMode") if isinstance(settings_data, dict) else ""
+                ).strip().lower()
+                if account_mode in ("hybrid", "switching", "upgrading"):
+                    raise LiveTradingError("BITGET_UTA_HYBRID_BALANCE_UNAVAILABLE")
+            return {**raw, "data": data["assets"]}
+        return raw
 
     def get_ticker(self, *, symbol: str) -> Dict[str, Any]:
         sym = to_bitget_um_symbol(symbol)
-        raw = self._public_request("GET", "/api/v2/spot/market/tickers", params={"symbol": sym})
+        raw = self._public_request(
+            "GET",
+            "/api/v3/market/tickers",
+            params={"category": "SPOT", "symbol": sym},
+        )
         data = raw.get("data") if isinstance(raw, dict) else None
         if isinstance(data, list) and data and isinstance(data[0], dict):
             return data[0]

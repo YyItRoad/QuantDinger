@@ -74,7 +74,7 @@ def place_live_limit_order(
         )
     if isinstance(client, OkxClient):
         td_mode = str(payload.get("margin_mode") or payload.get("td_mode") or "cross")
-        if market_type == "swap":
+        if market_type == "swap" and not reduce_only:
             try:
                 client.set_leverage(inst_id=to_okx_swap_inst_id(str(symbol)), lever=leverage, mgn_mode=td_mode, pos_side=pos_side)
             except Exception:
@@ -101,7 +101,7 @@ def place_live_limit_order(
             or "cross"
         )
         try:
-            if market_type == "swap":
+            if market_type == "swap" and not reduce_only:
                 client.set_leverage(
                     symbol=str(symbol),
                     leverage=leverage,
@@ -142,10 +142,11 @@ def place_live_limit_order(
     if isinstance(client, GateSpotClient):
         return client.place_limit_order(symbol=str(symbol), side=side, size=amount, price=price, client_order_id=client_order_id)
     if isinstance(client, GateUsdtFuturesClient):
-        try:
-            client.set_leverage(contract=to_gate_currency_pair(str(symbol)), leverage=leverage)
-        except Exception:
-            pass
+        if not reduce_only:
+            try:
+                client.set_leverage(contract=to_gate_currency_pair(str(symbol)), leverage=leverage)
+            except Exception:
+                pass
         return client.place_limit_order(
             symbol=str(symbol),
             side=side,
@@ -155,7 +156,7 @@ def place_live_limit_order(
             client_order_id=client_order_id,
         )
     if isinstance(client, HtxClient):
-        if market_type == "swap":
+        if market_type == "swap" and not reduce_only:
             try:
                 client.set_leverage(symbol=str(symbol), leverage=leverage)
             except Exception:

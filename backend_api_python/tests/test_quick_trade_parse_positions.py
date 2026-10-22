@@ -254,6 +254,7 @@ def test_parse_positions_spot_bal_row():
     assert len(out) == 1
     assert out[0]["side"] == "long"
     assert out[0]["size"] == 120.5
+    assert out[0]["available"] == 118.0
 
 
 def test_fetch_spot_holdings_raw_empty():
@@ -284,6 +285,21 @@ def test_fetch_spot_holdings_raw_with_balance():
     assert out[0]["entry_price"] == 1.25
 
 
+def test_fetch_spot_holdings_preserves_zero_available_when_balance_is_locked():
+    from app.routes.quick_trade import _fetch_spot_holdings_raw
+
+    client = MagicMock()
+    with patch(
+        "app.services.live_trading.spot_sizing.get_spot_base_holding",
+        return_value={"total": 50.0, "available": 0.0, "avg_cost": 1.25},
+    ):
+        raw = _fetch_spot_holdings_raw(client, symbol="APT/USDT")
+    out = _parse_positions(raw)
+    assert len(out) == 1
+    assert out[0]["size"] == 50.0
+    assert out[0]["available"] == 0.0
+
+
 def test_enrich_spot_positions_computes_pnl():
     from app.routes.quick_trade import _enrich_spot_positions
 
@@ -307,3 +323,68 @@ def test_enrich_spot_positions_computes_pnl():
     assert out[0]["entry_price"] == 2.0
     assert out[0]["mark_price"] == 2.5
     assert abs(out[0]["unrealized_pnl"] - 5.0) < 1e-9
+
+
+def test_enrich_spot_positions_marks_untradable_balance_as_dust():
+    from app.routes.quick_trade import _enrich_spot_positions
+    from app.services.instrument_rules import InstrumentRules
+
+    client = MagicMock()
+    provider = MagicMock()
+    provider.get_rules.return_value = InstrumentRules(
+        key="SOL/USDT",
+        exchange_id="binance",
+        market_type="spot",
+        symbol="SOL/USDT",
+        amount_step=0.001,
+        min_amount=0.001,
+        min_notional=5.0,
+    )
+    with patch(
+        "app.routes.quick_trade._quick_trade_spot_avg_entry_price",
+        return_value=100.0,
+    ), patch(
+        "app.services.live_trading.spot_sizing.fetch_spot_last_price",
+        return_value=105.0,
+    ), patch(
+        "app.services.instrument_rules.get_instrument_rules_provider",
+        return_value=provider,
+    ):
+        out = _enrich_spot_positions(
+            [{"symbol": "SOL/USDT", "side": "long", "size": 0.002055, "available": 0.002055}],
+            client=client,
+            symbol="SOL/USDT",
+            user_id=1,
+            credential_id=1,
+            market_type="spot",
+            exchange_id="binance",
+        )
+
+    assert out[0]["tradable_size"] == pytest.approx(0.002)
+    assert out[0]["is_dust"] is True
+    assert out[0]["dust_reason"] == "minimum_notional"
+
+
+def test_enrich_spot_positions_marks_fully_locked_balance():
+    from app.routes.quick_trade import _enrich_spot_positions
+
+    client = MagicMock()
+    with patch(
+        "app.routes.quick_trade._quick_trade_spot_avg_entry_price",
+        return_value=100.0,
+    ), patch(
+        "app.services.live_trading.spot_sizing.fetch_spot_last_price",
+        return_value=105.0,
+    ):
+        out = _enrich_spot_positions(
+            [{"symbol": "SOL/USDT", "side": "long", "size": 1.0, "available": 0.0}],
+            client=client,
+            symbol="SOL/USDT",
+            user_id=1,
+            credential_id=1,
+            market_type="spot",
+        )
+
+    assert out[0]["is_locked"] is True
+    assert out[0]["locked_size"] == 1.0
+    assert out[0]["tradable_size"] == 0.0

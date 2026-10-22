@@ -71,10 +71,14 @@ def _equity_risk_reason(context):
     current_equity = float(context.portfolio.total_value or 0.0)
     total_return = (current_equity / starting_equity) - 1.0
     g.equity_peak_return = max(float(g.equity_peak_return or 0.0), total_return)
-    if EQUITY_TAKE_PROFIT > 0 and total_return >= EQUITY_TAKE_PROFIT:
-        return "equity_take_profit"
-    if EQUITY_STOP_LOSS > 0 and total_return <= -EQUITY_STOP_LOSS:
-        return "equity_stop_loss"
+    deployment_managed = bool(
+        context.params.get("_deployment_equity_risk_managed")
+    )
+    if not deployment_managed:
+        if EQUITY_TAKE_PROFIT > 0 and total_return >= EQUITY_TAKE_PROFIT:
+            return "equity_take_profit"
+        if EQUITY_STOP_LOSS > 0 and total_return <= -EQUITY_STOP_LOSS:
+            return "equity_stop_loss"
     if EQUITY_TRAILING_ENABLED:
         if total_return >= EQUITY_TRAILING_ACTIVATION:
             g.equity_trailing_armed = True

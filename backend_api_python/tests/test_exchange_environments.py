@@ -42,7 +42,7 @@ def test_exchange_environment_routes_match_official_demo_hosts():
 
     bitget = create_client(_config("bitget", "demo"), market_type="spot")
     assert bitget.base_url == "https://api.bitget.com"
-    assert bitget._headers("1", "sign", "/api/v2/spot/trade/place-order")["PAPTRADING"] == "1"
+    assert bitget._headers("1", "sign", "/api/v3/trade/place-order")["PAPTRADING"] == "1"
 
     assert create_client(_config("bybit", "demo"), market_type="spot").base_url == "https://api-demo.bybit.com"
 

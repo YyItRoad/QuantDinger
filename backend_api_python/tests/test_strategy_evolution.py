@@ -84,13 +84,169 @@ def test_engine_runs_all_search_methods_and_returns_v3_validation(method):
         slippage=0.0005,
     )
     assert result["status"] == "complete"
-    assert len(result["trials"]) == 10
+    assert len(result["trials"]) == config.trials
     assert result["bestParams"]
     assert result["heatmap"]["points"]
     assert result["validation"]["pbo"]["samples"] > 0
     assert result["validation"]["deflatedSharpe"]["observations"] > 0
     assert result["validation"]["monteCarlo"]["paths"] == 120
     assert [row["multiplier"] for row in result["validation"]["costStress"]] == [1.0, 2.0, 3.0]
+
+
+def test_selection_ranks_candidates_by_compounded_validation_return():
+    def evaluator(params, start, end, commission, slippage):
+        high_return = bool(params["high_return"])
+        total_return = 8.0 if high_return else 5.0
+        return {
+            "totalReturn": total_return,
+            "sharpeRatio": 0.2 if high_return else 3.0,
+            "maxDrawdown": -35.0 if high_return else -2.0,
+            "winRate": 45.0 if high_return else 75.0,
+            "totalTrades": 8,
+            "totalExecutions": 16,
+            "equityCurve": [
+                {"time": start.isoformat(), "value": 10_000.0},
+                {"time": end.isoformat(), "value": 10_000.0 * (1.0 + total_return / 100.0)},
+            ],
+        }
+
+    result = StrategyEvolutionEngine(evaluator).run(
+        parameters=[SearchParameter("high_return", "boolean", default=False)],
+        config=EvolutionConfig.from_payload({
+            "method": "grid",
+            "trials": 2,
+            "folds": 4,
+            "blindRatio": 0,
+            "autoPrune": False,
+            "monteCarloPaths": 100,
+            "costMultipliers": [1],
+        }),
+        start_date=datetime(2024, 1, 1),
+        end_date=datetime(2025, 12, 31),
+        commission=0.0,
+        slippage=0.0,
+    )
+
+    assert result["bestParams"] == {"high_return": True}
+    assert result["summary"]["selectionObjective"] == "oosCompoundedReturn"
+    assert result["summary"]["oosReturn"] == pytest.approx((1.08**4 - 1) * 100, abs=1e-4)
+    assert result["summary"]["recommended"] is True
+
+
+def test_segmented_validation_rejects_one_period_wonder():
+    start = datetime(2024, 1, 1)
+    end = datetime(2025, 12, 31)
+    config = EvolutionConfig.from_payload({
+        "method": "grid",
+        "trials": 2,
+        "folds": 4,
+        "blindRatio": 0,
+        "autoPrune": False,
+        "monteCarloPaths": 100,
+        "costMultipliers": [1],
+    })
+    plan = build_walk_forward_plan(
+        start,
+        end,
+        folds=config.folds,
+        train_ratio=config.train_ratio,
+        blind_ratio=config.blind_ratio,
+        embargo_bars=config.embargo_bars,
+    )
+    validation_returns = {
+        (fold.validation_start, fold.validation_end): (60.0 if index == 0 else -5.0)
+        for index, fold in enumerate(plan.folds)
+    }
+
+    def evaluator(params, segment_start, segment_end, commission, slippage):
+        if params["profile"] == "spike" and (segment_start, segment_end) in validation_returns:
+            total_return = validation_returns[(segment_start, segment_end)]
+        elif params["profile"] == "stable" and (segment_start, segment_end) in validation_returns:
+            total_return = 4.0
+        else:
+            total_return = 8.0
+        return {
+            "totalReturn": total_return,
+            "sharpeRatio": 1.0,
+            "maxDrawdown": -5.0,
+            "winRate": 55.0,
+            "totalTrades": 8,
+            "totalExecutions": 16,
+            "equityCurve": [
+                {"time": segment_start.isoformat(), "value": 10_000.0},
+                {"time": segment_end.isoformat(), "value": 10_000.0 * (1.0 + total_return / 100.0)},
+            ],
+        }
+
+    result = StrategyEvolutionEngine(evaluator).run(
+        parameters=[SearchParameter("profile", "enum", choices=("stable", "spike"), default="stable")],
+        config=config,
+        start_date=start,
+        end_date=end,
+        commission=0.0,
+        slippage=0.0,
+    )
+
+    spike = next(row for row in result["trials"] if row["params"]["profile"] == "spike")
+    assert spike["components"]["oosReturn"] > result["summary"]["oosReturn"]
+    assert spike["pruned"] is True
+    assert spike["reason"] == "segmentedOverfit"
+    assert result["bestParams"] == {"profile": "stable"}
+
+
+def test_blind_holdout_reports_failure_without_changing_the_selected_winner():
+    start = datetime(2024, 1, 1)
+    end = datetime(2025, 12, 31)
+    config = EvolutionConfig.from_payload({
+        "method": "grid",
+        "trials": 2,
+        "folds": 4,
+        "blindRatio": 0.15,
+        "autoPrune": False,
+        "monteCarloPaths": 100,
+        "costMultipliers": [1],
+    })
+    plan = build_walk_forward_plan(
+        start,
+        end,
+        folds=config.folds,
+        train_ratio=config.train_ratio,
+        blind_ratio=config.blind_ratio,
+        embargo_bars=config.embargo_bars,
+    )
+
+    def evaluator(params, segment_start, segment_end, commission, slippage):
+        selected = bool(params["selected"])
+        is_blind = segment_start == plan.blind_start and segment_end == plan.blind_end
+        total_return = (-20.0 if selected else 20.0) if is_blind else (8.0 if selected else 5.0)
+        return {
+            "totalReturn": total_return,
+            "sharpeRatio": 1.0 if total_return > 0 else -1.0,
+            "maxDrawdown": -5.0,
+            "winRate": 55.0,
+            "totalTrades": 8,
+            "totalExecutions": 16,
+            "equityCurve": [
+                {"time": segment_start.isoformat(), "value": 10_000.0},
+                {"time": segment_end.isoformat(), "value": 10_000.0 * (1.0 + total_return / 100.0)},
+            ],
+        }
+
+    result = StrategyEvolutionEngine(evaluator).run(
+        parameters=[SearchParameter("selected", "boolean", default=False)],
+        config=config,
+        start_date=start,
+        end_date=end,
+        commission=0.0,
+        slippage=0.0,
+    )
+
+    assert result["bestParams"] == {"selected": True}
+    assert result["selection"]["blindUsedForSelection"] is False
+    assert result["summary"]["blindReturn"] == -20.0
+    assert result["summary"]["blindPassed"] is False
+    assert result["summary"]["recommended"] is False
+    assert result["selection"]["recommended"] is False
 
 
 def test_walk_forward_keeps_blind_holdout_after_validation():
@@ -185,6 +341,99 @@ def test_grid_sampler_is_bounded_and_deterministic():
     assert first == second
     assert len(first) == 7
     assert len({(row["fast"], row["slow"]) for row in first}) == 7
+
+
+def test_parameter_domains_keep_space_size_grid_and_random_sampling_in_sync():
+    parameters = [
+        SearchParameter("fast", "integer", 10, 50, 40, default=10),
+        SearchParameter("slow", "integer", 30, 150, 100, default=30),
+        SearchParameter("enabled", "boolean", default=True),
+    ]
+    sampler = ParameterSampler(parameters, seed=19)
+
+    assert sampler.space_size() == 12
+    grid = sampler.grid(20)
+    assert len(grid) == 12
+    assert {row["fast"] for row in grid} == {10, 50}
+    assert {row["slow"] for row in grid} == {30, 130, 150}
+    assert {row["enabled"] for row in grid} == {False, True}
+
+    random_rows = [sampler.random_candidate() for _ in range(500)]
+    assert {row["fast"] for row in random_rows} <= {10, 50}
+    assert {row["slow"] for row in random_rows} <= {30, 130, 150}
+    assert 150 in {row["slow"] for row in random_rows}
+
+
+def test_high_dimensional_grid_stays_bounded_by_the_candidate_budget():
+    parameters = [
+        SearchParameter(f"parameter_{index}", "integer", 0, 99, 1, default=0)
+        for index in range(5)
+    ]
+    candidates, stats = ParameterSampler(parameters, seed=23).grid_with_stats(64)
+
+    assert len(candidates) == 64
+    assert len({tuple(row.values()) for row in candidates}) == 64
+    assert stats["scanned"] <= 64 * 30
+
+
+def test_tpe_sampler_avoids_candidates_already_in_history():
+    sampler = ParameterSampler(_parameters(), seed=17)
+    history = [
+        ({"fast": 6 + index * 3, "slow": 30 + index * 6}, float(index))
+        for index in range(5)
+    ]
+    for index in range(12):
+        candidate = sampler.tpe_candidate(history)
+        identity = (candidate["fast"], candidate["slow"])
+        existing = {(row["fast"], row["slow"]) for row, _score in history}
+        assert identity not in existing
+        history.append((candidate, float(index + 5)))
+
+
+def test_tpe_budget_counts_unique_valid_candidates_after_resampling():
+    constraints = discover_parameter_constraints(
+        """
+def handle_data(context, data):
+    fast = int(context.params.get("fast", 12))
+    slow = int(context.params.get("slow", 24))
+    if fast >= slow:
+        return
+""",
+        {"fast", "slow"},
+    )
+    result = StrategyEvolutionEngine(_evaluator).run(
+        parameters=[
+            SearchParameter("fast", "integer", 10, 20, 1, default=12),
+            SearchParameter("slow", "integer", 15, 30, 1, default=24),
+        ],
+        config=EvolutionConfig.from_payload({
+            "method": "tpe",
+            "trials": 24,
+            "folds": 4,
+            "blindRatio": 0,
+            "autoPrune": False,
+            "monteCarloPaths": 100,
+            "costMultipliers": [1],
+        }),
+        start_date=datetime(2024, 1, 1),
+        end_date=datetime(2025, 12, 31),
+        commission=0.0005,
+        slippage=0.0005,
+        constraints=constraints,
+    )
+
+    candidates = [row["params"] for row in result["trials"]]
+    assert len(candidates) == 24
+    assert len({(row["fast"], row["slow"]) for row in candidates}) == 24
+    assert all(row["fast"] < row["slow"] for row in candidates)
+    assert result["summary"]["evaluatedTrials"] == 24
+    assert result["summary"]["candidateAttempts"] >= 24
+    assert result["summary"]["candidateAttempts"] == (
+        result["summary"]["evaluatedTrials"]
+        + result["summary"]["constraintRejectedTrials"]
+        + result["summary"]["duplicateTrials"]
+    )
+    assert result["summary"]["sampleSufficient"] is False
 
 
 def test_dual_moving_average_guard_becomes_parameter_constraint():
@@ -372,8 +621,28 @@ def test_grid_estimate_uses_available_parameter_combinations():
     })
     assert estimate["trials"] == 2
     assert estimate["requestedTrials"] == 40
-    assert estimate["backtestRuns"] == 4
+    assert estimate["backtestRuns"] == 3
+    assert estimate["searchSpaceSize"] == 2
+    assert estimate["coveragePercent"] == 100.0
     assert estimate["isUpperBound"] is False
+
+
+def test_estimate_multiplies_three_or_more_parameter_domains_consistently():
+    estimate = StrategyEvolutionService.estimate({
+        "parameterSpace": [
+            {"name": "fast", "type": "integer", "min": 10, "max": 50, "step": 40},
+            {"name": "slow", "type": "integer", "min": 30, "max": 150, "step": 100},
+            {"name": "enabled", "type": "boolean"},
+        ],
+        "config": {"method": "tpe", "trials": 64, "folds": 5, "autoPrune": False},
+    })
+
+    assert estimate["parameterCount"] == 3
+    assert estimate["searchSpaceSize"] == 12
+    assert estimate["requestedTrials"] == 64
+    assert estimate["trials"] == 12
+    assert estimate["coveragePercent"] == 100.0
+    assert estimate["backtestRuns"] == 16
 
 
 def test_tpe_estimate_keeps_requested_trials_when_range_changes():
@@ -382,8 +651,10 @@ def test_tpe_estimate_keeps_requested_trials_when_range_changes():
         "config": {"method": "tpe", "trials": 24, "folds": 4, "autoPrune": True},
     })
     assert estimate["trials"] == 24
-    assert estimate["backtestRuns"] == 29
-    assert estimate["isUpperBound"] is True
+    assert estimate["backtestRuns"] == 28
+    assert estimate["minimumRecommendedTrials"] == 26
+    assert estimate["sampleSufficient"] is False
+    assert estimate["isUpperBound"] is False
 
 
 def test_default_estimate_uses_interactive_trial_budget():
@@ -391,8 +662,10 @@ def test_default_estimate_uses_interactive_trial_budget():
         "parameterSpace": [{"name": "period", "type": "integer", "min": 5, "max": 30, "step": 1}],
         "config": {"method": "tpe", "folds": 4, "autoPrune": True},
     })
-    assert estimate["trials"] == 12
-    assert estimate["backtestRuns"] == 17
+    assert estimate["trials"] == 26
+    assert estimate["backtestRuns"] == 30
+    assert estimate["searchSpaceSize"] == 26
+    assert estimate["sampleSufficient"] is True
 
 
 def test_prepared_evaluator_fetches_full_market_window_once():
@@ -628,12 +901,15 @@ def handle_data(context, data):
 
 def test_parameter_request_can_narrow_but_not_expand_declared_range():
     source = {"param_schema": {"params": [{"name": "period", "type": "integer", "min": 5, "max": 100, "step": 1}]}}
-    narrowed = StrategyEvolutionService._parameters(source, [{"name": "period", "min": 10, "max": 50, "type": "string"}])
+    narrowed = StrategyEvolutionService._parameters(source, [{"name": "period", "min": 10, "max": 50, "step": 5, "type": "string"}])
     assert narrowed[0].kind == "integer"
     assert narrowed[0].minimum == 10
     assert narrowed[0].maximum == 50
+    assert narrowed[0].step == 5
     with pytest.raises(ValueError, match="strategyEvolution.parameterRangeOutsideDeclaration"):
         StrategyEvolutionService._parameters(source, [{"name": "period", "min": 1, "max": 120}])
+    with pytest.raises(ValueError, match="strategyEvolution.parameterStepInvalid"):
+        StrategyEvolutionService._parameters(source, [{"name": "period", "min": 10, "max": 50, "step": 0.5}])
 
 
 def test_parameter_request_defaults_to_the_server_generated_space_when_omitted():

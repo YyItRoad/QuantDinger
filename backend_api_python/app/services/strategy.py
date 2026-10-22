@@ -241,6 +241,7 @@ class StrategyService:
             else {}
         )
         changes = self._deployment_payload(payload)
+        existing_risk = existing_config.get("deployment_risk") or {}
         merged = {
             "sourceId": existing_config.get("script_source_id"),
             "name": existing.get("strategy_name"),
@@ -253,6 +254,14 @@ class StrategyService:
             "positionSide": existing_config.get("position_side") or "",
             "accountRisk": existing_config.get("account_risk") or {},
             "aiDecisionFilter": bool(existing_config.get("ai_decision_filter")),
+            "equityTakeProfitPct": existing_risk.get(
+                "equity_take_profit_pct",
+                existing_config.get("equity_take_profit_pct", 0),
+            ),
+            "equityStopLossPct": existing_risk.get(
+                "equity_stop_loss_pct",
+                existing_config.get("equity_stop_loss_pct", 0),
+            ),
         }
         if position_management:
             merged["positionManagement"] = position_management
@@ -487,6 +496,7 @@ class StrategyService:
             "leverageEnabled", "leverage", "params", "notificationChannels",
             "notificationTargets", "directionMode", "positionSide",
             "accountRisk", "positionManagement", "aiDecisionFilter",
+            "equityTakeProfitPct", "equityStopLossPct",
         }
         unsupported = set(payload) - allowed - {"user_id"}
         if unsupported:

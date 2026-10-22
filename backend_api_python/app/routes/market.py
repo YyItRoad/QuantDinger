@@ -25,7 +25,7 @@ from app.services.market.watchlist import (
 )
 from app.services.market_context import default_crypto_exchange_id
 from app.utils.request_guard import RequestGuardError, cache_key, guarded_cached
-from app.utils.market_visibility import is_market_visible, filter_market_items
+from app.utils.market_visibility import filter_market_items
 
 logger = get_logger(__name__)
 

@@ -12,7 +12,6 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from threading import BoundedSemaphore
 from time import monotonic
 from typing import Callable
-from urllib.parse import urlsplit
 
 from app.data_providers.company_research import DOMAINS, company_documents, lookup_company
 from app.data_providers.us_research import _utc_now

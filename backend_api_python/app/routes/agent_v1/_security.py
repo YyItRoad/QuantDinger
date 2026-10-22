@@ -1,7 +1,7 @@
 """Agent Gateway security helpers for secret redaction and payload bounds."""
 from __future__ import annotations
 
-from typing import Any, Mapping, MutableMapping
+from typing import Any, Mapping
 
 # Upper bound for indicator Python source accepted via agent/MCP paths.
 MAX_SOURCE_CODE_BYTES = 512 * 1024

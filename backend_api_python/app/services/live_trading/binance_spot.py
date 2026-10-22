@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode
 
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
+from app.services.live_trading.ws_order_transport import submit_binance_order
 from app.utils.numeric_precision import floor_decimal_to_step, format_decimal
 
 logger = logging.getLogger(__name__)
@@ -250,6 +251,16 @@ class BinanceSpotClient(BaseRestClient):
             p["timestamp"] = int(time.time() * 1000) + int(self._time_offset_ms)
             if "recvWindow" not in p:
                 p["recvWindow"] = 10000
+            if str(method or "").upper() == "POST" and path == "/api/v3/order":
+                ws_result = submit_binance_order(
+                    api_key=self.api_key,
+                    secret_key=self.secret_key,
+                    params=p,
+                    futures=False,
+                    demo="demo-api" in str(self.base_url or "").lower(),
+                )
+                if ws_result is not None:
+                    return ws_result
             qs = urlencode(p, doseq=True)
             p["signature"] = self._sign(qs)
             code, data, text = self._request(method, path, params=p, headers=self._signed_headers())

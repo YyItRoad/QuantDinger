@@ -17,11 +17,12 @@ import hashlib
 import hmac
 import logging
 import time
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Dict, Optional, Tuple, Union
 from urllib.parse import urlencode
 
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
+from app.services.live_trading.ws_order_transport import submit_gate_order
 from app.services.live_trading.symbols import to_gate_currency_pair
 from app.services.live_trading.gate_spot_fill import parse_gate_spot_fill
 from app.utils.numeric_precision import floor_decimal_to_step
@@ -113,6 +114,20 @@ class _GateBase(BaseRestClient):
         extra_headers: Optional[Dict[str, str]] = None,
     ) -> Any:
         m = str(method or "GET").upper()
+        if m == "POST" and isinstance(json_body, dict) and path in {
+            "/api/v4/spot/orders",
+            "/api/v4/futures/usdt/orders",
+        }:
+            ws_result = submit_gate_order(
+                api_key=self.api_key,
+                secret_key=self.secret_key,
+                body=json_body,
+                base_url=self.base_url,
+                futures=path == "/api/v4/futures/usdt/orders",
+                channel_id=self.channel_id,
+            )
+            if ws_result is not None:
+                return ws_result
         ts = str(int(time.time()))
         body_str = self._json_dumps(json_body) if json_body is not None else ""
         qs = ""

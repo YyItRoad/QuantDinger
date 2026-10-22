@@ -388,6 +388,7 @@ Live sessions process each closed bar once and preserve <code>g</code> state whi
 - Moving averages, breakouts, patterns, factors, and all other entry or scale-in signals must use completed bars so backtests, live runs, and restart replay share the same semantics.
 - Real-time prices are reserved for stop loss, take profit, trailing protection, and equity risk. They must not make an unfinished candle look complete or revise a confirmed strategy signal.
 - Multi-timeframe strategies apply the completed-bar rule separately to every timeframe. A lower-timeframe advance never exposes a still-forming four-hour or daily bar.
+- The runtime filters unfinished candles centrally. Strategy source must not drop the final row, guess closure from local wall-clock time, or write a live price into OHLC; those workarounds break parity across backtests, restart replay, and live execution.
 - A future tick-driven strategy product needs a separate API, replay model, and contract. Do not simulate it inside ordinary Strategy API V2 source.
 
 ---
@@ -483,8 +484,12 @@ Technical indicators and factors:
 ~~~python
 rsi_value = factor("rsi", g.symbol, period=14)
 macd = indicator("MACD", g.symbol, fastperiod=12, slowperiod=26, signalperiod=9)
+supertrend = indicator("talib:SUPERTREND", g.symbol, timeperiod=10, multiplier=3.0)
+trend_direction = factor("talib:SUPERTREND", g.symbol, timeperiod=10, output="trend")
 scores = get_factors(symbols, ["momentum_20", "volatility_20"])
 ~~~
+
+TA-Lib 0.8.1 functions use the explicit <code>talib:</code> namespace in generated code, the factor library, and factor research. This keeps platform-native factors stable when both libraries expose the same name. Multi-output functions expose an <code>output</code> parameter in factor calls; <code>indicator</code> returns all output columns. The 0.8.1 catalog contains 201 functions, including the 40 additions such as <code>SUPERTREND</code>, <code>KDJ</code>, <code>HMA</code>, <code>VWAP</code>, <code>DONCHIAN</code>, and <code>PERCENTRANK</code>.
 
 Fundamentals:
 
@@ -540,6 +545,8 @@ Do not confuse these definitions from different layers:
 | <code>open/add/reduce/close</code> | runtime order intent | canonical action derived from synchronized position and target delta; submitted quantity is absolute |
 | <code>execution_mode</code> | deployment | <code>signal</code> emits signals, while <code>live</code> submits real orders |
 | <code>coexistence_mode</code> | account ownership | <code>strict</code> or <code>advanced</code> manual/strategy inventory policy; it is not trade direction |
+
+A deployment's <code>execution_mode</code> is fixed on each order when that order enters the queue. Changing a deployment from <code>signal</code> to <code>live</code> affects only newly created entry orders; queued signal orders are never promoted to real orders. When the current mode no longer matches, the runtime rejects new exposure while still allowing risk-reducing stop, take-profit, and close intents to complete.
 
 Order functions:
 

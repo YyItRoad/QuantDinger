@@ -70,7 +70,7 @@ def run_strategy_evolution():
         return jsonify({"code": 0, "msg": str(exc), "data": exc.details}), 400
     except ValueError as exc:
         return jsonify({"code": 0, "msg": str(exc), "data": None}), 400
-    except Exception as exc:
+    except Exception:
         logger.exception("Strategy evolution failed")
         return jsonify({"code": 0, "msg": "strategyEvolution.runFailed", "data": None}), 500
 

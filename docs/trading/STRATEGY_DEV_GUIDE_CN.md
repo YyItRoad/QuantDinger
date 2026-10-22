@@ -390,6 +390,7 @@ def initialize(context):
 - 均线、突破、形态、因子和其他入场/加仓信号只能根据已完成 K 线计算，保证回测、实盘和重启重放具有相同语义。
 - 实时价格仅供止损、止盈、追踪止损和权益风控使用；它不能把一根尚未收盘的 K 线伪装成完成 bar，也不能改变已经确认的策略信号。
 - 多周期策略对每个周期分别执行已完成 K 线约束；低周期推进不会提前暴露仍在形成中的 4 小时线或日线。
+- 运行时会统一过滤未收盘 K 线。策略源码不要自行删除最后一行、用本机时间猜测收盘，或把实时价格写入 OHLC；这些补丁会破坏回测、重启重放和实盘的一致性。
 - 如果产品以后提供独立的逐 tick 策略契约，应使用单独的 API、回测模型和文档；不要在普通 Strategy API V2 源码中自行模拟。
 
 ---
@@ -485,8 +486,12 @@ frames = data.history(
 ~~~python
 rsi_value = factor("rsi", g.symbol, period=14)
 macd = indicator("MACD", g.symbol, fastperiod=12, slowperiod=26, signalperiod=9)
+supertrend = indicator("talib:SUPERTREND", g.symbol, timeperiod=10, multiplier=3.0)
+trend_direction = factor("talib:SUPERTREND", g.symbol, timeperiod=10, output="trend")
 scores = get_factors(symbols, ["momentum_20", "volatility_20"])
 ~~~
+
+TA-Lib 0.8.1 指标在生成代码、因子库和因子投研中使用明确的 <code>talib:</code> 命名空间。当平台原生因子与 TA-Lib 存在同名指标时，这一规则可以保持原有策略行为稳定。多输出指标可在 <code>factor</code> 调用中通过 <code>output</code> 选择结果；<code>indicator</code> 会返回全部输出列。0.8.1 因子目录共包含 201 个函数，其中新增 40 个，包括 <code>SUPERTREND</code>、<code>KDJ</code>、<code>HMA</code>、<code>VWAP</code>、<code>DONCHIAN</code> 和 <code>PERCENTRANK</code>。
 
 基本面：
 
@@ -542,6 +547,8 @@ short_position = get_position(g.symbol, position_side="short")
 | <code>open/add/reduce/close</code> | 运行时订单意图 | 引擎根据当前同步仓位和目标差额生成的标准动作，提交数量使用绝对值 |
 | <code>execution_mode</code> | 部署 | <code>signal</code> 只发信号，<code>live</code> 才提交真实订单 |
 | <code>coexistence_mode</code> | 账户仓位归属 | <code>strict</code> 或 <code>advanced</code>，决定用户仓位怎样与策略仓位共存；它不是交易方向 |
+
+部署的 <code>execution_mode</code> 在订单入队时固定。之后把部署从 <code>signal</code> 切换到 <code>live</code>，只影响新生成的入场订单；已排队的信号订单不会升级成真实订单。模式发生变化时，运行时会拒绝不再匹配的新开仓，但允许止损、止盈和平仓等降低风险的退出继续执行。
 
 订单函数：
 

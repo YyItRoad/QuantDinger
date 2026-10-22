@@ -256,6 +256,7 @@ def handle_data(context, data):
         order_target_percent("AAPL", 1.0)
 """
     repository = _Repository()
+    progress = []
     service = StrategyV2BacktestService(
         repository=repository,
         frame_fetcher=_frame,
@@ -270,6 +271,7 @@ def handle_data(context, data):
         initial_capital=10000,
         persist=True,
         source_id=104,
+        on_progress=progress.append,
     )
 
     assert run_id == 81
@@ -289,6 +291,16 @@ def handle_data(context, data):
     assert repository.persisted["initial_capital"] == 10000
     assert repository.persisted["leverage"] == 1.0
     assert repository.persisted["manifest"]["apiVersion"] == 2
+    assert [item["phase"] for item in progress] == [
+        "preparing",
+        "loading_market_data",
+        "preparing_simulation",
+        "running_simulation",
+        "building_report",
+        "persisting_result",
+        "completed",
+    ]
+    assert progress[-1]["percent"] == 100
 
 
 def test_v2_service_calculates_relative_metrics_at_native_benchmark_frequency(monkeypatch, tmp_path):

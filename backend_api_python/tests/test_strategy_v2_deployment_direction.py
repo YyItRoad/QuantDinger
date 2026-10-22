@@ -85,6 +85,45 @@ def test_deployment_persists_manifest_direction_and_legacy_position_side(monkeyp
     assert cursor.params[-1] == 109
 
 
+def test_deployment_persists_strategy_equity_limits(monkeypatch):
+    cursor = _Cursor()
+    monkeypatch.setattr(deployment, "get_script_source_service", lambda: _Sources())
+    monkeypatch.setattr(deployment, "get_db_connection", lambda: _Db(cursor))
+    payload = _payload("both")
+    payload.update({
+        "equityStopLossPct": 0.30,
+        "equityTakeProfitPct": 0.50,
+    })
+
+    StrategyV2DeploymentService().save(user_id=7, payload=payload)
+    trading_config = json.loads(cursor.params[-2])
+
+    assert trading_config["equity_stop_loss_pct"] == pytest.approx(0.30)
+    assert trading_config["equity_take_profit_pct"] == pytest.approx(0.50)
+    assert trading_config["deployment_risk"] == {
+        "basis": "initial_capital",
+        "action": "close_and_stop",
+        "equity_take_profit_pct": pytest.approx(0.50),
+        "equity_stop_loss_pct": pytest.approx(0.30),
+    }
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("equityStopLossPct", -0.01),
+    ("equityStopLossPct", 1.01),
+    ("equityTakeProfitPct", -0.01),
+    ("equityTakeProfitPct", 10.01),
+    ("equityTakeProfitPct", "invalid"),
+])
+def test_deployment_rejects_invalid_strategy_equity_limits(monkeypatch, field, value):
+    monkeypatch.setattr(deployment, "get_script_source_service", lambda: _Sources())
+    payload = _payload("both")
+    payload[field] = value
+
+    with pytest.raises(StrategyV2ContractError, match="strategyV2.invalidEquityRiskLimit"):
+        StrategyV2DeploymentService().save(user_id=7, payload=payload)
+
+
 def test_explicit_deployment_edit_rebinds_the_latest_saved_source_version(monkeypatch):
     cursor = _Cursor()
     monkeypatch.setattr(deployment, "get_script_source_service", lambda: _Sources())

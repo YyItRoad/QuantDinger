@@ -177,21 +177,9 @@ def retry_with_backoff(
     return decorator
 
 
-_eastmoney_limiter = RateLimiter(min_interval=2.0, jitter_min=1.0, jitter_max=3.0)
 _tencent_limiter = RateLimiter(min_interval=1.0, jitter_min=0.5, jitter_max=1.5)
-_akshare_limiter = RateLimiter(min_interval=2.0, jitter_min=1.5, jitter_max=3.5)
-
-
-def get_eastmoney_limiter() -> RateLimiter:
-    """Return the Eastmoney rate limiter."""
-    return _eastmoney_limiter
 
 
 def get_tencent_limiter() -> RateLimiter:
     """Return the Tencent rate limiter."""
     return _tencent_limiter
-
-
-def get_akshare_limiter() -> RateLimiter:
-    """Return the AkShare rate limiter."""
-    return _akshare_limiter

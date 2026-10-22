@@ -8,8 +8,9 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from app.services.strategy_v2 import StrategyV2BacktestService
+from app.services.backtest_jobs import parse_backtest_date, run_backtest_job
 from app.services.billing_service import BillingError
+from app.services.strategy_v2 import StrategyV2BacktestService
 from app.utils.agent_auth import (
     SCOPE_B, agent_required, current_token, current_user_id,
     instrument_allowed, market_allowed, with_idempotency,
@@ -116,64 +117,11 @@ def _validate_request(body: dict) -> tuple[Any, Any]:
 
 
 def _parse_date(s: Any) -> Any:
-    from datetime import datetime
-    if not s:
-        return None
-    if hasattr(s, "year"):
-        return s
-    text = str(s)
-    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(text, fmt)
-        except Exception:
-            continue
-    raise ValueError(f"Invalid date: {text}")
+    return parse_backtest_date(s)
 
 
 def _run_backtest(payload: dict, on_progress=None) -> Any:
-    """Run the canonical Strategy API backtest from an agent job."""
-    from app.services.backtest_execution import (
-        default_commission_if_missing,
-        default_slippage_if_missing,
-    )
-
-    code = str(payload.get("code") or "").strip()
-    if not code:
-        raise ValueError("code is required")
-
-    start_date = _parse_date(payload.get("startDate"))
-    end_date = _parse_date(payload.get("endDate"))
-    if not start_date or not end_date:
-        raise ValueError("start_date and end_date are required (YYYY-MM-DD)")
-    if on_progress:
-        on_progress({"phase": "preparing", "percent": 10})
-    params = payload.get("params") or {}
-    initial_capital = float(payload.get("initialCapital") or 10000)
-    commission = default_commission_if_missing(payload.get("commission"))
-    slippage = default_slippage_if_missing(payload.get("slippage"))
-    leverage_enabled = bool(payload.get("leverageEnabled"))
-    leverage = float(payload.get("leverage") or 1) if leverage_enabled else 1.0
-    if on_progress:
-        on_progress({"phase": "running_backtest", "percent": 25})
-    run_id, result = _backtest.run(
-        user_id=int(payload.get("__user_id") or 1),
-        code=code,
-        start_date=start_date,
-        end_date=end_date.replace(hour=23, minute=59, second=59),
-        initial_capital=initial_capital,
-        leverage_enabled=leverage_enabled,
-        leverage=leverage,
-        commission=commission,
-        slippage=slippage,
-        params=params if isinstance(params, dict) else {},
-        instrument_rules_snapshot_id=str(
-            payload.get("instrumentRulesSnapshotId") or ""
-        ).strip(),
-        persist=True,
-    )
-    if on_progress:
-        on_progress({"phase": "finalizing", "percent": 95})
-    return {**result, "runId": run_id}
+    return run_backtest_job(payload, on_progress, service=_backtest)
 
 
 @agent_v1_bp.route("/backtest/run", methods=["POST"])

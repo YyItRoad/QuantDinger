@@ -252,7 +252,7 @@ output = {
 | <code>data</code> | list | 与 <code>df</code> 等长的数值/<code>None</code> 列表 |
 | <code>color</code> | str | 推荐使用 <code>#RRGGBB</code> |
 | <code>overlay</code> | bool | <code>True</code> 主图，<code>False</code> 副图 |
-| <code>type</code> | str，可选 | <code>line</code>、<code>bar</code> 或 <code>circle</code>；别名见下表 |
+| <code>type</code> | str，可选 | <code>line</code>、<code>bar</code>、<code>circle</code> 或 <code>cloud</code>；别名见下表 |
 
 当前公开绘图类型：
 
@@ -262,12 +262,14 @@ output = {
 | <code>bar</code>、<code>histogram</code>、<code>column</code> | 从基准值绘制的柱 | histogram/columns |
 | <code>circle</code>、<code>dot</code>、<code>point</code>、<code>scatter</code> | 圆点 | circles/scatter |
 | <code>lamp</code> | 灯带圆点；同一副图有至少 3 个灯带序列时自动按行排列 | 状态面板的近似表达 |
+| <code>cloud</code>、<code>band</code>、<code>fill_between</code>、<code>fill-between</code> | 填充上下两条序列之间的区域 | <code>fill(plot1, plot2)</code> |
 
 样式字段按图形类型生效：
 
 - 通用：<code>color</code>、<code>opacity</code>。
 - 折线：<code>lineWidth</code>，以及 <code>lineStyle</code>/<code>style</code>（例如 <code>solid</code>、<code>dashed</code>）。
 - 柱和圆点：<code>size</code>/<code>radius</code>、<code>borderColor</code>、<code>borderSize</code>；柱还可设置 <code>baseValue</code>。
+- 云带：每个点使用 <code>upper</code> 和 <code>lower</code>，可逐点设置 <code>color</code>；<code>opacity</code> 的有效范围为 <code>0.02</code> 至 <code>0.30</code>。设置 <code>title=False</code> 可隐藏云带图例。
 - 同一指标内所有 <code>overlay=False</code> 的序列共享一个副图，不会像多个独立 Pine 脚本那样自动创建多个副图。
 
 需要 Pine 的 series color/动态点大小时，<code>data</code> 的单点可以从数值扩展为对象：
@@ -281,6 +283,47 @@ dynamic_points = [
 ~~~
 
 对象中的数值键可使用 <code>value</code>、<code>y</code> 或 <code>data</code>；颜色键可使用 <code>color</code>、<code>fillColor</code> 或 <code>backgroundColor</code>；大小键可使用 <code>size</code>、<code>radius</code> 或 <code>r</code>。推荐在新代码中只使用第一组规范字段 <code>value/color/size</code>。
+
+### 填充云带
+
+云带的每个点是包含 <code>upper</code> 和 <code>lower</code> 的对象，列表长度仍须等于 <code>len(df)</code>。需要中断云带的预热区或震荡区应输出 <code>None</code>，避免跨越空白区错误连线。渲染器会自动排序上下值，因此两条线交叉时云带仍能正确显示。
+
+~~~python
+# @param cloud_opacity float 0.10 Cloud opacity range=0.03:0.24:0.01
+
+cloud_opacity = min(0.24, max(0.03, float(params.get("cloud_opacity", 0.10))))
+trend_cloud = []
+
+for index in range(len(df)):
+    fast_value = ema_fast.iloc[index]
+    slow_value = ema_slow.iloc[index]
+
+    if pd.isna(fast_value) or pd.isna(slow_value) or not bool(trending.iloc[index]):
+        trend_cloud.append(None)
+        continue
+
+    trend_cloud.append(
+        {
+            "upper": float(max(fast_value, slow_value)),
+            "lower": float(min(fast_value, slow_value)),
+            "color": "#22C55E" if fast_value >= slow_value else "#F43F5E",
+        }
+    )
+
+plots = [
+    {
+        "name": "趋势云",
+        "title": False,
+        "data": trend_cloud,
+        "color": "#22C55E",
+        "type": "cloud",
+        "overlay": True,
+        "opacity": cloud_opacity,
+    },
+]
+~~~
+
+规范字段为 <code>upper/lower/color</code>。上沿兼容 <code>top</code>、<code>high</code>、<code>value</code>、<code>y</code>、<code>data</code>，下沿兼容 <code>bottom</code>、<code>low</code>。新指标应优先使用规范字段。
 
 示例：
 
@@ -467,11 +510,12 @@ QuantDinger 不执行 Pine 源码。迁移目标是保持指标含义、数值�
 | <code>input.int/float/bool/string</code> | 支持主要语义 | <code># @param</code>；暂不支持 Pine 的 group、inline、confirm 和专用 color/source/timeframe/symbol 输入控件 |
 | <code>ta.*</code> 常用技术指标 | 计算语义可实现 | 使用 pandas/numpy；指标运行时暂不提供与 Pine 同名的 <code>ta</code> 命名空间，迁移时必须核对平滑算法、预热值和 NaN 规则 |
 | <code>plot()</code>、histogram、circles | 支持常用子集 | <code>plots</code> 的 line/bar/circle，支持主图/副图和逐点颜色/大小 |
+| 两条 plot 之间的 <code>fill()</code> | 支持 | 使用 <code>cloud</code> plot，逐点提供 <code>upper</code>/<code>lower</code>，并可设置逐点颜色 |
 | <code>plotshape()</code>、<code>plotchar()</code> | 支持主要事件语义 | 使用 <code>signals</code>；动态文字用 <code>textData</code> 或点对象 |
 | <code>hline()</code>、line、box、label | 支持常用静态结果 | 使用 line/zone/label layers；每次运行返回最终对象列表，没有 Pine 对象 ID、修改方法或垃圾回收语义 |
 | <code>alert()</code>、<code>alertcondition()</code> | 部分支持 | 指标输出 <code>signals</code>，保存后由用户配置监控通知；指标代码本身不直接发送通知或下单 |
 | arrays、maps、用户函数与状态计算 | Python 等价能力 | 使用 list/dict、函数、pandas Series；这是整段 DataFrame 批量计算，不是 Pine 的逐 bar <code>var</code>/<code>varip</code> 执行模型 |
-| <code>fill()</code>、linefill、<code>bgcolor()</code>、<code>barcolor()</code> | 尚无一等契约 | 固定区间可用 zone 近似；不能宣称为完整填充、背景或 K 线着色兼容 |
+| linefill、<code>bgcolor()</code>、<code>barcolor()</code> | 尚无一等契约 | 固定区间可用 zone 近似；不能宣称为完整背景或 K 线着色兼容 |
 | area/step/cross/arrow、<code>plotcandle()</code>/<code>plotbar()</code> | 尚未支持 | 当前未知 <code>type</code> 会退化为 line，不应依赖退化行为 |
 | table、polyline、动态 drawing 对象生命周期 | 尚未支持 | 不要输出未定义对象 |
 | <code>request.security()</code>、<code>request.*()</code>、跨标的/多周期 | 尚未支持 | 指标只接收当前图表 DataFrame；不能在代码中自行请求网络或交易所数据 |

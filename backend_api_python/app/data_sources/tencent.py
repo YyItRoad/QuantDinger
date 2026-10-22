@@ -11,7 +11,7 @@ This is used as a stable alternative when Yahoo/yfinance gets rate-limited.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import requests
 

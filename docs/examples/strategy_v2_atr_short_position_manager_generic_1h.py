@@ -23,7 +23,7 @@ def initialize(context):
         fields=["open", "high", "low", "close", "volume"],
     )
     context.set_warmup(120)
-    context.allow_leverage(max_leverage=125)
+    context.allow_leverage(max_leverage=100)
     context.set_metadata(
         direction_mode="short_only",
         position_management_generic=True,

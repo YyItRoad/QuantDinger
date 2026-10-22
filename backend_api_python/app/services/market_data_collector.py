@@ -2336,7 +2336,7 @@ class MarketDataCollector:
         3. 已有完整的数据解读和级别判断
         """
         try:
-            from app.data_providers import get_cached as _get_cached, set_cached as _set_cached
+            from app.data_providers import get_cached as _get_cached
             from app.data_providers.sentiment import (
                 fetch_vix as _fetch_vix,
                 fetch_dollar_index as _fetch_dollar_index,

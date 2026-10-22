@@ -23,12 +23,11 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.services.analysis_memory import get_analysis_memory, AnalysisMemory
-from app.services.market_data_collector import MarketDataCollector
 
 
 logger = get_logger(__name__)
@@ -310,32 +309,44 @@ class AICalibrationService:
         )
 
 
+def confidence_calibration_enabled() -> bool:
+    """Return the single operator-facing switch for calibration generation and use."""
+    raw = os.getenv("ENABLE_CONFIDENCE_CALIBRATION")
+    if raw is None:
+        raw = os.getenv("ENABLE_OFFLINE_AI_CALIBRATION", "false")
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def start_ai_calibration_worker() -> None:
     """
     Run offline calibration once on service startup (best-effort).
     """
-    enabled = os.getenv("ENABLE_OFFLINE_AI_CALIBRATION", "true").lower() == "true"
-    if not enabled:
-        logger.info("AI calibration worker disabled (ENABLE_OFFLINE_AI_CALIBRATION=false).")
+    if not confidence_calibration_enabled():
+        logger.info("AI calibration worker disabled (ENABLE_CONFIDENCE_CALIBRATION=false).")
         return
 
     try:
         svc = AICalibrationService()
         lookback_days = int(os.getenv("AI_CALIBRATION_LOOKBACK_DAYS", "30"))
         min_samples = int(os.getenv("AI_CALIBRATION_MIN_SAMPLES", "80"))
-        market = os.getenv("AI_CALIBRATION_MARKET", "Crypto").strip() or "Crypto"
-        logger.info(
-            f"Starting offline AI calibration: market={market}, lookback_days={lookback_days}, min_samples={min_samples}"
-        )
-        result = svc.calibrate_market(market=market, lookback_days=lookback_days, min_samples=min_samples)
-        if result:
+        markets = [
+            item.strip()
+            for item in (os.getenv("AI_CALIBRATION_MARKETS", "Crypto") or "Crypto").split(",")
+            if item.strip()
+        ]
+        for market in markets:
             logger.info(
-                f"[AI Calibration] market={result.market} best_thr=+{result.buy_threshold:.1f} "
-                f"accuracy={result.best_accuracy:.2f}% sample={result.sample_count} "
-                f"coverage={result.coverage} validated_new={result.validated_count}"
+                f"Starting offline AI calibration: market={market}, lookback_days={lookback_days}, min_samples={min_samples}"
             )
-        else:
-            logger.info("[AI Calibration] No calibration update applied (not enough data).")
+            result = svc.calibrate_market(market=market, lookback_days=lookback_days, min_samples=min_samples)
+            if result:
+                logger.info(
+                    f"[AI Calibration] market={result.market} best_thr=+{result.buy_threshold:.1f} "
+                    f"accuracy={result.best_accuracy:.2f}% sample={result.sample_count} "
+                    f"coverage={result.coverage} validated_new={result.validated_count}"
+                )
+            else:
+                logger.info(f"[AI Calibration] No update applied for {market} (not enough data).")
     except Exception as e:
         logger.error(f"start_ai_calibration_worker failed: {e}", exc_info=True)
 

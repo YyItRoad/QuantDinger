@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from typing import Any, Dict, Optional, Tuple
 
 from app.services.live_trading.base import BaseRestClient, LiveTradingError
@@ -16,38 +15,12 @@ from app.services.live_trading.symbols import _split_base_quote
 
 logger = logging.getLogger(__name__)
 
-# Position ownership is recorded net of base-asset fees. Applying an additional
-# 0.2% haircut on every close compounds into visible residual balances.
-_DEFAULT_CLOSE_SAFETY = 1.0
-_DEFAULT_OPEN_BUFFER = 0.995
-
-
-def _close_safety_ratio() -> float:
-    try:
-        v = float(os.getenv("SPOT_CLOSE_SAFETY_RATIO", str(_DEFAULT_CLOSE_SAFETY)))
-    except Exception:
-        v = _DEFAULT_CLOSE_SAFETY
-    if v <= 0 or v > 1.0:
-        v = _DEFAULT_CLOSE_SAFETY
-    return v
-
-
-def _open_quote_buffer() -> float:
-    try:
-        v = float(os.getenv("SPOT_OPEN_QUOTE_BUFFER", str(_DEFAULT_OPEN_BUFFER)))
-    except Exception:
-        v = _DEFAULT_OPEN_BUFFER
-    if v <= 0 or v > 1.0:
-        v = _DEFAULT_OPEN_BUFFER
-    return v
-
-
 def scale_spot_open_notional(usdt_notional: float) -> float:
-    """Reserve a small USDT buffer so spot buys do not consume 100% of quote (fees)."""
+    """Return the exact explicit quote amount requested by the caller."""
     amt = float(usdt_notional or 0.0)
     if amt <= 0:
         return 0.0
-    return amt * _open_quote_buffer()
+    return amt
 
 
 def _pick_free_from_row(row: Dict[str, Any], *keys: str) -> float:
@@ -367,7 +340,7 @@ def get_spot_total_base_balance(
 
 
 def fetch_spot_last_price(client: BaseRestClient, *, symbol: str) -> float:
-    """Best-effort last price for USDT -> base conversion (supports Bitget ``lastPr``)."""
+    """Best-effort last price for quote-to-base conversion."""
     if not hasattr(client, "get_ticker"):
         return 0.0
     try:
@@ -376,7 +349,7 @@ def fetch_spot_last_price(client: BaseRestClient, *, symbol: str) -> float:
         return 0.0
     if not isinstance(ticker, dict):
         return 0.0
-    for key in ("last", "lastPr", "lastPx", "lastPrice", "close", "price"):
+    for key in ("last", "lastPrice", "lastPx", "lastPr", "close", "price"):
         try:
             px = float(ticker.get(key) or 0.0)
         except Exception:
@@ -441,6 +414,34 @@ def prepare_spot_live_order_sizes(
     return max(0.0, qty), 0.0, False
 
 
+def prepare_spot_live_order_sizes_safely(
+    client: BaseRestClient,
+    *,
+    symbol: str,
+    side: str,
+    reduce_only: bool,
+    base_qty: float,
+    ref_price: float,
+) -> Tuple[float, float, bool, Dict[str, Any]]:
+    """Prepare spot sizes while retaining diagnostics for a non-fatal lookup error."""
+    try:
+        amount, quote_amount, uses_quote = prepare_spot_live_order_sizes(
+            client,
+            symbol=symbol,
+            side=side,
+            reduce_only=reduce_only,
+            base_qty=base_qty,
+            ref_price=ref_price,
+        )
+        return amount, quote_amount, uses_quote, {
+            "base_qty": amount,
+            "quote_amt": quote_amount,
+            "market_buy_uses_quote": uses_quote,
+        }
+    except Exception as exc:
+        return base_qty, 0.0, False, {"error": str(exc)}
+
+
 def normalize_spot_quote_amount(
     client: BaseRestClient,
     *,
@@ -497,7 +498,11 @@ def clamp_spot_close_quantity(
     safety_ratio: Optional[float] = None,
 ) -> Tuple[float, Dict[str, Any]]:
     """
-    Cap sell size to exchange free base (with safety ratio) and normalize down to lot step.
+    Cap sell size to the exact exchange free base and normalize down to lot step.
+
+    ``safety_ratio`` remains as a compatibility-only argument for older callers.
+    It is intentionally ignored: multiplying every close creates deterministic
+    residual balances and cannot make execution safer.
     """
     req = float(requested_qty or 0.0)
     if not math.isfinite(req):
@@ -506,9 +511,13 @@ def clamp_spot_close_quantity(
     if req <= 0:
         return 0.0, meta
 
-    ratio = float(safety_ratio) if safety_ratio is not None else _close_safety_ratio()
-    if not math.isfinite(ratio) or not 0 < ratio <= 1:
-        raise LiveTradingError("strategyRuntime.spotCloseQuantityInvalid")
+    if safety_ratio is not None:
+        try:
+            legacy_ratio = float(safety_ratio)
+        except (TypeError, ValueError):
+            legacy_ratio = 0.0
+        if not math.isfinite(legacy_ratio) or legacy_ratio <= 0:
+            raise LiveTradingError("strategyRuntime.spotCloseQuantityInvalid")
     try:
         free = get_spot_free_base_balance(client, symbol=symbol, strict=True)
         if not math.isfinite(free) or free < 0:
@@ -516,9 +525,9 @@ def clamp_spot_close_quantity(
     except Exception as exc:
         raise LiveTradingError("strategyRuntime.spotBalanceUnavailable") from exc
     meta["exchange_free"] = free
-    meta["safety_ratio"] = ratio
+    meta["safety_ratio"] = 1.0
 
-    cap = min(req, free * ratio)
+    cap = min(req, free)
     meta["capped_before_normalize"] = cap
 
     final = normalize_spot_base_quantity(client, symbol=symbol, quantity=cap, for_market=True)
@@ -528,11 +537,10 @@ def clamp_spot_close_quantity(
     if final < req * 0.999:
         meta["adjusted"] = True
         logger.info(
-            "Spot close qty adjusted: symbol=%s requested=%s free=%s final=%s ratio=%s",
+            "Spot close qty adjusted: symbol=%s requested=%s free=%s final=%s",
             symbol,
             req,
             free,
             final,
-            ratio,
         )
     return max(0.0, final), meta

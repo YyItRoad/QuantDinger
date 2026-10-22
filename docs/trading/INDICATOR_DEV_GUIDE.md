@@ -250,7 +250,7 @@ Each plot normally contains:
 | <code>data</code> | list | values/<code>None</code>, length <code>len(df)</code> |
 | <code>color</code> | str | preferably <code>#RRGGBB</code> |
 | <code>overlay</code> | bool | <code>True</code> on price chart, <code>False</code> in a pane |
-| <code>type</code> | optional str | <code>line</code>, <code>bar</code>, or <code>circle</code>; see aliases below |
+| <code>type</code> | optional str | <code>line</code>, <code>bar</code>, <code>circle</code>, or <code>cloud</code>; see aliases below |
 
 Public plot types:
 
@@ -260,12 +260,14 @@ Public plot types:
 | <code>bar</code>, <code>histogram</code>, <code>column</code> | columns from a baseline | histogram/columns |
 | <code>circle</code>, <code>dot</code>, <code>point</code>, <code>scatter</code> | circles | circles/scatter |
 | <code>lamp</code> | lamp dots; three or more lamp series in one pane are arranged into rows | an approximation for state panels |
+| <code>cloud</code>, <code>band</code>, <code>fill_between</code>, <code>fill-between</code> | filled range between an upper and lower series | <code>fill(plot1, plot2)</code> |
 
 Style fields apply by figure type:
 
 - Common: <code>color</code>, <code>opacity</code>.
 - Line: <code>lineWidth</code> and <code>lineStyle</code>/<code>style</code>, such as <code>solid</code> or <code>dashed</code>.
 - Bar and circle: <code>size</code>/<code>radius</code>, <code>borderColor</code>, and <code>borderSize</code>; bars also accept <code>baseValue</code>.
+- Cloud: each point uses <code>upper</code> and <code>lower</code>; <code>color</code> may change per point. Use <code>opacity</code> between <code>0.02</code> and <code>0.30</code>. Set <code>title=False</code> to hide the cloud from the legend.
 - All <code>overlay=False</code> plots from one indicator share one pane. They do not automatically create several panes as separate Pine scripts would.
 
 For Pine-like series colors or dynamic point sizes, a <code>data</code> entry may be an object instead of a scalar:
@@ -279,6 +281,47 @@ dynamic_points = [
 ~~~
 
 Value aliases are <code>value</code>, <code>y</code>, and <code>data</code>; color aliases are <code>color</code>, <code>fillColor</code>, and <code>backgroundColor</code>; size aliases are <code>size</code>, <code>radius</code>, and <code>r</code>. New code should use the canonical <code>value/color/size</code> fields.
+
+### Filled clouds and bands
+
+A cloud point is an object with <code>upper</code> and <code>lower</code>. The list must still have <code>len(df)</code> entries. Use <code>None</code> where the band should stop; this prevents a neutral or warm-up region from being connected across a gap. The renderer orders the two values automatically, so the cloud remains valid when two lines cross.
+
+~~~python
+# @param cloud_opacity float 0.10 Cloud opacity range=0.03:0.24:0.01
+
+cloud_opacity = min(0.24, max(0.03, float(params.get("cloud_opacity", 0.10))))
+trend_cloud = []
+
+for index in range(len(df)):
+    fast_value = ema_fast.iloc[index]
+    slow_value = ema_slow.iloc[index]
+
+    if pd.isna(fast_value) or pd.isna(slow_value) or not bool(trending.iloc[index]):
+        trend_cloud.append(None)
+        continue
+
+    trend_cloud.append(
+        {
+            "upper": float(max(fast_value, slow_value)),
+            "lower": float(min(fast_value, slow_value)),
+            "color": "#22C55E" if fast_value >= slow_value else "#F43F5E",
+        }
+    )
+
+plots = [
+    {
+        "name": "Trend cloud",
+        "title": False,
+        "data": trend_cloud,
+        "color": "#22C55E",
+        "type": "cloud",
+        "overlay": True,
+        "opacity": cloud_opacity,
+    },
+]
+~~~
+
+The canonical fields are <code>upper/lower/color</code>. Compatibility aliases for the upper value are <code>top</code>, <code>high</code>, <code>value</code>, <code>y</code>, and <code>data</code>; aliases for the lower value are <code>bottom</code> and <code>low</code>. Prefer the canonical fields in new indicators.
 
 ~~~python
 plots = [
@@ -461,11 +504,12 @@ QuantDinger does not execute Pine source. Migration means preserving indicator m
 | <code>input.int/float/bool/string</code> | Core semantics supported | <code># @param</code>; Pine group, inline, confirm, and dedicated color/source/timeframe/symbol controls are not available |
 | Common <code>ta.*</code> indicators | Calculation semantics are implementable | use pandas/numpy; the indicator runtime has no Pine-compatible <code>ta</code> namespace, so smoothing, warmup, and NaN behavior must be verified |
 | <code>plot()</code>, histogram, circles | Common subset supported | line/bar/circle plots, overlay/pane placement, and per-point colors/sizes |
+| <code>fill()</code> between two plots | Supported | use a <code>cloud</code> plot with per-point <code>upper</code>/<code>lower</code> values and optional per-point color |
 | <code>plotshape()</code>, <code>plotchar()</code> | Main event semantics supported | use <code>signals</code>; use <code>textData</code> or point objects for dynamic text |
 | <code>hline()</code>, line, box, label | Common static results supported | line/zone/label layers; each run returns a final object list, without Pine object IDs, mutation methods, or garbage-collection semantics |
 | <code>alert()</code>, <code>alertcondition()</code> | Partially supported | emit <code>signals</code>, then configure monitoring after saving; indicator code does not directly notify or trade |
 | arrays, maps, user functions, state calculations | Python equivalents available | use list/dict, functions, and pandas Series; calculation is vectorized over the DataFrame, not Pine's per-bar <code>var</code>/<code>varip</code> model |
-| <code>fill()</code>, linefill, <code>bgcolor()</code>, <code>barcolor()</code> | No first-class equivalent yet | a fixed range may be approximated with a zone; this is not full fill, background, or candle-color compatibility |
+| linefill, <code>bgcolor()</code>, <code>barcolor()</code> | No first-class equivalent yet | a fixed range may be approximated with a zone; this is not full background or candle-color compatibility |
 | area/step/cross/arrow, <code>plotcandle()</code>/<code>plotbar()</code> | Not supported yet | an unknown <code>type</code> currently falls back to line; do not rely on that fallback |
 | table, polyline, dynamic drawing lifecycle | Not supported yet | do not emit undefined objects |
 | <code>request.security()</code>, <code>request.*()</code>, cross-symbol/MTF | Not supported yet | indicators receive only the current chart DataFrame and cannot fetch network or exchange data |

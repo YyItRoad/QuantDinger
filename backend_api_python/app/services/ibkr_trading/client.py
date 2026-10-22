@@ -4,7 +4,6 @@ Interactive Brokers Trading Client
 Uses ib_insync library to connect to TWS or IB Gateway for trading.
 """
 
-import time
 import threading
 import asyncio
 from dataclasses import dataclass, field
@@ -530,7 +529,6 @@ class IBKRClient:
 
             for trade in trades:
                 order = getattr(trade, "order", None)
-                order_status = getattr(trade, "orderStatus", None)
                 candidate_ids = {
                     str(getattr(order, "orderId", "") or ""),
                     str(getattr(order, "permId", "") or ""),

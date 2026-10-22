@@ -472,7 +472,7 @@ def test_htx_swap_fee_query_falls_back_to_v1_order_detail(
         (OkxClient(api_key="key", secret_key="secret", passphrase="pass"),
          {"data": [{"billId": "1", "instId": "BTC-USDT-SWAP", "balChg": "0.15", "ccy": "USDT", "ts": "10"}]}, 0.15),
         (BitgetMixClient(api_key="key", secret_key="secret", passphrase="pass"),
-         {"data": {"bills": [{"billId": "1", "symbol": "BTCUSDT", "amount": "-0.35", "coin": "USDT", "cTime": "10"}]}}, -0.35),
+         {"data": {"list": [{"id": "1", "symbol": "BTCUSDT", "balanceChange": "-0.35", "coin": "USDT", "ts": "10"}]}}, -0.35),
         (BybitClient(api_key="key", secret_key="secret"),
          {"result": {"list": [{"id": "1", "symbol": "BTCUSDT", "funding": "0.45", "currency": "USDT", "transactionTime": "10"}]}}, 0.45),
         (GateUsdtFuturesClient(api_key="key", secret_key="secret"),

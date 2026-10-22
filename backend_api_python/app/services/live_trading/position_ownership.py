@@ -438,6 +438,105 @@ def list_reservations(
     return rows
 
 
+def refresh_recorded_ownership_states(
+    *,
+    user_id: int,
+    credential_id: int,
+    market_type: str,
+    rows: Iterable[Dict[str, Any]],
+    snapshot_started_at: float,
+) -> int:
+    """Refresh existing drift records without overwriting newer guard decisions."""
+    entries = []
+    for row in rows or []:
+        symbol = canonical_symbol(str(row.get("symbol") or ""))
+        side = normalize_side(str(row.get("side") or ""))
+        status = str(row.get("status") or "")
+        if not symbol or not side or status not in {STATUS_OK, STATUS_BLOCKED}:
+            continue
+        entries.append((symbol, side, row))
+    if not entries or int(credential_id or 0) <= 0 or float(snapshot_started_at or 0.0) <= 0:
+        return 0
+
+    updated = 0
+    with get_db_connection() as db:
+        cur = db.cursor()
+        for symbol, side, row in entries:
+            cur.execute(
+                """
+                UPDATE qd_position_reservations
+                SET observed_account_qty = %s,
+                    allocated_qty = %s,
+                    status = %s,
+                    drift_reason = %s,
+                    last_log_at = CASE WHEN %s = %s THEN NULL ELSE last_log_at END,
+                    updated_at = NOW()
+                WHERE user_id = %s AND credential_id = %s AND market_type = %s
+                  AND symbol_canonical = %s AND side = %s
+                  AND updated_at <= TO_TIMESTAMP(%s)
+                """,
+                (
+                    float(row.get("account_qty") or 0.0),
+                    float(row.get("strategy_qty") or 0.0),
+                    str(row.get("status") or STATUS_OK),
+                    str(row.get("reason") or ""),
+                    str(row.get("status") or STATUS_OK),
+                    STATUS_OK,
+                    int(user_id or 0),
+                    int(credential_id or 0),
+                    normalize_market_type(market_type),
+                    symbol,
+                    side,
+                    float(snapshot_started_at),
+                ),
+            )
+            updated += max(0, int(cur.rowcount or 0))
+        db.commit()
+        cur.close()
+    return updated
+
+
+def refresh_account_ownership_from_snapshot(
+    *,
+    user_id: int,
+    credential_id: int,
+    exchange_id: str,
+    market_type: str,
+    account_rows: Iterable[Dict[str, Any]],
+    snapshot_started_at: float,
+) -> int:
+    """Re-evaluate saved drift states from an already-fetched account snapshot."""
+    from app.services.live_trading.account_positions import (
+        list_strategy_allocations_for_account,
+    )
+
+    reservations = list_reservations(
+        user_id=int(user_id),
+        credential_id=int(credential_id),
+        market_type=market_type,
+    )
+    if not reservations:
+        return 0
+    allocations = list_strategy_allocations_for_account(
+        user_id=int(user_id),
+        credential_id=int(credential_id),
+        market_type=market_type,
+        exchange_id=exchange_id,
+    )
+    rows = build_ownership_rows(
+        account_rows=account_rows,
+        allocated_rows=allocations,
+        reservation_rows=reservations,
+    )
+    return refresh_recorded_ownership_states(
+        user_id=int(user_id),
+        credential_id=int(credential_id),
+        market_type=market_type,
+        rows=rows,
+        snapshot_started_at=snapshot_started_at,
+    )
+
+
 def build_ownership_rows(
     *,
     account_rows: Iterable[Dict[str, Any]],

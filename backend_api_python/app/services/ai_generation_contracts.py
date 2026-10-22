@@ -32,6 +32,7 @@ Return Python source only. Do not use markdown fences or explanatory prose.
 - Use canonical instruments such as `USStock:SPY`, `HKStock:00700.HK`, `CNStock:600519.SH`, `Crypto:BTC/USDT@binance:spot`, `Crypto:AAPL/USD@gate:spot`, `Crypto:00700/HKD@gate:spot`, and a catalog-confirmed exchange equity perpetual such as `Crypto:HK0700/USDT@binance:swap`.
 - Exchange-listed equities keep the `Crypto` market prefix because execution uses the selected exchange credential. Preserve the exact venue, market type, currency, symbol, product type, and API family returned by product search; never rewrite the execution identity as a broker-listed `USStock` or `HKStock` instrument.
 - An explicit venue is part of the instrument identity: `Crypto:SOL/USDT@binance:swap` is also a perpetual contract. Preserve the exchange and market-type suffix exactly.
+- An explicit venue is also a hard market-data route. Never silently replace it with another exchange when history is unavailable. An unqualified `@spot` or `@swap` identifier may use the platform's public research route, but generated live-ready source should preserve the exact catalog-selected venue.
 - For a fixed universe call `context.set_universe([...])`.
 - For a platform universe pool call `context.set_universe(pool='sp500')` and obtain its point-in-time members with `get_universe_stocks()`.
 - For an index universe call `context.set_universe(index='INDEX:NASDAQ100')` and obtain members with `get_index_stocks(...)` when needed.
@@ -47,6 +48,7 @@ Return Python source only. Do not use markdown fences or explanatory prose.
 - Store per-run state on the global `g` namespace.
 - In `handle_data`, use `context.current_dt` to identify the current completed bar by its opening timestamp. In a live scheduled callback it is the scheduler clock instead, so use the returned history index to identify a signal bar. For cooldowns and holding periods, advance a counter on `g` once per distinct completed bar. Never use `len(bars)`, `len(closes)`, or a rolling history window's row offset as a bar clock: the window length stops advancing when full and can permanently block re-entry.
 - Confirm decisions from visible completed data only. Never read future rows, use negative shifts, or otherwise introduce look-ahead bias.
+- Strategy history is already filtered to completed bars by the runtime. Do not manually delete the final row, infer candle closure from wall-clock time, or mix a live tick into the OHLC frame; those workarounds create backtest/live divergence.
 - `initialize` runs during manifest discovery. Use it only for declarations and initial `g` values; never request market data, read live positions, or place orders there.
 - In backtests, scheduled callbacks see previous completed data and may submit for the current open; `handle_data` sees the newly completed bar and its market orders become eligible at the next available bar open. Limit orders and market restrictions may defer or prevent fills. In live sessions, callbacks read the latest completed data and enqueue asynchronous orders; never assume an exact opening-price fill or immediate position update.
 
@@ -90,6 +92,7 @@ Return Python source only. Do not use markdown fences or explanatory prose.
 - A string argument to `get_position` returns a Position even when flat (`amount == 0`); omitted or iterable symbols return a dictionary. For hedged positions, `get_positions()` keys include `::long`/`::short`; read one leg with `get_position(symbol, position_side=...)`.
 - `order` and `order_value` specify changes; `order_target`, `order_target_value`, and `order_target_percent` specify final targets. Quantity APIs use units without an additional leverage multiplier. Value and percent APIs apply the runtime leverage to the requested capital budget or equity fraction; do not multiply leverage into them again. Keep sizing bounded by available capital and explicit allocation rules.
 - An order helper returns an order reference only when the call supplies a non-empty `client_order_id`; otherwise it returns `None` even though an intent was queued. Never use return truthiness as a fill test. Track explicit references with `get_order_status(reference)["status"]`; cancellation can remain `cancel_pending` in live mode.
+- `execution_mode` belongs to the deployment, not strategy source. A queued `signal` intent can never become a live order because the deployment mode changed later; mode changes affect only newly created entry intents. Risk-reducing exits may still complete during a mode transition.
 - Keep long entry, long exit, short entry, and short exit conditions independent. A bearish long exit is not automatically a short entry.
 - Give every order a stable, non-empty `reason` for auditability.
 - Spot and all non-crypto markets are long-only for now.
@@ -97,7 +100,7 @@ Return Python source only. Do not use markdown fences or explanatory prose.
 ## Contract leverage
 - Leverage is supported only when every source-controlled instrument is a Crypto perpetual contract ending in `@swap`.
 - A leveraged strategy must explicitly call `context.allow_leverage(max_leverage=N)` in `initialize`.
-- The user may then choose a leverage value from 1 through the declared maximum in backtest or live setup.
+- The user may then choose a leverage value from 1 through the platform maximum of 100 in backtest or live setup; the exchange may enforce a lower instrument or account limit.
 - Never call `allow_leverage` for stocks, ETFs, futures outside the Crypto market, index universes, or Crypto spot.
 - Do not hardcode the user's selected leverage inside order logic; the runtime applies the chosen leverage.
 
@@ -186,11 +189,14 @@ SCRIPT_STRATEGY_REPAIR_REQUIREMENTS = """# Strategy API V2 repair requirements
 - Treat `get_position(symbol)` as a `Position` object with direct `.amount`, `.avg_cost`, and `.last_price` attributes; swap code adds `position_side` as a keyword. Never treat it as a dictionary or use `getattr`.
 - Replace legacy `.quantity` and `.cost_basis` position access with `.amount` and `.avg_cost`.
 - Preserve completed-data-only execution and remove look-ahead.
+- Do not remove the final history row as a candle-close workaround; the runtime supplies completed bars and keeps real-time prices outside the strategy OHLC frame.
 - Preserve native multi-timeframe subscriptions when requested: keep every user-requested timeframe, subscribe every used timeframe, let the fastest timeframe drive execution, and never expose a higher-timeframe bar before its close.
 - Never add a new timeframe during repair unless it is explicitly requested or an existing history/factor read already requires it. Keep single-timeframe source single-timeframe.
 - Canonicalize supported literals to `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `4h`, `1d`, or `1w`; weekly is `1w` and monthly is unsupported.
 - Repair undeclared literal reads by adding the matching subscription instead of rewriting every read to the driving timeframe. Do not collapse, resample, or otherwise erase requested higher-timeframe confirmation logic.
 - Keep symbol, market, frequency, schedule, and universe in source code.
+- Preserve an explicit exchange suffix as a hard data route and execution identity. Never repair an unavailable venue by silently substituting another exchange.
+- Keep deployment `execution_mode` out of strategy source. Never make strategy logic depend on converting an already queued signal intent into a live order.
 - Permit user-adjustable leverage only for Crypto `@swap` instruments and only after `context.allow_leverage(max_leverage=N)`.
 - Reject leverage for Crypto spot and every non-Crypto market.
 - `direction_mode` accepts exactly `long_only`, `short_only`, `one_way`, `both`, or `neutral`. Map single-position/net-position long-short reversal requests to `context.set_metadata(direction_mode="one_way")`. Reserve `both` for explicit hedge-mode dual-leg requests.
@@ -216,13 +222,15 @@ INDICATOR_SYSTEM_CONTRACT = """# QuantDinger chart indicator contract
 - Declare tunable parameters with `# @param <name> <int|float|bool|str> <default> <description>` and read matching defaults through `params.get(...)`.
 - Set `output = {'name': ..., 'plots': [...], 'signals': [...], 'layers': [...]}`.
 - Every plot and signal data list must have exactly `len(df)` values. Use `None` for sparse values and never emit NaN or infinity.
-- Plot types are `line`, `bar`, and `circle`; `histogram`/`column` alias to bar and `lamp`/`dot`/`point`/`scatter` alias to circle. Set `overlay` explicitly. All non-overlay plots from one indicator share one pane.
-- A plot point may be a scalar or `{'value': number, 'color': '#RRGGBB', 'size': number}` for per-bar style. Prefer the canonical `value`, `color`, and `size` keys.
+- Plot types are `line`, `bar`, `circle`, and `cloud`; `histogram`/`column` alias to bar, `lamp`/`dot`/`point`/`scatter` alias to circle, and `band`/`fill_between`/`fill-between` alias to cloud. Set `overlay` explicitly. All non-overlay plots from one indicator share one pane.
+- A line, bar, or circle point may be a scalar or `{'value': number, 'color': '#RRGGBB', 'size': number}` for per-bar style. Prefer the canonical `value`, `color`, and `size` keys.
+- A cloud point must be `None` or `{'upper': number, 'lower': number, 'color': '#RRGGBB'}`. The cloud data list must have `len(df)` entries. Use `None` to break warm-up, neutral, or invalid regions. The renderer orders crossing boundaries automatically. Use `opacity` from `0.02` through `0.30`; use `title=False` when the cloud should not add a legend item.
+- Translate Pine `fill()` between two numeric series to one `cloud` plot. For a continuous per-bar band or trend cloud, never emit one `zone` or box layer per bar.
 - A signal is active when its `data` list contains a finite non-zero numeric marker price for that bar. This finite numeric value format is preferred for consistent preview and notification monitoring. Static `text` or `textData` labels never activate a signal on their own.
 - Signals may set `renderMode` to `events`, `points`, or `state`; prefer sparse numeric event arrays unless the requested visual is explicitly a continuous condition.
 - Signal names are dynamic: use a stable `text` label or a per-bar `textData` label. The `type` field controls marker orientation and does not restrict signal names to Buy, Sell, Long Entry, or Long Exit.
 - Prefer one-bar edge events for markers and notifications. Do not repeat a persistent state on every bar.
-- Layers support `zone`, `line`, and `label`. Do not invent Pine-only fill, table, polyline, candle, background-color, bar-color, object-ID, or mutation contracts.
+- Layers support sparse `zone`, `line`, and `label` annotations. Do not invent Pine-only linefill, table, polyline, candle, background-color, bar-color, object-ID, or mutation contracts.
 - The runtime is single-symbol and single-timeframe. Do not emulate `request.security()`, other `request.*()` APIs, network access, Pine `barstate.*`, or tick rollback.
 - Translate common Pine calculation semantics with pandas/numpy; do not claim Pine syntax/API compatibility or assume a Pine-compatible `ta.*` namespace exists.
 - Avoid look-ahead: no negative shift, future `iloc`, centered rolling, or future-row reads.
@@ -238,7 +246,7 @@ INDICATOR_GENERATION_CONTRACT = INDICATOR_SYSTEM_CONTRACT + """
 - The latest user request overrides prior assistant messages that deferred code generation or asked for another confirmation.
 - The Indicator IDE accepts QuantDinger Python only. If the user mentions Pine or Pine APIs, translate the requested behavior into this native Python contract instead of returning Pine or refusing the request.
 - Preserve useful visual semantics when existing code is supplied.
-- Include concise plots, unambiguous marker labels, and useful tunable parameters.
+- Include concise plots, unambiguous marker labels, and useful tunable parameters. Prefer native plots over repeated layers, keep opacity restrained, and avoid overlapping labels that obscure candles.
 - Interpret user requests written in any language, but use English for identifiers, metadata, comments, `@param` descriptions, and default plot, signal, and layer labels.
 - Localize display labels only when the user explicitly requests a target language. Keep identifiers, comments, metadata, and parameter descriptions in English.
 - `pd` and `np` are preloaded. Do not use `locals()`, `globals()`, reflection, or dynamic execution.
@@ -251,6 +259,8 @@ INDICATOR_REPAIR_REQUIREMENTS = """# Indicator repair requirements
 - Ensure declared parameter defaults exactly match `params.get(...)` fallbacks.
 - Ensure metadata globals, `df = df.copy()`, and `output` exist.
 - Ensure every plot and marker array has exactly `len(df)` values.
+- Preserve valid `cloud` plots. Repair each cloud point to `None` or canonical `upper`/`lower` values with an optional per-point `color`, and keep opacity within `0.02` through `0.30`.
+- When repeated per-bar `zone` or box layers represent two continuous numeric boundaries, replace them with one `cloud` plot and use `None` for intentional gaps.
 - Treat a signal as active only when its `data` array has a finite value at that bar; never infer activation from `text` or `textData`.
 - Convert numpy arrays back to indexed pandas Series before calling pandas-only methods.
 - Use English for identifiers, metadata, comments, parameter descriptions, and default display labels unless the user explicitly requests localized display labels.

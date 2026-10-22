@@ -57,7 +57,7 @@ class StrategyBacktestRepository:
         result: dict[str, Any],
         code: str,
     ) -> int | None:
-        compact_result = _compact_backtest_result(result)
+        compact_result = compact_backtest_result(result)
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
@@ -358,39 +358,39 @@ def _sample_evenly(rows: Any, limit: int) -> list[Any]:
     return [items[index] for index in indexes]
 
 
-def _compact_backtest_result(result: dict[str, Any]) -> dict[str, Any]:
+def compact_backtest_result(result: dict[str, Any]) -> dict[str, Any]:
     """Bound history payload size and remove duplicate compatibility arrays."""
     if not isinstance(result, dict):
         return {}
     compact = dict(result)
     compact["closedTrades"] = _sample_evenly(
         result.get("closedTrades") or result.get("trades"),
-        5000,
+        1500,
     )
     compact["executions"] = _sample_evenly(
         result.get("executions") or result.get("rawTrades"),
-        5000,
+        1500,
     )
     compact.pop("trades", None)
     compact.pop("rawTrades", None)
     compact["equityCurve"] = sample_equity_curve(
-        result.get("equityCurve") or [], 2400,
+        result.get("equityCurve") or [], 1200,
         _number(result.get("initialCapital"), _number(
             (result.get("executionAssumptions") or {}).get("initialCapital"),
         )),
     )
     for field, limit in (
-        ("benchmarkCurve", 2400),
-        ("holdingSnapshots", 1200),
-        ("rebalanceRecords", 1500),
-        ("orderLedger", 3000),
+        ("benchmarkCurve", 1200),
+        ("holdingSnapshots", 600),
+        ("rebalanceRecords", 800),
+        ("orderLedger", 1500),
     ):
         compact[field] = _sample_evenly(result.get(field), limit)
     snapshots = result.get("reviewCandles") if isinstance(result.get("reviewCandles"), dict) else {}
     compact["reviewCandles"] = {
         str(symbol): {
             "timeframe": str((snapshot or {}).get("timeframe") or ""),
-            "candles": list((snapshot or {}).get("candles") or [])[-3000:],
+            "candles": list((snapshot or {}).get("candles") or [])[-1500:],
         }
         for symbol, snapshot in list(snapshots.items())[:12]
         if isinstance(snapshot, dict)
@@ -399,18 +399,23 @@ def _compact_backtest_result(result: dict[str, Any]) -> dict[str, Any]:
         "version": 2,
         "compacted": True,
         "limits": {
-            "equityCurve": 2400,
-            "benchmarkCurve": 2400,
-            "holdingSnapshots": 1200,
-            "rebalanceRecords": 1500,
-            "orderLedger": 3000,
-            "closedTrades": 5000,
-            "executions": 5000,
+            "equityCurve": 1200,
+            "benchmarkCurve": 1200,
+            "holdingSnapshots": 600,
+            "rebalanceRecords": 800,
+            "orderLedger": 1500,
+            "closedTrades": 1500,
+            "executions": 1500,
             "reviewCandleSymbols": 12,
-            "reviewCandlesPerSymbol": 3000,
+            "reviewCandlesPerSymbol": 1500,
         },
     }
     return compact
+
+
+def _compact_backtest_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Backward-compatible alias for tests and internal callers."""
+    return compact_backtest_result(result)
 
 
 def _normalize_backtest_result(

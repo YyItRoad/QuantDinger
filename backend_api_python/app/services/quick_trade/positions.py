@@ -117,8 +117,23 @@ def parse_positions(raw: Any) -> list:
                     notional_usdt = candidate
                     break
 
-            result.append(
-                {
+            available = None
+            for key in (
+                "available",
+                "free",
+                "availBal",
+                "availableBalance",
+                "available_balance",
+            ):
+                if item.get(key) is None:
+                    continue
+                try:
+                    available = max(0.0, float(item.get(key)))
+                except (TypeError, ValueError):
+                    continue
+                break
+
+            normalized = {
                     "symbol": display_symbol,
                     "side": infer_position_side_from_row(item),
                     "size": abs(size),
@@ -184,7 +199,9 @@ def parse_positions(raw: Any) -> list:
                     ),
                     "notional_usdt": notional_usdt,
                 }
-            )
+            if available is not None:
+                normalized["available"] = available
+            result.append(normalized)
     except Exception as exc:
         logger.warning("Quick Trade position parse failed: %s", exc)
     return result

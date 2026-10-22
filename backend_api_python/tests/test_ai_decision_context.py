@@ -4,7 +4,6 @@ import pandas as pd
 
 from app.services.ai_decision_context import (
     build_market_evidence,
-    build_quick_trade_decision_context,
     build_strategy_decision_context,
     summarize_market_bars,
 )
@@ -133,27 +132,3 @@ def test_strategy_context_includes_bound_parameters_and_freshness(monkeypatch):
     assert context["market_evidence"]["data_quality"] == "complete"
     assert context["market_evidence"]["stale_timeframes"] == []
     assert context["portfolio_risk"]["drawdown_from_initial_pct"] == -5.0
-
-
-def test_quick_trade_context_includes_live_evidence_and_protection(monkeypatch):
-    monkeypatch.setattr(
-        "app.services.ai_decision_context._cached_market_rows",
-        lambda *args, **kwargs: _bars(),
-    )
-    context = build_quick_trade_decision_context({
-        "symbol": "ETH/USDT",
-        "side": "buy",
-        "market_type": "spot",
-        "exchange_id": "binance",
-        "base_qty": 0.1,
-        "order_notional_usdt": 216.0,
-        "usdt_amount": 216.0,
-        "tp_price": 2_220.0,
-        "sl_price": 2_120.0,
-        "bal": {"available": 500.0, "total": 700.0},
-    })
-
-    assert context["context_version"] == 2
-    assert context["market_evidence"]["data_quality"] == "complete"
-    assert context["portfolio_risk"]["available_balance"] == 500.0
-    assert context["portfolio_risk"]["risk_reward_ratio"] == 1.5

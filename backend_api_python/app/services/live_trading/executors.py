@@ -91,7 +91,14 @@ class MarketOrderExecutor:
                     raw={"place": dict(result.raw or {}), "fill": dict(fill.raw or {})},
                     fees_by_ccy=dict(fill.fees_by_ccy or {}),
                 )
-            status = "filled" if float(result.filled or 0.0) > 0 else "submitted"
+            placed_fill = max(0.0, float(result.filled or 0.0))
+            requested = max(0.0, float(intent.quantity or 0.0))
+            if requested > 0 and placed_fill >= requested * 0.999999:
+                status = "filled"
+            elif placed_fill > 0:
+                status = "partial"
+            else:
+                status = "submitted"
             return OrderExecutionResult.from_live_order(result, status=status)
         except Exception as exc:
             return replace(

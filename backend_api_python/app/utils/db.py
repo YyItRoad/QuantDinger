@@ -23,7 +23,7 @@ from pathlib import Path
 # Re-export from PostgreSQL module
 from app.utils.db_postgres import (
     get_pg_connection as get_db_connection,
-    get_pg_transaction as get_db_transaction,
+    get_pg_transaction as get_db_transaction,  # noqa: F401 - public compatibility export
     get_pg_connection_sync as get_db_connection_sync,
     is_postgres_available,
     close_pool as close_db,
@@ -307,12 +307,6 @@ def _apply_init_sql(logger, *, strict: bool = False):
                 logger,
                 name="market-state-schedule",
                 path=init_sql.parent / "20260917_market_state_schedule.sql",
-            )
-            _apply_migration_component(
-                conn,
-                logger,
-                name="event-radar-20260925",
-                path=Path(__file__).resolve().parent.parent.parent / "migrations" / "20260925_event_radar.sql",
             )
             _apply_migration_component(
                 conn,

@@ -8,7 +8,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timedelta
-from typing import Tuple, Optional
+from typing import Tuple
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 

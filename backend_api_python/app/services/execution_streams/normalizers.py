@@ -184,20 +184,32 @@ def parse_bybit(payload: Dict[str, Any]) -> List[ExecutionEvent]:
 
 def parse_bitget(payload: Dict[str, Any]) -> List[ExecutionEvent]:
     arg = payload.get("arg") if isinstance(payload.get("arg"), dict) else {}
-    if str(arg.get("channel") or "") not in {"fill", "orders"}:
+    topic = str(arg.get("topic") or arg.get("channel") or "")
+    if topic not in {"fill", "order", "orders"}:
         return []
-    inst_type = str(arg.get("instType") or "").upper()
     out: List[ExecutionEvent] = []
     for item in payload.get("data") or []:
         if not isinstance(item, dict):
             continue
-        is_spot = inst_type == "SPOT"
-        is_order = str(arg.get("channel")) == "orders"
-        qty = as_float(
-            item.get("size")
-            if is_spot and not is_order
-            else item.get("fillQty") or item.get("baseVolume") or item.get("execQty")
-        )
+        is_uta = bool(arg.get("topic") or item.get("category"))
+        category = str(item.get("category") or "").upper()
+        inst_type = str(item.get("instType") or arg.get("instType") or "").upper()
+        is_spot = category == "SPOT" if category else inst_type == "SPOT"
+        is_order = topic in {"order", "orders"}
+        if is_uta:
+            qty = as_float(
+                item.get("execQty")
+                or item.get("fillQty")
+                or item.get("cumExecQty")
+                or item.get("qty")
+            )
+        else:
+            qty = as_float(
+                item.get("fillQty")
+                or item.get("baseVolume")
+                or item.get("execQty")
+                or item.get("size")
+            )
         fill_id = str(item.get("tradeId") or item.get("execId") or "")
         if qty <= 0 and not fill_id:
             continue
@@ -210,46 +222,57 @@ def parse_bitget(payload: Dict[str, Any]) -> List[ExecutionEvent]:
                     value = detail.get("totalFee")
                     if value in (None, ""):
                         value = detail.get("fee")
-                    # Bitget classic spot fill reports totalFee as a
-                    # positive cost, while classic futures/order channels
-                    # report deductions as negative values. Both are fees.
-                    amount = as_float(value) if is_spot and not is_order and detail.get('totalFee') not in (None, '') else -as_float(value)
+                    amount = as_float(value)
+                    if not is_uta:
+                        amount = -amount
                     if currency and abs(amount) > 1e-18:
                         fees.append(FeeComponent(currency=str(currency).upper(), amount=amount))
         if not fees:
             currency = item.get("fillFeeCoin") or item.get("feeCoin")
-            amount = -as_float(item.get("fillFee") or item.get("fee"))
+            amount = as_float(item.get("execFee") or item.get("fillFee") or item.get("fee"))
+            if not is_uta:
+                amount = -amount
             if currency and abs(amount) > 1e-18:
                 fees = [FeeComponent(currency=str(currency).upper(), amount=amount)]
         out.append(
             ExecutionEvent(
                 exchange_id="bitget",
                 market_type="spot" if is_spot else "swap",
-                symbol=normalize_symbol(item.get("symbol") or arg.get("instId")),
+                symbol=normalize_symbol(item.get("symbol") or arg.get("symbol") or arg.get("instId")),
                 exchange_order_id=str(item.get("orderId") or item.get("ordId") or ""),
                 client_order_id=str(item.get("clientOid") or item.get("clOrdId") or ""),
                 exchange_fill_id=fill_id,
                 side=str(item.get("side") or "").lower(),
                 position_side=str(item.get("posSide") or item.get("holdSide") or "").lower(),
-                order_status=normalize_status(item.get("status") or "partial"),
+                order_status=normalize_status(item.get("orderStatus") or item.get("status") or "partial"),
                 price=as_float(
-                    item.get("priceAvg")
-                    if is_spot and not is_order
-                    else item.get("fillPrice") or item.get("price") or item.get("execPrice")
+                    item.get("execPrice")
+                    or (item.get("fillPrice") if not is_uta else None)
+                    or item.get("avgPrice")
+                    or item.get("priceAvg")
+                    or item.get("fillPrice")
+                    or item.get("price")
                 ),
                 quantity=qty,
-                cumulative_quantity=as_float(item.get("accBaseVolume")),
-                cumulative_average_price=as_float(item.get("priceAvg")) if is_order else 0.0,
+                cumulative_quantity=as_float(item.get("cumExecQty") or item.get("accBaseVolume")),
+                cumulative_average_price=as_float(item.get("avgPrice") or item.get("priceAvg")) if is_order else 0.0,
                 fees_cumulative=is_order and isinstance(details, list),
-                realized_pnl=as_float(item.get("profit")) if item.get("profit") not in (None, "") else None,
+                realized_pnl=as_float(item.get("execPnl") or item.get("profit")) if item.get("execPnl") not in (None, "") or item.get("profit") not in (None, "") else None,
                 maker=str(item.get("tradeScope") or item.get("execType") or "").lower() == "maker"
                 if item.get("tradeScope") or item.get("execType")
                 else None,
-                fee_status=("actual" if fees else "actual_zero") if details is not None or item.get("fillFee") is not None else "pending",
+                fee_status=("actual" if fees else "actual_zero")
+                if details is not None
+                or item.get("execFee") is not None
+                or item.get("fillFee") is not None
+                or item.get("fee") is not None
+                else "pending",
                 occurred_at=as_millis_datetime(
-                    item.get("cTime")
-                    if is_spot
-                    else item.get("fillTime") or item.get("uTime") or item.get("execTime")
+                    item.get("createdTime")
+                    or item.get("execTime")
+                    or item.get("fillTime")
+                    or item.get("uTime")
+                    or item.get("cTime")
                 ),
                 fees=fees,
                 raw=item,

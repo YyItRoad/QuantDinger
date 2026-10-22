@@ -21,9 +21,19 @@ from app.services.live_trading.bitget import BitgetMixClient
 from app.services.live_trading.bybit import BybitClient
 from app.services.live_trading.factory import create_client
 from app.services.live_trading.gate import GateStockClient, GateUsdtFuturesClient
+from app.services.live_trading.htx import HtxClient
 from app.services.live_trading.leg_context import credential_id_from_exchange_config
 from app.services.live_trading.okx import OkxClient
-from app.services.live_trading.records import normalize_strategy_symbol, strategy_allowed_symbols
+from app.services.live_trading.position_ownership import (
+    refresh_account_ownership_from_snapshot,
+)
+from app.services.live_trading.records import (
+    _delete_position,
+    _fetch_position,
+    lookup_exchange_side_qty,
+    normalize_strategy_symbol,
+    strategy_allowed_symbols,
+)
 from app.services.pending_orders.position_sync_cache import (
     exchange_sync_backoff_sec,
     get_position_sync_snapshot,
@@ -49,6 +59,333 @@ AlpacaClient = None
 _POSITION_SYNC_FD_BACKOFF_UNTIL = 0.0
 
 
+def _record_flat_leg_ownership_state(
+    *,
+    strategy_id: int,
+    strategy_config: Dict[str, Any],
+    symbol: str,
+    side: str,
+    strategy_qty: Optional[float] = None,
+) -> None:
+    """Persist an account-shortfall block while an external flat close is unresolved."""
+    row = _fetch_position(int(strategy_id), str(symbol), str(side))
+    qty = float(row.get("size") or 0.0) if strategy_qty is None else float(strategy_qty or 0.0)
+    credential_id = int(row.get("credential_id") or 0)
+    if credential_id <= 0:
+        return
+    market_type = str(row.get("market_type") or "swap").strip().lower()
+    exchange_config = (
+        strategy_config.get("exchange_config")
+        if isinstance(strategy_config.get("exchange_config"), dict)
+        else {}
+    )
+    exchange_id = str(
+        exchange_config.get("exchange_id")
+        or exchange_config.get("exchangeId")
+        or strategy_config.get("exchange_id")
+        or ""
+    ).strip().lower()
+    from app.services.live_trading.position_ownership import (
+        evaluate_and_record_ownership,
+        ownership_log_message,
+    )
+    from app.utils.strategy_runtime_logs import append_strategy_log
+
+    snapshot = evaluate_and_record_ownership(
+        user_id=int(row.get("user_id") or strategy_config.get("user_id") or 1),
+        credential_id=credential_id,
+        exchange_id=exchange_id,
+        market_type=market_type,
+        symbol=str(symbol),
+        side=str(side),
+        account_qty=0.0,
+        strategy_qty=max(0.0, qty),
+        inst_id=str(row.get("inst_id") or ""),
+    )
+    if not snapshot.allowed and snapshot.should_log:
+        append_strategy_log(int(strategy_id), "error", ownership_log_message(snapshot))
+
+
+def _local_strategy_position_legs(
+    strategy_id: int,
+    allowed_symbols: set[str],
+) -> List[tuple[str, str]]:
+    allowed = {
+        normalize_strategy_symbol(str(symbol or "")).upper()
+        for symbol in allowed_symbols
+        if normalize_strategy_symbol(str(symbol or ""))
+    }
+    if not allowed:
+        return []
+
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT symbol, side
+            FROM qd_strategy_positions
+            WHERE strategy_id = %s
+              AND COALESCE(size, 0) > 0
+              AND side IN ('long', 'short')
+            """,
+            (int(strategy_id),),
+        )
+        rows = cur.fetchall() or []
+        cur.close()
+
+    output: List[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        symbol = normalize_strategy_symbol(str(row.get("symbol") or ""))
+        side = str(row.get("side") or "").strip().lower()
+        if not symbol or side not in ("long", "short"):
+            continue
+        if symbol.upper() not in allowed:
+            continue
+        key = (symbol, side)
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(key)
+    return output
+
+
+def _purge_flat_grace_sec() -> float:
+    """Guard window after an open/add fill during which a flat exchange snapshot must not purge L3."""
+    try:
+        return max(0.0, float(os.getenv("POSITION_SYNC_PURGE_GRACE_SEC", "120")))
+    except Exception:
+        return 120.0
+
+
+def _recent_open_fill_symbols(strategy_id: int, grace_sec: float) -> set[tuple[str, str]]:
+    """Return (symbol, side) legs that had an open/add fill within the grace window."""
+    if grace_sec <= 0:
+        return set()
+    sid = int(strategy_id or 0)
+    if sid <= 0:
+        return set()
+    out: set[tuple[str, str]] = set()
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                SELECT symbol, type
+                FROM qd_strategy_trades
+                WHERE strategy_id = %s
+                  AND type IN ('open_long', 'open_short', 'add_long', 'add_short')
+                  AND created_at >= NOW() - (%s * INTERVAL '1 second')
+                """,
+                (sid, grace_sec),
+            )
+            rows = cur.fetchall() or []
+            cur.close()
+    except Exception as exc:
+        logger.warning("[PositionSync] recent open fill lookup failed sid=%s: %s", sid, exc)
+        return out
+    for row in rows:
+        symbol = normalize_strategy_symbol(str(row.get("symbol") or ""))
+        if not symbol:
+            continue
+        t = str(row.get("type") or "").strip().lower()
+        side = "short" if "short" in t else "long" if "long" in t else ""
+        if side:
+            out.add((symbol.upper(), side))
+    return out
+
+
+def _purge_flat_strategy_positions_from_exchange(
+    *,
+    strategy_id: int,
+    strategy_config: Dict[str, Any],
+    exch_size: Dict[str, Dict[str, float]],
+    client: Any = None,
+    snapshot_from_cache: bool = False,
+    eps: float = 1e-12,
+) -> int:
+    """
+    Remove local L3 strategy legs only when a fresh exchange snapshot confirms
+    that the corresponding exchange leg is flat.
+
+    Before deleting a flat local leg, write a ``close_*`` trade when the strategy
+    trade ledger still shows residual open size (native protection closes are
+    otherwise invisible to the UI).
+
+    A short grace window protects against a transient flat snapshot racing a
+    just-executed open/add fill.
+    """
+    try:
+        enabled = str(os.getenv("POSITION_SYNC_PURGE_FLAT_LEDGER", "true")).strip().lower()
+    except Exception:
+        enabled = "false"
+    if enabled in {"0", "false", "no", "off"}:
+        return 0
+
+    sid = int(strategy_id or 0)
+    if sid <= 0:
+        return 0
+    if snapshot_from_cache:
+        # The snapshot cache TTL (POSITION_SYNC_CACHE_TTL_SEC / INTERVAL) can exceed the
+        # purge grace window, so a cached snapshot may predate a live fill on the venue.
+        logger.debug(
+            "[PositionSync] Strategy %s skips flat-leg purge: snapshot served from cache.", sid
+        )
+        return 0
+    allowed = strategy_allowed_symbols(strategy_config or {})
+    if not allowed:
+        return 0
+
+    grace_sec = _purge_flat_grace_sec()
+    recent_open = _recent_open_fill_symbols(sid, grace_sec)
+
+    deleted = 0
+    for symbol, side in _local_strategy_position_legs(sid, allowed):
+        if lookup_exchange_side_qty(exch_size or {}, symbol, side) > eps:
+            continue
+        if (symbol.upper(), side) in recent_open:
+            logger.info(
+                "[PositionSync] Strategy %s keeps leg %s %s: open fill within grace window (%.0fs)",
+                sid,
+                symbol,
+                side,
+                grace_sec,
+            )
+            continue
+        from app.services.live_trading.external_flat_close import (
+            reconcile_external_flat_closes,
+            trade_side_net_qty,
+        )
+
+        if trade_side_net_qty(sid, symbol, side) <= eps:
+            # An earlier tick already recorded this close but did not drop the leg (for
+            # example the delete raised). Re-reconciling would write a second close for the
+            # same size and double-count the PnL, so only the stale leg is removed here.
+            logger.warning(
+                "[PositionSync] Strategy %s dropping already-reconciled leg %s %s.",
+                sid,
+                symbol,
+                side,
+            )
+            try:
+                _record_flat_leg_ownership_state(
+                    strategy_id=sid,
+                    strategy_config=strategy_config,
+                    symbol=symbol,
+                    side=side,
+                    strategy_qty=0.0,
+                )
+            except Exception:
+                pass
+            _delete_position(sid, symbol, side)
+            deleted += 1
+            continue
+
+        trade_id = 0
+        try:
+            trade_id = reconcile_external_flat_closes(
+                strategy_id=sid,
+                symbol=symbol,
+                side=side,
+                client=client,
+                clear_local_position=True,
+            )
+            if trade_id:
+                logger.warning(
+                    "[PositionSync] Strategy %s recorded external flat close trade_id=%s for %s %s",
+                    sid,
+                    trade_id,
+                    symbol,
+                    side,
+                )
+        except Exception as reconcile_err:
+            logger.warning(
+                "[PositionSync] Strategy %s failed external flat close reconcile for %s %s: %s",
+                sid,
+                symbol,
+                side,
+                reconcile_err,
+            )
+        if not trade_id:
+            # Without a recorded close the venue may still hold the position (non-OKX
+            # venues have no close snapshot yet), so purging would lose real inventory.
+            logger.warning(
+                "[PositionSync] Strategy %s keeps leg %s %s: exchange flat but no close trade "
+                "could be attributed; refusing to purge an unattributed leg.",
+                sid,
+                symbol,
+                side,
+            )
+            try:
+                _record_flat_leg_ownership_state(
+                    strategy_id=sid,
+                    strategy_config=strategy_config,
+                    symbol=symbol,
+                    side=side,
+                )
+            except Exception as ownership_err:
+                logger.warning(
+                    "[PositionSync] Strategy %s failed to persist flat-leg ownership block for %s %s: %s",
+                    sid,
+                    symbol,
+                    side,
+                    ownership_err,
+                )
+            continue
+        try:
+            _record_flat_leg_ownership_state(
+                strategy_id=sid,
+                strategy_config=strategy_config,
+                symbol=symbol,
+                side=side,
+                strategy_qty=0.0,
+            )
+        except Exception:
+            pass
+        _delete_position(sid, symbol, side)
+        deleted += 1
+
+    # Heal cases where L3 was already purged but trade ledger still shows open qty.
+    try:
+        from app.services.live_trading.external_flat_close import (
+            reconcile_external_flat_closes,
+            trade_side_net_qty,
+        )
+
+        for symbol in allowed:
+            sym = normalize_strategy_symbol(str(symbol or ""))
+            if not sym:
+                continue
+            for side in ("long", "short"):
+                if lookup_exchange_side_qty(exch_size or {}, sym, side) > eps:
+                    continue
+                if trade_side_net_qty(sid, sym, side) <= eps:
+                    continue
+                trade_id = reconcile_external_flat_closes(
+                    strategy_id=sid,
+                    symbol=sym,
+                    side=side,
+                    client=client,
+                    clear_local_position=False,
+                )
+                if trade_id:
+                    logger.warning(
+                        "[PositionSync] Strategy %s backfilled missing close trade_id=%s for %s %s",
+                        sid,
+                        trade_id,
+                        sym,
+                        side,
+                    )
+    except Exception as heal_err:
+        logger.warning(
+            "[PositionSync] Strategy %s missing-close heal failed: %s",
+            sid,
+            heal_err,
+        )
+    return deleted
+
+
+
 def _position_sync_fd_backoff_sec() -> float:
     try:
         return max(30.0, float(os.getenv("POSITION_SYNC_FD_BACKOFF_SEC", "90")))
@@ -72,12 +409,40 @@ def _activate_position_sync_fd_backoff(reason: str) -> None:
 
 
 class PendingOrderPositionSyncMixin:
+    def _maybe_sync_positions(self) -> None:
+        if not self._position_sync_enabled:
+            return
+        now = time.time()
+        if self._position_sync_interval_sec <= 0:
+            return
+        if now - float(self._last_position_sync_ts or 0.0) < float(self._position_sync_interval_sec):
+            return
+        logger.debug(f"[PendingOrderWorker] Triggering sync... (now={now}, last={self._last_position_sync_ts})")
+        self._last_position_sync_ts = now
+        try:
+            self._sync_positions_best_effort()
+            from app.services.live_trading.funding_reconciliation import sync_running_strategy_funding
+            sync_running_strategy_funding()
+            from app.services.live_trading.alpaca_activity_reconciliation import sync_running_alpaca_activities
+            sync_running_alpaca_activities()
+        except Exception as e:
+            logger.debug(f"position sync skipped/failed: {e}")
+
+        # Optional managed-position recovery must not skip the existing sync jobs.
+        try:
+            from app.services.live_trading.position_management_liquidation import sync_managed_binance_liquidations
+            sync_managed_binance_liquidations()
+        except Exception as e:
+            logger.warning("Managed liquidation reconciliation skipped/failed: %s", e)
+
     def _sync_positions_best_effort(self, target_strategy_id: Optional[int] = None) -> None:
         """
-        Refresh the account-level exchange mirror without changing strategy ledgers.
+        Refresh the account-level exchange mirror, and drop L3 strategy legs that a fresh
+        exchange snapshot confirms are flat - after recording the matching close trade.
 
         L1 account positions come from exchange snapshots. L3 strategy positions are
-        produced only by strategy-owned fills, including fill-ledger strategies.
+        produced only by strategy-owned fills, including fill-ledger strategies; a leg is
+        only dropped when its close can be attributed to this strategy.
         """
         if _is_position_sync_fd_backoff_active():
             logger.debug("[PositionSync] skipped: file-descriptor backoff active")
@@ -203,8 +568,6 @@ class PendingOrderPositionSyncMixin:
 
                 # Get strategy's trading symbol(s) to filter positions
                 # Only sync positions for symbols that this strategy actually trades
-                allowed_symbols = strategy_allowed_symbols(sc)
-
                 # Lazy import IBKR / Alpaca clients here so the elif chain
                 # below can rely on isinstance() checks without paying the import
                 # cost on systems that don't ship those broker libs.
@@ -226,13 +589,16 @@ class PendingOrderPositionSyncMixin:
 
                 cache_key = position_sync_cache_key(sync_user_id, exchange_id, market_type, exchange_config)
                 cached_snap = get_position_sync_snapshot(cache_key)
+                snapshot_started_at = 0.0
                 exch_size: Dict[str, Dict[str, float]] = {}
                 exch_entry_price: Dict[str, Dict[str, float]] = {}
                 exch_inst_id: Dict[str, Dict[str, str]] = {}
+                client = None
 
                 if cached_snap is not None:
                     exch_size, exch_entry_price, exch_inst_id = cached_snap
                 else:
+                    snapshot_started_at = time.time()
                     if is_exchange_sync_backoff(cache_key):
                         logger.warning(
                             "[PositionSync] Strategy %s skipped: %s sync backoff active (key=%s)",
@@ -313,7 +679,6 @@ class PendingOrderPositionSyncMixin:
                             # Fatal auth/config errors should auto-stop the strategy to avoid endless spam.
                             # Typical OKX response: HTTP 401 {"msg":"Invalid OK-ACCESS-KEY","code":"50111"}
                             msg = str(e)
-                            m = msg.lower()
                             if is_file_descriptor_exhausted(e):
                                 set_exchange_sync_backoff(cache_key, seconds=_position_sync_fd_backoff_sec())
                                 _activate_position_sync_fd_backoff(msg)
@@ -485,11 +850,82 @@ class PendingOrderPositionSyncMixin:
                                         qty_base = qty_base * qm
                                 except Exception:
                                     pass
-                                exch_size.setdefault(hb_sym, {"long": 0.0, "short": 0.0})[side] = float(qty_base)
+                                exch_size.setdefault(
+                                    hb_sym, {"long": 0.0, "short": 0.0}
+                                )[side] = float(qty_base)
+                                exch_inst_id.setdefault(
+                                    hb_sym, {"long": "", "short": ""}
+                                )[side] = contract
                                 try:
-                                    ep = float(p.get("entry_price") or p.get("open_price") or 0.0)
+                                    ep = float(
+                                        p.get("entry_price")
+                                        or p.get("open_price")
+                                        or 0.0
+                                    )
                                     if ep > 0:
-                                        exch_entry_price.setdefault(hb_sym, {"long": 0.0, "short": 0.0})[side] = ep
+                                        exch_entry_price.setdefault(
+                                            hb_sym, {"long": 0.0, "short": 0.0}
+                                        )[side] = ep
+                                except Exception:
+                                    pass
+
+                    elif isinstance(client, HtxClient) and market_type == "swap":
+                        resp = client.get_positions()
+                        items = resp.get("data") if isinstance(resp, dict) else []
+                        if isinstance(items, list):
+                            for p in items:
+                                if not isinstance(p, dict):
+                                    continue
+                                contract = str(
+                                    p.get("contract_code") or p.get("symbol") or ""
+                                ).strip()
+                                try:
+                                    contracts = abs(
+                                        float(
+                                            p.get("volume")
+                                            or p.get("qty")
+                                            or p.get("position_qty")
+                                            or 0.0
+                                        )
+                                    )
+                                except Exception:
+                                    contracts = 0.0
+                                if not contract or contracts <= 0:
+                                    continue
+                                from app.services.live_trading.position_row_parse import (
+                                    infer_position_side_from_row,
+                                )
+                                side = infer_position_side_from_row(p)
+                                hb_sym = contract.replace("-", "/")
+                                qty_base = contracts
+                                try:
+                                    meta = client.get_contract_info(symbol=hb_sym) or {}
+                                    contract_size = float(
+                                        meta.get("contract_size")
+                                        or meta.get("contractSize")
+                                        or 0.0
+                                    )
+                                    if contract_size > 0:
+                                        qty_base *= contract_size
+                                except Exception:
+                                    pass
+                                exch_size.setdefault(
+                                    hb_sym, {"long": 0.0, "short": 0.0}
+                                )[side] = qty_base
+                                exch_inst_id.setdefault(
+                                    hb_sym, {"long": "", "short": ""}
+                                )[side] = contract
+                                try:
+                                    ep = float(
+                                        p.get("cost_open")
+                                        or p.get("open_price")
+                                        or p.get("avg_price")
+                                        or 0.0
+                                    )
+                                    if ep > 0:
+                                        exch_entry_price.setdefault(
+                                            hb_sym, {"long": 0.0, "short": 0.0}
+                                        )[side] = ep
                                 except Exception:
                                     pass
 
@@ -627,8 +1063,59 @@ class PendingOrderPositionSyncMixin:
                         market_type=str(market_type or "swap"),
                         legs=legs,
                     )
+                    if snapshot_started_at > 0:
+                        refresh_account_ownership_from_snapshot(
+                            user_id=int(sync_user_id),
+                            credential_id=cred_id,
+                            exchange_id=str(exchange_id or ""),
+                            market_type=str(market_type or "swap"),
+                            account_rows=[
+                                {
+                                    "symbol": leg.symbol,
+                                    "side": leg.side,
+                                    "size": leg.size,
+                                    "entry_price": leg.entry_price,
+                                    "mark_price": leg.mark_price,
+                                    "inst_id": leg.inst_id,
+                                }
+                                for leg in legs
+                            ],
+                            snapshot_started_at=snapshot_started_at,
+                        )
                 except Exception as l1_err:
                     logger.warning("[PositionSync] L1 account sync failed key=%s: %s", cache_key, l1_err)
+
+                if client is None:
+                    try:
+                        client = create_client(exchange_config, market_type=market_type)
+                    except Exception as client_err:
+                        logger.debug(
+                            "[PositionSync] Strategy %s could not create client for flat-close reconcile: %s",
+                            sid,
+                            client_err,
+                        )
+                        client = None
+
+                try:
+                    purged = _purge_flat_strategy_positions_from_exchange(
+                        strategy_id=int(sid),
+                        strategy_config=sc,
+                        exch_size=exch_size,
+                        client=client,
+                        snapshot_from_cache=cached_snap is not None,
+                    )
+                    if purged:
+                        logger.warning(
+                            "[PositionSync] Strategy %s purged %s local leg(s) that are flat on exchange.",
+                            sid,
+                            purged,
+                        )
+                except Exception as purge_err:
+                    logger.warning(
+                        "[PositionSync] Strategy %s failed to purge flat local legs: %s",
+                        sid,
+                        purge_err,
+                    )
 
                 # [DEBUG] Log all normalized exchange keys for inspection
                 logger.debug(f"[PositionSync] Strategy {sid} Exchange Keys: {list(exch_size.keys())}")
@@ -646,10 +1133,10 @@ class PendingOrderPositionSyncMixin:
                 else:
                     logger.debug(f"[PositionSync] Strategy {sid} ({safe_cfg.get('exchange_id', 'unknown')}) has NO positions on exchange.")
 
-                # Keep exchange truth in L1 only. Strategy positions (L3) must be
-                # produced by that strategy's own fills, otherwise two live
-                # strategies sharing ETH/USDT would both inherit the same
-                # exchange account position.
+                # Keep non-flat exchange truth in L1 only. Strategy positions
+                # (L3) must be produced by that strategy's own fills; the only
+                # L3 mutation here is removing legs that the fresh exchange
+                # snapshot confirms are flat.
             except Exception as e:
                 msg = str(e)
                 if is_file_descriptor_exhausted(e):

@@ -7,7 +7,7 @@ import threading
 import time
 from typing import Dict, List, Any, Optional
 
-from app.data_sources.base import BaseDataSource
+from app.data_sources.base import BaseDataSource, filter_closed_klines
 from app.data_sources.errors import (
     MarketDataFailure,
     UnsupportedMarketError,
@@ -136,12 +136,6 @@ class DataSourceFactory:
             raw,
         )
         return raw
-        logger.warning(
-            "DataSourceFactory.normalize_market(): unknown market %r — "
-            "passing through as-is; downstream get_source() will likely fail.",
-            raw,
-        )
-        return raw
 
     @classmethod
     def get_source(cls, market: str) -> BaseDataSource:
@@ -224,6 +218,7 @@ class DataSourceFactory:
         after_time: Optional[int] = None,
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        closed_only: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         获取K线数据的便捷方法
@@ -250,6 +245,7 @@ class DataSourceFactory:
             after_time=after_time,
             exchange_id=exchange_id,
             market_type=market_type,
+            closed_only=closed_only,
         )
         return rows
 
@@ -265,6 +261,7 @@ class DataSourceFactory:
         after_time: Optional[int] = None,
         exchange_id: Optional[str] = None,
         market_type: Optional[str] = None,
+        closed_only: bool = False,
     ) -> tuple[List[Dict[str, Any]], Optional[MarketDataFailure]]:
         """Fetch K-lines and retain a structured provider failure when rows are empty."""
         m = cls.normalize_market(market or "")
@@ -272,6 +269,9 @@ class DataSourceFactory:
             assert_fd_available(f"market-data kline {m}:{symbol}")
             source = cls._resolve_source(m, exchange_id=exchange_id, market_type=market_type)
             klines = source.get_kline(symbol, timeframe, limit, before_time, after_time)
+
+            if closed_only:
+                klines = filter_closed_klines(klines, timeframe)
 
             klines.sort(key=lambda x: x['time'])
             failure = None

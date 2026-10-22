@@ -14,7 +14,7 @@ import requests
 
 from app.data_sources.base import BaseDataSource
 from app.utils.logger import get_logger
-from app.config import APIKeys, YFinanceConfig
+from app.config import APIKeys
 
 logger = get_logger(__name__)
 

@@ -100,11 +100,17 @@ class StrategyEvolutionService:
         config = EvolutionConfig.from_payload(payload.get("config"))
         parameters = [SearchParameter.from_payload(item) for item in (payload.get("parameterSpace") or [])]
         parameter_count = len(parameters)
-        trial_count = config.trials
-        if config.method == "grid" and parameters:
-            trial_count = ParameterSampler(parameters, seed=config.seed).grid_size(config.trials)
+        sampler = ParameterSampler(parameters, seed=config.seed)
+        search_space_size = sampler.space_size() if parameters else 0
+        trial_count = min(config.trials, search_space_size) if search_space_size else config.trials
+        minimum_recommended_trials = _recommended_trial_floor(
+            config.method,
+            parameter_count,
+            search_space_size,
+        )
         fold_runs = trial_count
-        stress_runs = len(config.cost_multipliers)
+        baseline_is_cached = config.blind_ratio > 0 and 1.0 in config.cost_multipliers
+        stress_runs = len(config.cost_multipliers) - (1 if baseline_is_cached else 0)
         total_runs = fold_runs + stress_runs + (1 if config.blind_ratio > 0 else 0)
         universe_size = max(1, min(5000, int(payload.get("universeSize") or 1)))
         relative_units = total_runs * universe_size
@@ -116,10 +122,14 @@ class StrategyEvolutionService:
             "parameterCount": parameter_count,
             "trials": trial_count,
             "requestedTrials": config.trials,
+            "searchSpaceSize": search_space_size,
+            "coveragePercent": round((trial_count / search_space_size) * 100.0, 4) if search_space_size else 0.0,
+            "minimumRecommendedTrials": minimum_recommended_trials,
+            "sampleSufficient": trial_count >= minimum_recommended_trials,
             "folds": config.folds,
             "walkForwardMode": "singlePass",
             "monteCarloPaths": config.monte_carlo_paths,
-            "isUpperBound": config.auto_prune,
+            "isUpperBound": False,
         }
 
     @staticmethod
@@ -154,14 +164,30 @@ class StrategyEvolutionService:
                     raise ValueError("strategyEvolution.parameterRangeUndeclared")
                 if float(requested_min) < float(declared_min) or float(requested_max) > float(declared_max):
                     raise ValueError("strategyEvolution.parameterRangeOutsideDeclaration")
+                requested_step = item.get("step", declared.get("step"))
+                step = float(requested_step) if requested_step is not None else None
+                span = float(requested_max) - float(requested_min)
+                if step is None or step <= 0 or (kind in {"int", "integer"} and not step.is_integer()):
+                    raise ValueError("strategyEvolution.parameterStepInvalid")
+                if span > 0 and step > span:
+                    raise ValueError("strategyEvolution.parameterStepInvalid")
                 merged["min"] = requested_min
                 merged["max"] = requested_max
+                merged["step"] = int(step) if kind in {"int", "integer"} else step
             option_rows = merged.get("options") or merged.get("values")
             if option_rows and not merged.get("choices"):
                 merged["choices"] = [option.get("value") if isinstance(option, dict) else option for option in option_rows]
             SearchParameter.from_payload(merged)
             output.append(merged)
         return output
+
+
+def _recommended_trial_floor(method: str, parameter_count: int, search_space_size: int) -> int:
+    if method == "grid":
+        return min(search_space_size, 300)
+    if method == "random":
+        return min(search_space_size, max(48, parameter_count * 24))
+    return min(search_space_size, max(32, parameter_count * 16))
 
 
 def _date(value: Any, error_code: str, *, end_of_day: bool = False) -> datetime:

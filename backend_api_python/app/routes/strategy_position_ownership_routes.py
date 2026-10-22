@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Tuple
 from contextlib import contextmanager
 
@@ -14,6 +15,40 @@ from app.utils.logger import get_logger
 
 
 logger = get_logger(__name__)
+
+
+def _persist_fresh_account_mirror(
+    *,
+    rows,
+    user_id: int,
+    credential_id: int,
+    exchange_id: str,
+    market_type: str,
+) -> None:
+    """Publish a validated live snapshot to the shared L1 account mirror."""
+    from app.services.live_trading.account_positions import (
+        AccountLegSnapshot,
+        sync_account_positions,
+    )
+
+    legs = [
+        AccountLegSnapshot(
+            symbol=str(row.get("symbol") or ""),
+            side=str(row.get("side") or ""),
+            size=float(row.get("size") or 0.0),
+            entry_price=float(row.get("entry_price") or 0.0),
+            mark_price=float(row.get("mark_price") or 0.0),
+            inst_id=str(row.get("inst_id") or ""),
+        )
+        for row in (rows or [])
+    ]
+    sync_account_positions(
+        user_id=int(user_id),
+        credential_id=int(credential_id or 0),
+        exchange_id=str(exchange_id or ""),
+        market_type=str(market_type or "swap"),
+        legs=legs,
+    )
 
 
 def _ownership_context(strategy_id: int, user_id: int) -> Tuple[Dict[str, Any], Dict[str, Any], int, str, set[str]]:
@@ -52,19 +87,29 @@ def _load_ownership_rows(strategy_id: int, user_id: int, *, fresh: bool = False)
         build_ownership_rows,
         canonical_symbol,
         list_reservations,
+        refresh_recorded_ownership_states,
     )
     from app.services.live_trading.strategy_position_sync import sync_strategy_positions_from_exchange
 
     snapshot = {}
+    snapshot_started_at = 0.0
     if fresh and str(strategy.get("execution_mode") or "").lower() == "live":
         from app.services.live_trading.account_snapshot import fetch_account_snapshot
         from app.services.live_trading.account_positions import snapshot_rows_to_account_legs
 
+        snapshot_started_at = time.time()
         snapshot = fetch_account_snapshot(user_id=int(user_id), credential_id=credential_id)
         if snapshot.get("error") or snapshot.get("partial") or snapshot.get("warnings"):
             raise ValueError("positionOwnership.snapshotUnavailable")
         bucket = "spot_positions" if market_type == "spot" else "swap_positions"
         account_rows = snapshot_rows_to_account_legs(snapshot.get(bucket) or [])
+        _persist_fresh_account_mirror(
+            rows=account_rows,
+            user_id=int(user_id),
+            credential_id=credential_id,
+            exchange_id=str(resolved.get("exchange_id") or ""),
+            market_type=market_type,
+        )
     else:
         if str(strategy.get("execution_mode") or "").lower() == "live":
             sync_strategy_positions_from_exchange(int(strategy_id))
@@ -95,6 +140,14 @@ def _load_ownership_rows(strategy_id: int, user_id: int, *, fresh: bool = False)
         allocated_rows=allocated_rows,
         reservation_rows=reservations,
     )
+    if snapshot_started_at > 0:
+        refresh_recorded_ownership_states(
+            user_id=int(user_id),
+            credential_id=credential_id,
+            market_type=market_type,
+            rows=rows,
+            snapshot_started_at=snapshot_started_at,
+        )
     return rows, {
         "strategy": strategy,
         "exchange": resolved,

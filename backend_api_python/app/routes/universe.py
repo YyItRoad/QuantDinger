@@ -25,7 +25,7 @@ def _failure(exc: UniverseError):
 def list_universes():
     try:
         return _success(get_universe_service().list_universes(g.user_id))
-    except Exception as exc:
+    except Exception:
         logger.exception("list universes failed")
         return jsonify({"code": 0, "msg": "universe.listFailed", "data": None}), 500
 

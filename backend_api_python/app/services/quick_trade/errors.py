@@ -103,6 +103,12 @@ def exchange_error_user_message(*, exchange_id: str, err: str) -> Dict[str, str]
             "hint_key": "quickTrade.errorHints.okxAccountMode",
         }
 
+    if "BITGET_UTA_HYBRID_BALANCE_UNAVAILABLE" in text:
+        return {
+            "message": "BITGET_UTA_HYBRID_BALANCE_UNAVAILABLE",
+            "hint_key": "quickTrade.errorHints.bitgetUnifiedAccount",
+        }
+
     if "40018" in text or "invalid ip" in low:
         request_ip = extract_request_ip_from_exchange_error(text)
         if exchange == "bitget":

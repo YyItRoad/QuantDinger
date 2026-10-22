@@ -31,7 +31,7 @@ _SUPPORTED_TIMEFRAMES = {
     "binance": set(_COMMON_TIMEFRAMES),
     "okx": {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w"},
     "bybit": {"1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d", "1w"},
-    "bitget": {"1m", "5m", "15m", "30m", "1h", "4h", "6h", "12h", "1d", "1w"},
+    "bitget": {"1m", "5m", "15m", "30m", "1h", "4h", "6h", "12h", "1d"},
     "gate": {"1m", "5m", "15m", "30m", "1h", "4h", "8h", "1d", "1w"},
     "htx": {"1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w"},
 }
@@ -315,13 +315,10 @@ class NativeCryptoPublicClient:
                 cursor = next_cursor
             return rows
         if self.id == "bitget":
-            if self.market_type == "swap":
-                payload = self._get(
-                    "https://api.bitget.com/api/v2/mix/market/contracts",
-                    {"productType": "USDT-FUTURES"},
-                )
-            else:
-                payload = self._get("https://api.bitget.com/api/v2/spot/public/symbols")
+            payload = self._get(
+                "https://api.bitget.com/api/v3/market/instruments",
+                {"category": "USDT-FUTURES" if self.market_type == "swap" else "SPOT"},
+            )
             rows = []
             for item in payload.get("data") or []:
                 status = str(item.get("status") or item.get("symbolStatus") or "").lower()
@@ -330,7 +327,7 @@ class NativeCryptoPublicClient:
                     "base": item.get("baseCoin"),
                     "quote": item.get("quoteCoin"),
                     "settle": item.get("quoteCoin"),
-                    "active": status in {"online", "normal", "listed"},
+                    "active": status == "online",
                     "info": item,
                 })
             return rows
@@ -433,29 +430,26 @@ class NativeCryptoPublicClient:
                 timestamp=payload.get("time"),
             )
         if self.id == "bitget":
-            if self.market_type == "swap":
-                payload = self._get(
-                    "https://api.bitget.com/api/v2/mix/market/ticker",
-                    {"symbol": native, "productType": "USDT-FUTURES"},
-                )
-            else:
-                payload = self._get(
-                    "https://api.bitget.com/api/v2/spot/market/tickers",
-                    {"symbol": native},
-                )
+            payload = self._get(
+                "https://api.bitget.com/api/v3/market/tickers",
+                {
+                    "category": "USDT-FUTURES" if self.market_type == "swap" else "SPOT",
+                    "symbol": native,
+                },
+            )
             rows = payload.get("data") or []
             row = rows[0] if isinstance(rows, list) and rows else rows
             if not isinstance(row, dict):
                 raise NativeCryptoAPIError(f"symbol not found: {native}")
-            change_24h = row.get("change24h")
+            change_24h = row.get("price24hPcnt")
             return _ticker(
                 symbol=canonical,
-                last=row.get("lastPr") or row.get("last"),
-                open_price=row.get("open"),
-                high=row.get("high24h"),
-                low=row.get("low24h"),
+                last=row.get("lastPrice"),
+                open_price=row.get("openPrice24h"),
+                high=row.get("highPrice24h"),
+                low=row.get("lowPrice24h"),
                 percentage=_float(change_24h) * 100 if change_24h is not None else None,
-                quote_volume=row.get("quoteVolume"),
+                quote_volume=row.get("turnover24h"),
                 timestamp=row.get("ts") or payload.get("requestTime"),
             )
         if self.id == "gate":
@@ -553,25 +547,33 @@ class NativeCryptoPublicClient:
             parsed = [[int(row[0]), _float(row[1]), _float(row[2]), _float(row[3]), _float(row[4]), _float(row[5])] for row in rows]
         elif self.id == "bitget":
             granularity = {
-                "1m": "1min" if self.market_type == "spot" else "1m",
-                "5m": "5min" if self.market_type == "spot" else "5m",
-                "15m": "15min" if self.market_type == "spot" else "15m",
-                "30m": "30min" if self.market_type == "spot" else "30m",
-                "1h": "1h",
-                "4h": "4h",
-                "6h": "6h",
-                "12h": "12h",
-                "1d": "1day" if self.market_type == "spot" else "1D",
-                "1w": "1week" if self.market_type == "spot" else "1W",
+                "1m": "1m",
+                "3m": "3m",
+                "5m": "5m",
+                "15m": "15m",
+                "30m": "30m",
+                "1h": "1H",
+                "4h": "4H",
+                "6h": "6H",
+                "12h": "12H",
+                "1d": "1D",
+                "1w": "1W",
             }[timeframe]
-            scope = "mix" if self.market_type == "swap" else "spot"
-            params = {"symbol": native, "granularity": granularity, "limit": min(limit, 1000)}
-            if self.market_type == "swap":
-                params["productType"] = "USDT-FUTURES"
+            params = {
+                "category": "USDT-FUTURES" if self.market_type == "swap" else "SPOT",
+                "symbol": native,
+                "interval": granularity,
+                "limit": min(limit, 1000),
+            }
             if since is not None:
                 params["startTime"] = int(since)
-                params["endTime"] = int(since) + tf_ms * min(limit, 1000)
-            payload = self._get(f"https://api.bitget.com/api/v2/{scope}/market/candles", params)
+                max_window_ms = 90 * 24 * 60 * 60 * 1000
+                params["endTime"] = min(
+                    int(since) + tf_ms * min(limit, 1000),
+                    int(since) + max_window_ms,
+                    int(time.time() * 1000),
+                )
+            payload = self._get("https://api.bitget.com/api/v3/market/candles", params)
             rows = payload.get("data") or []
             parsed = [[int(row[0]), _float(row[1]), _float(row[2]), _float(row[3]), _float(row[4]), _float(row[5])] for row in rows]
         elif self.id == "gate":

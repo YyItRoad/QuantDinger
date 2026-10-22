@@ -27,12 +27,11 @@ from app.services.live_trading.binance_spot import BinanceSpotClient
 from app.services.live_trading.bitget import BitgetMixClient
 from app.services.live_trading.bitget_spot import BitgetSpotClient
 from app.services.live_trading.bybit import BybitClient
-from app.services.live_trading.gate import GateSpotClient, GateStockClient, GateUsdtFuturesClient, to_gate_currency_pair
+from app.services.live_trading.gate import GateSpotClient, GateStockClient, GateUsdtFuturesClient
 from app.services.live_trading.fill_accounting import contract_multiplier
 from app.services.live_trading.gate_spot_fill import parse_gate_spot_fill
 from app.services.live_trading.htx import HtxClient
 from app.services.live_trading.okx import OkxClient
-from app.services.live_trading.symbols import to_okx_spot_inst_id, to_okx_swap_inst_id
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -95,8 +94,6 @@ def extract_grid_fill_base_qty(
     mt = str(market_type or "swap").strip().lower()
     if mt in ("futures", "future", "perp", "perpetual"):
         mt = "swap"
-    ex_cfg = exchange_config if isinstance(exchange_config, dict) else {}
-
     if isinstance(client, (BinanceFuturesClient, BinanceSpotClient)):
         return _float(data.get("executedQty"))
 

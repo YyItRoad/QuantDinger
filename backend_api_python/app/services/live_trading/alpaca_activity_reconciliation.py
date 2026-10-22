@@ -437,8 +437,9 @@ def sync_running_alpaca_activities() -> int:
             cur.execute(
                 """
                 SELECT id, user_id FROM qd_strategies_trading
-                WHERE status = 'running' AND execution_mode = 'live'
+                WHERE execution_mode = 'live'
                   AND market_category = 'USStock'
+                  AND (status = 'running' OR updated_at >= NOW() - INTERVAL '90 days')
                 """
             )
             rows = cur.fetchall() or []

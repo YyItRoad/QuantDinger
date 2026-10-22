@@ -53,7 +53,7 @@ def sync_position_management_history() -> dict:
 )
 def run_reflection(self):
     del self
-    if not _enabled("ENABLE_REFLECTION_WORKER"):
+    if not _enabled("ENABLE_REFLECTION_WORKER", default="false"):
         return {"skipped": True}
     from app.services.reflection import ReflectionService
 
@@ -70,7 +70,8 @@ def run_reflection(self):
 )
 def run_ai_calibration(self):
     del self
-    if not _enabled("ENABLE_OFFLINE_AI_CALIBRATION"):
+    from app.services.ai_calibration import confidence_calibration_enabled
+    if not confidence_calibration_enabled():
         return {"skipped": True}
     from app.services.ai_calibration import AICalibrationService
 

@@ -36,10 +36,58 @@ def normalize_market_type(value: Any, *, market: str = "") -> str:
 
 
 def canonical_crypto_symbol(value: Any) -> str:
-    symbol = str(value or "").strip().upper()
+    return parse_crypto_identifier(value)[0]
+
+
+def parse_crypto_identifier(value: Any) -> tuple[str, str, str]:
+    """Parse a crypto symbol without assigning an implicit venue."""
+    identifier = str(value or "").strip()
+    if identifier.lower().startswith("crypto:"):
+        identifier = identifier.split(":", 1)[1]
+
+    exchange_id = ""
+    market_type = ""
+    if "@" in identifier:
+        if identifier.count("@") != 1:
+            raise ValueError("marketData.invalidCryptoIdentifier")
+        identifier, qualifier = identifier.rsplit("@", 1)
+        qualifier = qualifier.strip()
+        if not identifier.strip() or not qualifier:
+            raise ValueError("marketData.invalidCryptoIdentifier")
+        if ":" in qualifier:
+            exchange_value, market_type_value = qualifier.rsplit(":", 1)
+            exchange_id = normalize_exchange_id(exchange_value)
+            if not exchange_id:
+                raise ValueError("marketData.invalidCryptoExchange")
+            if market_type_value.strip().lower() not in {
+                "spot", "swap", "future", "futures", "perp", "perpetual"
+            }:
+                raise ValueError("marketData.invalidCryptoProduct")
+            market_type = normalize_market_type(market_type_value, market="Crypto")
+        elif qualifier.strip().lower() in {
+            "spot", "swap", "future", "futures", "perp", "perpetual"
+        }:
+            market_type = normalize_market_type(qualifier, market="Crypto")
+        else:
+            exchange_id = normalize_exchange_id(qualifier)
+
+    symbol = identifier.strip().upper().replace("-", "/").replace("_", "/")
     if ":" in symbol:
-        symbol = symbol.split(":", 1)[0]
-    return symbol
+        pair, settle_currency = symbol.rsplit(":", 1)
+        if "/" not in pair:
+            raise ValueError("marketData.invalidCryptoSettlement")
+        quote_currency = pair.rsplit("/", 1)[1]
+        if settle_currency != quote_currency:
+            raise ValueError("marketData.cryptoSettlementMismatch")
+        symbol = pair
+    if "/" not in symbol:
+        for quote_currency in ("USDT", "USDC", "USD", "BTC", "ETH"):
+            if symbol.endswith(quote_currency) and len(symbol) > len(quote_currency):
+                symbol = f"{symbol[:-len(quote_currency)]}/{quote_currency}"
+                break
+    if not symbol:
+        raise ValueError("marketData.cryptoSymbolRequired")
+    return symbol, market_type, exchange_id
 
 
 @dataclass(frozen=True)
@@ -66,16 +114,47 @@ class MarketContext:
             or data.get("marketCategory")
             or ""
         ).strip()
-        symbol = canonical_crypto_symbol(data.get("symbol")) if market == "Crypto" else str(data.get("symbol") or "").strip().upper()
-        exchange_id = normalize_exchange_id(
+        suffix_market_type = ""
+        suffix_exchange_id = ""
+        if market == "Crypto":
+            symbol, suffix_market_type, suffix_exchange_id = parse_crypto_identifier(
+                data.get("symbol")
+            )
+        else:
+            symbol = str(data.get("symbol") or "").strip().upper()
+        explicit_exchange_id = normalize_exchange_id(
             data.get("exchange_id")
             or data.get("exchangeId")
             or data.get("exchange")
         )
-        market_type = normalize_market_type(
-            data.get("market_type") or data.get("marketType"),
+        if (
+            suffix_exchange_id
+            and explicit_exchange_id
+            and suffix_exchange_id != explicit_exchange_id
+        ):
+            raise ValueError("marketData.cryptoExchangeConflict")
+        exchange_id = explicit_exchange_id or suffix_exchange_id
+        explicit_market_type = data.get("market_type") or data.get("marketType")
+        if (
+            market == "Crypto"
+            and explicit_market_type
+            and str(explicit_market_type).strip().lower()
+            not in {"spot", "swap", "future", "futures", "perp", "perpetual"}
+        ):
+            raise ValueError("marketData.invalidCryptoProduct")
+        normalized_market_type = normalize_market_type(
+            explicit_market_type,
             market=market,
         )
+        if (
+            suffix_market_type
+            and explicit_market_type
+            and suffix_market_type != normalized_market_type
+        ):
+            raise ValueError("marketData.cryptoProductConflict")
+        market_type = suffix_market_type or normalized_market_type
+        if market == "Crypto" and exchange_id and exchange_id not in SUPPORTED_CRYPTO_EXCHANGE_IDS:
+            raise ValueError("marketData.unsupportedCryptoExchange")
         if market == "Crypto" and apply_crypto_defaults and not exchange_id:
             exchange_id = default_crypto_exchange_id()
         if market != "Crypto":

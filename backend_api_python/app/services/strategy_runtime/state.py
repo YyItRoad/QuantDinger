@@ -112,7 +112,7 @@ class RuntimeStateStore:
             self._last_saved_at = saved_at
             self._pending = None
             return True
-        except Exception as exc:
+        except Exception:
             self._pending = safe
             logger.warning(
                 "Runtime state persistence failed: strategy=%s run=%s key=%s",

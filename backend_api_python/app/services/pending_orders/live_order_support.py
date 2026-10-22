@@ -14,6 +14,11 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from app.services.live_trading.base import LiveTradingError
 from app.utils.pnl import calc_notional_value
 from app.utils.logger import get_logger
+from app.services.pending_orders.execution_contract import (
+    ExecutionContractError,
+    resolve_queued_execution_contract,
+    validate_current_strategy_mode,
+)
 
 logger = get_logger(__name__)
 
@@ -356,12 +361,16 @@ def build_live_order_context(
     safe_exchange_config_for_log: Callable[[Dict[str, Any]], Dict[str, Any]],
 ) -> LiveOrderExecutionContext:
     """Load and validate immutable context for a live pending order."""
-    strategy_id = int(payload.get("strategy_id") or order_row.get("strategy_id") or 0)
-    if strategy_id <= 0:
-        raise LiveOrderRejected(error="missing_strategy_id")
+    try:
+        contract = resolve_queued_execution_contract(order_row, payload)
+    except ExecutionContractError as exc:
+        raise LiveOrderRejected(error=f"execution_contract:{exc.code}") from exc
+    if contract.mode != "live":
+        raise LiveOrderRejected(error="execution_contract:live_mode_required")
 
-    signal_type = payload.get("signal_type") or order_row.get("signal_type")
-    symbol = payload.get("symbol") or order_row.get("symbol")
+    strategy_id = contract.strategy_id
+    signal_type = contract.signal_type
+    symbol = contract.symbol
     amount = float(payload.get("amount") or order_row.get("amount") or 0.0)
     if not symbol or not signal_type:
         raise LiveOrderRejected(
@@ -372,6 +381,13 @@ def build_live_order_context(
         )
 
     cfg = load_strategy_configs(strategy_id)
+    try:
+        validate_current_strategy_mode(contract, cfg.get("execution_mode"))
+    except ExecutionContractError as exc:
+        raise LiveOrderRejected(
+            error=f"execution_contract:{exc.code}",
+            strategy_id=strategy_id,
+        ) from exc
     strategy_status = str(cfg.get("status") or "").strip().lower()
     if (
         strategy_status

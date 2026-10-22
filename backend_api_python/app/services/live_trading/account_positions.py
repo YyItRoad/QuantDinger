@@ -31,13 +31,13 @@ def sync_account_positions(
     exchange_id: str,
     market_type: str,
     legs: List[AccountLegSnapshot],
-) -> None:
+) -> bool:
     """
     Replace L1 rows for (credential_id, market_type) with the latest exchange snapshot.
     """
     cred = int(credential_id or 0)
     if cred <= 0:
-        return
+        return False
     mt = str(market_type or "swap").strip().lower()
     if mt in ("futures", "future", "perp", "perpetual"):
         mt = "swap"
@@ -47,6 +47,19 @@ def sync_account_positions(
     active_keys: List[tuple] = []
     with get_db_connection() as db:
         cur = db.cursor()
+        cur.execute(
+            "SELECT pg_try_advisory_xact_lock(hashtextextended(%s, 0)) AS acquired",
+            (f"account-position-sync:{uid}:{cred}:{mt}",),
+        )
+        lock_row = cur.fetchone() or {}
+        acquired = bool(
+            lock_row.get("acquired")
+            if isinstance(lock_row, dict)
+            else lock_row[0]
+        )
+        if not acquired:
+            cur.close()
+            return False
         for leg in legs or []:
             sym = normalize_strategy_symbol(leg.symbol) or str(leg.symbol or "").strip()
             side = str(leg.side or "").strip().lower()
@@ -114,6 +127,7 @@ def sync_account_positions(
             )
         db.commit()
         cur.close()
+    return True
 
 
 def account_legs_from_exchange_maps(

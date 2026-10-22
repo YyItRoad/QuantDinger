@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from app.services import strategy_v2
 from app.services.strategy import StrategyService
 from app.services.strategy_v2 import deployment
@@ -125,3 +127,40 @@ def test_updating_managed_strategy_preserves_position_management_marker(monkeypa
     assert service.update_strategy(44, {"params": {"atr_period": 21}}, user_id=3) is True
     assert saved[0]["strategy_id"] == 44
     assert saved[0]["payload"]["positionManagement"] == marker
+
+
+@pytest.mark.parametrize("risk", [
+    {"deployment_risk": {"equity_take_profit_pct": 0.2, "equity_stop_loss_pct": 0.1}},
+    {"equity_take_profit_pct": 0.2, "equity_stop_loss_pct": 0.1},
+])
+def test_managed_update_preserves_custom_settings_and_upstream_equity_risk(monkeypatch, risk):
+    service = StrategyService()
+    config = {
+        "script_source_id": 8,
+        "params": {"fixed_stop_price": 90},
+        "position_management": {"enabled": True, "auto_stop_when_flat": True},
+        "account_risk": {"max_position_pct": 0.5},
+        "ai_decision_filter": True,
+        **risk,
+    }
+    existing = dict(id=44, user_id=3, strategy_name="Managed BTC", initial_capital=1000,
+                    execution_mode="live", leverage=5, trading_config=config)
+    saved = []
+
+    class Deployment:
+        def save(self, **kwargs):
+            saved.append(kwargs)
+            return 44
+
+    monkeypatch.setattr(service, "get_strategy", lambda *a, **kw: existing)
+    monkeypatch.setattr(strategy_v2, "get_strategy_v2_deployment_service", Deployment)
+    assert service.update_strategy(44, {"name": "Renamed manager"}, user_id=3)
+    payload = saved[0]["payload"]
+    assert payload["name"] == "Renamed manager"
+    assert payload["positionManagement"] == config["position_management"]
+    assert payload["params"] == config["params"]
+    assert payload["accountRisk"] == config["account_risk"]
+    assert payload["aiDecisionFilter"] is True
+    assert payload["equityTakeProfitPct"] == 0.2
+    assert payload["equityStopLossPct"] == 0.1
+    assert service._deployment_payload(payload) == payload

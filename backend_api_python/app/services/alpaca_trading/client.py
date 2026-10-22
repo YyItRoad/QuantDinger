@@ -17,7 +17,7 @@ from uuid import UUID
 import requests
 
 from app.utils.logger import get_logger
-from app.services.alpaca_trading.symbols import normalize_symbol, format_display_symbol, parse_symbol
+from app.services.alpaca_trading.symbols import parse_symbol
 
 logger = get_logger(__name__)
 
@@ -306,6 +306,36 @@ class AlpacaClient:
             "commission_type": _enum_value(getattr(order, "commission_type", "")),
         }
 
+    @classmethod
+    def _order_fee_history_snapshot(cls, order: Any) -> Dict[str, Any]:
+        snapshot = cls._order_commission_snapshot(order)
+        commission = abs(float(snapshot.get("commission") or 0.0))
+        currency = str(snapshot.get("commission_ccy") or "").strip().upper()
+        if commission > 0 and currency:
+            return {
+                **snapshot,
+                "commission_quote": commission if currency == "USD" else None,
+                "fees_by_ccy": {currency: commission},
+                "fee_status": "actual",
+            }
+        asset_class = _enum_value(getattr(order, "asset_class", "")).strip().lower()
+        status = _enum_value(getattr(order, "status", "")).strip().lower()
+        if status == "filled" and asset_class in {"us_equity", "equity"}:
+            return {
+                "commission": 0.0,
+                "commission_ccy": "USD",
+                "commission_quote": 0.0,
+                "fees_by_ccy": {"USD": 0.0},
+                "fee_status": "actual_zero",
+            }
+        return {
+            "commission": 0.0,
+            "commission_ccy": "",
+            "commission_quote": None,
+            "fees_by_ccy": {},
+            "fee_status": "pending",
+        }
+
     def place_market_order(
         self,
         symbol: str,
@@ -326,6 +356,12 @@ class AlpacaClient:
             requested_notional = float(notional or 0.0)
             if (requested_quantity > 0) == (requested_notional > 0):
                 raise ValueError("Provide exactly one of quantity or notional")
+            if asset_class == "us_equity":
+                asset = self._trading_client.get_asset(sym)
+                if not bool(getattr(asset, "tradable", False)):
+                    raise ValueError("quickTrade.alpacaAssetNotTradable")
+                if requested_notional > 0 and not bool(getattr(asset, "fractionable", False)):
+                    raise ValueError("quickTrade.alpacaFractionalNotSupported")
             if side.lower() == "sell" and requested_quantity > 0:
                 positions = self._trading_client.get_all_positions()
                 matching = next(
@@ -622,6 +658,9 @@ class AlpacaClient:
             account_id = _as_str_id(getattr(acct, "id", None))
             currency = getattr(acct, "currency", None) or "USD"
             buying_power = _str_attr(acct, "buying_power")
+            regt_buying_power = _str_attr(acct, "regt_buying_power")
+            daytrading_buying_power = _str_attr(acct, "daytrading_buying_power")
+            non_marginable_buying_power = _str_attr(acct, "non_marginable_buying_power")
             cash = _str_attr(acct, "cash")
             portfolio_value = _str_attr(acct, "portfolio_value")
             equity = _str_attr(acct, "equity", portfolio_value)
@@ -637,6 +676,9 @@ class AlpacaClient:
                 "account_id": account_id,
                 "currency": currency,
                 "buying_power": buying_power,
+                "regt_buying_power": regt_buying_power,
+                "daytrading_buying_power": daytrading_buying_power,
+                "non_marginable_buying_power": non_marginable_buying_power,
                 "cash": cash,
                 "portfolio_value": portfolio_value,
                 "equity": equity,
@@ -650,6 +692,9 @@ class AlpacaClient:
                 "paper": self.config.paper,
                 "summary": {
                     "BuyingPower": {"value": buying_power, "currency": currency},
+                    "RegTBuyingPower": {"value": regt_buying_power, "currency": currency},
+                    "DayTradingBuyingPower": {"value": daytrading_buying_power, "currency": currency},
+                    "NonMarginableBuyingPower": {"value": non_marginable_buying_power, "currency": currency},
                     "Cash": {"value": cash, "currency": currency},
                     "PortfolioValue": {"value": portfolio_value, "currency": currency},
                     "Equity": {"value": equity, "currency": currency},
@@ -742,6 +787,7 @@ class AlpacaClient:
                     "created_at": str(getattr(o, "created_at", "") or ""),
                     "extendedHours": bool(getattr(o, "extended_hours", False)),
                     "extended_hours": bool(getattr(o, "extended_hours", False)),
+                    **self._order_fee_history_snapshot(o),
                 }
                 for o in orders
             ]

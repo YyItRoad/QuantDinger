@@ -15,8 +15,13 @@ from app.services.live_trading.spot_sizing import (
 )
 
 
-def test_scale_spot_open_notional_default_buffer():
-    assert scale_spot_open_notional(1000.0) == 995.0
+def test_scale_spot_open_notional_default_is_exact():
+    assert scale_spot_open_notional(1000.0) == 1000.0
+
+
+def test_legacy_spot_open_buffer_cannot_change_explicit_amount(monkeypatch):
+    monkeypatch.setenv("SPOT_OPEN_QUOTE_BUFFER", "0.5")
+    assert scale_spot_open_notional(1000.0) == 1000.0
 
 
 def test_clamp_spot_close_uses_free_and_normalize(monkeypatch):
@@ -75,6 +80,23 @@ def test_clamp_spot_close_no_change_when_within_free():
     final, meta = clamp_spot_close_quantity(client, symbol="ETH/USDT", requested_qty=0.5, safety_ratio=1.0)
     assert final == 0.5
     assert "adjusted" not in meta or meta.get("adjusted") is not True
+
+
+def test_legacy_close_ratio_cannot_create_a_residual(monkeypatch):
+    monkeypatch.setenv("SPOT_CLOSE_SAFETY_RATIO", "0.5")
+    client = MagicMock(spec=BinanceSpotClient)
+    client.get_account.return_value = {"balances": [{"asset": "ETH", "free": "10"}]}
+    client._normalize_quantity.return_value = (Decimal("1"), 3)
+
+    final, meta = clamp_spot_close_quantity(
+        client,
+        symbol="ETH/USDT",
+        requested_qty=1.0,
+        safety_ratio=0.5,
+    )
+
+    assert final == 1.0
+    assert meta["safety_ratio"] == 1.0
 
 
 def test_htx_spot_ownership_includes_frozen_rows():

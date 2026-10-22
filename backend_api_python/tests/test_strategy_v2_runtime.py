@@ -38,6 +38,63 @@ def _rules(key: str, *, amount_step: float, min_notional: float = 0.0, min_amoun
     }
 
 
+@pytest.mark.parametrize(("current_equity", "expected_reason"), [
+    (700.0, "strategy_equity_stop_loss"),
+    (1500.0, "strategy_equity_take_profit"),
+])
+def test_deployment_equity_limits_cancel_orders_and_close_strategy_positions(
+    current_equity,
+    expected_reason,
+):
+    code = """
+def initialize(context):
+    context.set_universe(["USStock:AAPL"])
+    context.subscribe(frequency="1d")
+
+def handle_data(context, data):
+    pass
+"""
+    session = StrategyV2LiveSession(
+        code=code,
+        frames={"USStock:AAPL": _frame([100, 101])},
+        initial_capital=1000,
+        deployment_risk={
+            "equity_stop_loss_pct": 0.30,
+            "equity_take_profit_pct": 0.50,
+        },
+    )
+    session.synchronize_positions({
+        "USStock:AAPL": {
+            "amount": 2,
+            "side": "long",
+            "avg_cost": 100,
+            "last_price": 101,
+        },
+    }, total_value=current_equity)
+    session.context.update_order_statuses({
+        "open-order": {"client_order_id": "open-order", "status": "submitted"},
+    })
+
+    orders, messages, reason = session.evaluate_equity_risk()
+
+    assert reason == expected_reason
+    assert len(orders) == 1
+    assert orders[0].kind == "target_quantity"
+    assert orders[0].value == 0
+    assert orders[0].reason == expected_reason
+    assert orders[0].position_side == ""
+    assert session.context.flush_cancelled_order_ids() == {"open-order"}
+    assert messages == []
+
+    repeated_orders, repeated_messages, repeated_reason = session.evaluate_equity_risk()
+    assert repeated_orders == []
+    assert repeated_messages == []
+    assert repeated_reason == expected_reason
+
+    session.release_equity_risk_exit()
+    assert session.evaluate_equity_risk()[2] == expected_reason
+
+
 def test_data_portal_caches_timestamps_and_slices_point_in_time_history():
     portal = MultiAssetDataPortal({"USStock:AAPL": _frame(range(1000))})
     cached_timestamps = portal.timestamps

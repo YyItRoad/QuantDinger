@@ -1147,7 +1147,7 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
     except SyntaxError as e:
         logger.warning(f"Code syntax validation failed: {e}")
         return False, "Code syntax error"
-    except Exception as e:
+    except Exception:
         # AST parse failure: reject fail-closed, not fail-open.
         logger.exception("AST parse failed, rejecting code")
         return False, "Code parse failed"

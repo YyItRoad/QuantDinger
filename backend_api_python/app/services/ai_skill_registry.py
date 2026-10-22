@@ -414,7 +414,7 @@ _EXTRA_SKILLS: tuple[SkillDefinition, ...] = (
     SkillDefinition(
         id="indicator_authoring",
         category="strategy",
-        icon="function",
+        icon="file-protect",
         label=_s("指标开发契约", "Indicator authoring"),
         description=_s("读取指标 IDE 输入输出契约，生成符合平台规范的指标", "Use the Indicator IDE contract to author compliant indicators"),
         prompt_template=_s(

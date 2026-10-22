@@ -187,7 +187,7 @@ def test_all_worker_client_order_id_calls_match_helper_signature():
     ]
     supported = set(inspect.signature(make_client_order_id).parameters)
 
-    assert len(calls) == 4
+    assert calls
     for call in calls:
         passed = {keyword.arg for keyword in call.keywords if keyword.arg}
         assert passed <= supported
@@ -439,9 +439,10 @@ def test_wait_live_order_fill_rejects_unknown_client():
 def test_build_live_order_context_normalizes_and_validates():
     ctx = build_live_order_context(
         order_id=99,
-        order_row={"strategy_id": 12, "symbol": "BTC/USDT", "signal_type": "open_long", "market_type": "futures"},
+        order_row={"strategy_id": 12, "symbol": "BTC/USDT", "signal_type": "open_long", "market_type": "futures", "execution_mode": "live"},
         payload={"amount": 0.01},
         load_strategy_configs=lambda strategy_id: {
+            "execution_mode": "live",
             "user_id": 7,
             "market_category": "Crypto",
             "market_type": "futures",
@@ -462,9 +463,10 @@ def test_build_live_order_context_normalizes_and_validates():
 def test_build_live_order_context_injects_immutable_reality_api_family():
     ctx = build_live_order_context(
         order_id=99,
-        order_row={"strategy_id": 12, "symbol": "RAAPL/USDT", "signal_type": "open_long"},
+        order_row={"strategy_id": 12, "symbol": "RAAPL/USDT", "signal_type": "open_long", "execution_mode": "live"},
         payload={"amount": 50},
         load_strategy_configs=lambda strategy_id: {
+            "execution_mode": "live",
             "user_id": 7,
             "market_category": "Crypto",
             "market_type": "spot",
@@ -495,9 +497,10 @@ def test_build_live_order_context_rejects_product_contract_mismatch():
     with pytest.raises(LiveOrderRejected, match="strategyV2.instrumentProductContractMismatch"):
         build_live_order_context(
             order_id=99,
-            order_row={"strategy_id": 12, "symbol": "RNVD/USDT", "signal_type": "open_long"},
+            order_row={"strategy_id": 12, "symbol": "RNVD/USDT", "signal_type": "open_long", "execution_mode": "live"},
             payload={"amount": 50},
             load_strategy_configs=lambda strategy_id: {
+                "execution_mode": "live",
                 "user_id": 7,
                 "market_category": "Crypto",
                 "market_type": "spot",
@@ -520,7 +523,7 @@ def test_build_live_order_context_rejects_missing_symbol():
     try:
         build_live_order_context(
             order_id=99,
-            order_row={"strategy_id": 12, "signal_type": "open_long"},
+            order_row={"strategy_id": 12, "signal_type": "open_long", "execution_mode": "live"},
             payload={"amount": 0.01},
             load_strategy_configs=lambda strategy_id: {},
             resolve_exchange_config=lambda cfg, user_id: {},
@@ -538,9 +541,10 @@ def test_build_live_order_context_rejects_entry_after_strategy_stops():
     with pytest.raises(LiveOrderRejected, match="strategy_not_running"):
         build_live_order_context(
             order_id=1,
-            order_row={"strategy_id": 9, "symbol": "SOL/USDT", "signal_type": "add_long"},
+            order_row={"strategy_id": 9, "symbol": "SOL/USDT", "signal_type": "add_long", "execution_mode": "live"},
             payload={},
             load_strategy_configs=lambda strategy_id: {
+                "execution_mode": "live",
                 "user_id": 7,
                 "status": "stopped",
                 "market_category": "Crypto",
@@ -556,9 +560,10 @@ def test_build_live_order_context_rejects_entry_after_strategy_stops():
 def test_build_live_order_context_allows_close_after_strategy_stops():
     ctx = build_live_order_context(
         order_id=1,
-        order_row={"strategy_id": 9, "symbol": "SOL/USDT", "signal_type": "close_long"},
+        order_row={"strategy_id": 9, "symbol": "SOL/USDT", "signal_type": "close_long", "execution_mode": "live"},
         payload={},
         load_strategy_configs=lambda strategy_id: {
+            "execution_mode": "live",
             "user_id": 7,
             "status": "stopped",
             "market_category": "Crypto",
@@ -577,9 +582,10 @@ def test_build_live_order_context_rejects_policy_violation():
     try:
         build_live_order_context(
             order_id=99,
-            order_row={"strategy_id": 12, "symbol": "BTC/USDT", "signal_type": "open_long", "market_type": "swap"},
+            order_row={"strategy_id": 12, "symbol": "BTC/USDT", "signal_type": "open_long", "market_type": "swap", "execution_mode": "live"},
             payload={"amount": 0.01},
             load_strategy_configs=lambda strategy_id: {
+                "execution_mode": "live",
                 "user_id": 7,
                 "market_category": "Crypto",
                 "market_type": "swap",

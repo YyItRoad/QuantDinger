@@ -102,6 +102,7 @@ def test_orders_keep_fill_time_price_and_fractional_quantity(monkeypatch):
         id="order-1", symbol="AAPL", side="buy", qty="3.192", filled_qty="3.192",
         type="limit", limit_price="335.00", filled_avg_price="333.37", status="filled", submitted_at="2026-09-11T14:00:00Z",
         filled_at="2026-09-11T14:00:01Z", created_at="2026-09-11T14:00:00Z",
+        asset_class="us_equity", commission=0,
     )]
     monkeypatch.setattr(client, "_ensure_connected", lambda: None)
     monkeypatch.setattr(module, "_ensure_alpaca", lambda: {
@@ -113,6 +114,9 @@ def test_orders_keep_fill_time_price_and_fractional_quantity(monkeypatch):
     assert order["filled_qty"] == 3.192
     assert order["order_type"] == "limit"
     assert order["limit_price"] == 335.0
+    assert order["commission_quote"] == 0.0
+    assert order["commission_ccy"] == "USD"
+    assert order["fee_status"] == "actual_zero"
 
 
 @pytest.mark.parametrize("status,allowed", [("filled", False), ("canceled", False), ("pending_cancel", False), ("unknown", False), ("partially_filled", True), ("new", True)])

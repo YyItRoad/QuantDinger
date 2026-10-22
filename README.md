@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://github.com/OpenByteInc/QuantDinger">
-    <img src="docs/screenshots/logo.jpg" alt="QuantDinger logo" width="180" height="180">
+    <img src="docs/screenshots/logo.png" alt="QuantDinger logo" width="420">
   </a>
 
   <h1>QuantDinger</h1>
@@ -435,7 +435,7 @@ Start with the [Indicator guide](docs/trading/INDICATOR_DEV_GUIDE.md),
 
 QuantDinger can place a structured AI decision gate directly in front of live
 entry orders. Enable **AI Decision Filter** when creating a regular live
-strategy, or turn it on in Quick Trade. Before an entry reaches the exchange,
+strategy. Before a strategy entry reaches the exchange,
 QuantDinger sends the order, strategy context, exposure, positions, and budget
 state to [TypeSafe Jev](https://docs.typesafe.ai/introduction). Jev returns typed
 Choice results, probabilities, and confidence instead of prose that must be
@@ -459,7 +459,7 @@ so an AI outage cannot trap an existing position.
 
 ```mermaid
 flowchart TD
-    A["Strategy signal / Quick Trade instruction"] --> B["Deterministic risk and order budget checks"]
+    A["Strategy entry signal"] --> B["Deterministic risk and order budget checks"]
     B -->|"Basic checks fail"| R["Reject order"]
     B -->|"Basic checks pass"| C["Build Decision Context V2"]
 

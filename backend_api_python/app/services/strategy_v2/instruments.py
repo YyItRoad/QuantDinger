@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import re
 
-from .frequencies import normalize_frequency
+from app.services.market_context import parse_crypto_identifier
+
+from .frequencies import normalize_frequency  # noqa: F401 - public compatibility export
 from .models import InstrumentSpec
 
 
@@ -40,25 +42,20 @@ def parse_instrument(value: object, *, default_market: str = "") -> InstrumentSp
 
     exchange_id = ""
     market_type = ""
-    if "@" in body:
-        body, venue = body.rsplit("@", 1)
-        if venue.strip().lower() in _CRYPTO_MARKET_TYPES:
-            market_type = venue
-        elif ":" in venue:
-            exchange_id, market_type = venue.split(":", 1)
-        else:
-            exchange_id = venue
-        exchange_id = exchange_id.strip().lower()
-        market_type = market_type.strip().lower()
-
-    symbol = _normalize_symbol(body)
+    raw_symbol = body.rsplit("@", 1)[0] if "@" in body else body
+    symbol = _normalize_symbol(raw_symbol)
     if not market:
         market = infer_market(symbol)
     if not market:
         raise InstrumentParseError(f"strategyV2.marketUnknown:{raw}")
 
     if market == "Crypto":
-        symbol = _normalize_crypto_symbol(symbol)
+        try:
+            symbol, parsed_market_type, parsed_exchange_id = parse_crypto_identifier(body)
+        except ValueError as exc:
+            raise InstrumentParseError(str(exc)) from exc
+        exchange_id = parsed_exchange_id
+        market_type = parsed_market_type
         market_type = market_type if market_type in _CRYPTO_MARKET_TYPES else "spot"
     else:
         exchange_id = ""

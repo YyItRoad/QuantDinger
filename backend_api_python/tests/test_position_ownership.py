@@ -3,7 +3,7 @@
 import pytest
 
 from app.services.pending_orders import entry_position_guard
-from app.services.live_trading import records
+from app.services.live_trading import account_positions, position_ownership, records
 from app.services.live_trading.account_positions import reconcile_strategy_vs_account
 from app.services.live_trading.position_ownership import (
     ADVANCED_MODE,
@@ -12,8 +12,152 @@ from app.services.live_trading.position_ownership import (
     calculate_position_ownership,
     is_position_leg_blocked,
     repair_position_ownership,
+    refresh_account_ownership_from_snapshot,
+    refresh_recorded_ownership_states,
     supports_position_coexistence,
 )
+
+
+class _RecordingCursor:
+    def __init__(self, *, lock_acquired=True):
+        self.calls = []
+        self.rowcount = 1
+        self.lock_acquired = lock_acquired
+
+    def execute(self, sql, params=None):
+        self.calls.append((sql, params))
+
+    def fetchone(self):
+        return {"acquired": self.lock_acquired}
+
+    def close(self):
+        return None
+
+
+class _RecordingDb:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.committed = False
+
+    def cursor(self):
+        return self._cursor
+
+    def commit(self):
+        self.committed = True
+
+
+class _RecordingContext:
+    def __init__(self, db):
+        self._db = db
+
+    def __enter__(self):
+        return self._db
+
+    def __exit__(self, *_args):
+        return False
+
+
+def test_account_position_sync_serializes_each_credential_bucket(monkeypatch):
+    cursor = _RecordingCursor()
+    db = _RecordingDb(cursor)
+    monkeypatch.setattr(account_positions, "get_db_connection", lambda: _RecordingContext(db))
+
+    synced = account_positions.sync_account_positions(
+        user_id=7,
+        credential_id=33,
+        exchange_id="gate",
+        market_type="swap",
+        legs=[],
+    )
+
+    assert synced is True
+    assert "pg_try_advisory_xact_lock" in cursor.calls[0][0]
+    assert cursor.calls[0][1] == ("account-position-sync:7:33:swap",)
+    assert "DELETE FROM qd_account_positions" in cursor.calls[1][0]
+    assert db.committed is True
+
+
+def test_account_position_sync_skips_instead_of_waiting_for_busy_bucket(monkeypatch):
+    cursor = _RecordingCursor(lock_acquired=False)
+    db = _RecordingDb(cursor)
+    monkeypatch.setattr(account_positions, "get_db_connection", lambda: _RecordingContext(db))
+
+    synced = account_positions.sync_account_positions(
+        user_id=7,
+        credential_id=33,
+        exchange_id="gate",
+        market_type="swap",
+        legs=[],
+    )
+
+    assert synced is False
+    assert len(cursor.calls) == 1
+    assert db.committed is False
+
+
+def test_fresh_snapshot_clears_only_older_recorded_drift(monkeypatch):
+    cursor = _RecordingCursor()
+    db = _RecordingDb(cursor)
+    monkeypatch.setattr(position_ownership, "get_db_connection", lambda: _RecordingContext(db))
+
+    updated = refresh_recorded_ownership_states(
+        user_id=7,
+        credential_id=33,
+        market_type="swap",
+        rows=[{
+            "symbol": "BTC/USDT",
+            "side": "long",
+            "account_qty": 0,
+            "strategy_qty": 0,
+            "status": STATUS_OK,
+            "reason": "",
+        }],
+        snapshot_started_at=1234.5,
+    )
+
+    sql, params = cursor.calls[0]
+    assert updated == 1
+    assert "updated_at <= TO_TIMESTAMP" in sql
+    assert params[-1] == pytest.approx(1234.5)
+    assert params[2] == STATUS_OK
+    assert db.committed is True
+
+
+def test_account_snapshot_rechecks_existing_drift_without_an_exchange_call(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        position_ownership,
+        "list_reservations",
+        lambda **_kwargs: [{
+            "symbol_canonical": "BTC/USDT",
+            "side": "long",
+            "status": STATUS_BLOCKED,
+        }],
+    )
+    monkeypatch.setattr(
+        account_positions,
+        "list_strategy_allocations_for_account",
+        lambda **_kwargs: [{"symbol": "BTC/USDT", "side": "long", "size": 0.0052}],
+    )
+
+    def capture_refresh(**kwargs):
+        captured.update(kwargs)
+        return 1
+
+    monkeypatch.setattr(position_ownership, "refresh_recorded_ownership_states", capture_refresh)
+
+    updated = refresh_account_ownership_from_snapshot(
+        user_id=7,
+        credential_id=33,
+        exchange_id="gate",
+        market_type="swap",
+        account_rows=[{"symbol": "BTC/USDT", "side": "long", "size": 0.0052}],
+        snapshot_started_at=1234.5,
+    )
+
+    assert updated == 1
+    assert captured["snapshot_started_at"] == pytest.approx(1234.5)
+    assert captured["rows"][0]["status"] == STATUS_OK
 
 
 def test_strategy_symbol_normalization_strips_only_a_settlement_suffix():

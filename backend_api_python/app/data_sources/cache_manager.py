@@ -14,10 +14,9 @@ Features:
 
 import time
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from collections import OrderedDict
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass
 import threading
 
 logger = logging.getLogger(__name__)
@@ -204,20 +203,3 @@ def get_kline_cache() -> DataCache:
 def get_stock_info_cache() -> DataCache:
     """Return the stock info cache."""
     return _stock_info_cache
-
-
-def generate_kline_cache_key(
-    symbol: str,
-    timeframe: str,
-    limit: int,
-    before_time: Optional[int] = None
-) -> str:
-    """
-    Generate a K-line cache key.
-    
-    Format: symbol:timeframe:limit[:before_time]
-    """
-    key = f"{symbol}:{timeframe}:{limit}"
-    if before_time:
-        key += f":{before_time}"
-    return key

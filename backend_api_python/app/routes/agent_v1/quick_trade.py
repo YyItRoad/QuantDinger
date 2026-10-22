@@ -302,8 +302,16 @@ def _place_live_order(*, body: dict, user_id: int) -> dict:
     commission_ccy = ""
     commission_quote = None
     exchange_status = ""
+    enrich = {"fee_status": "pending", "fees_by_ccy": {}}
     if exchange_order_id:
-        enrich = enrich_fill(client, order_id=exchange_order_id, symbol=symbol, market_type=market_type)
+        enrich = enrich_fill(
+            client,
+            order_id=exchange_order_id,
+            symbol=symbol,
+            market_type=market_type,
+            max_wait_sec=0.25,
+            initial_order=raw,
+        )
         if enrich.get("filled", 0.0) > 0:
             filled = float(enrich["filled"])
         if enrich.get("avg_price", 0.0) > 0:
@@ -311,14 +319,21 @@ def _place_live_order(*, body: dict, user_id: int) -> dict:
         commission = float(enrich.get("fee") or 0.0)
         commission_ccy = str(enrich.get("fee_ccy") or "")
         exchange_status = str(enrich.get("status") or "")
-        from app.services.live_trading.fee_quote import fee_to_quote
-        commission_quote = fee_to_quote(
-            client,
-            symbol=symbol,
-            fee=commission,
-            fee_ccy=commission_ccy,
-            fill_price=avg_fill,
-        )
+        from app.services.quick_trade.fee_reconciliation import fee_update_from_fill
+        fee_update = fee_update_from_fill(client, symbol, enrich, fallback_price=avg_fill)
+        if fee_update:
+            commission = fee_update["commission"]
+            commission_ccy = fee_update["commission_ccy"]
+            commission_quote = fee_update["commission_quote"]
+        else:
+            from app.services.live_trading.fee_quote import fee_to_quote
+            commission_quote = fee_to_quote(
+                client,
+                symbol=symbol,
+                fee=commission,
+                fee_ccy=commission_ccy,
+                fill_price=avg_fill,
+            )
 
     tp_price = float(body.get("tp_price") or body.get("tpPrice") or 0)
     sl_price = float(body.get("sl_price") or body.get("slPrice") or 0)
@@ -356,6 +371,8 @@ def _place_live_order(*, body: dict, user_id: int) -> dict:
         "native_protection_error": protection_error,
         "protected_filled_qty": filled if protection_result else 0.0,
         "margin_mode": margin_mode,
+        "fees_by_ccy": dict(enrich.get("fees_by_ccy") or {}),
+        "fee_status": str(enrich.get("fee_status") or "pending"),
     }
 
     trade_id = _record_quick_trade(

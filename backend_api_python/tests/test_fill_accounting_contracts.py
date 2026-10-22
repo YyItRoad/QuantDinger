@@ -66,6 +66,15 @@ def test_cumulative_value_delta_handles_fractional_shares_and_partial_fills():
     assert cumulative_delta(2, 105, 1, 100) == (0, 0)
 
 
+def test_cumulative_value_delta_ignores_exchange_float_tail_and_average_revision():
+    assert cumulative_delta(
+        0.0048,
+        84_590.1,
+        0.004800000000000001,
+        84_590.09999999999,
+    ) == (0, 0)
+
+
 def test_htx_real_top_level_trade_array_uses_global_ids_and_contract_symbol():
     payload = {
         "topic": "matchOrders_cross.ETH-USDT",
@@ -310,15 +319,15 @@ def test_bitget_trade_history_paginates_before_aggregation(monkeypatch):
     def request(*args, **kwargs):
         calls.append(dict(kwargs["params"]))
         return (
-            {"data": {"fillList": [{"tradeId": str(i)} for i in range(100)], "endId": "99"}}
+            {"data": {"list": [{"execId": str(i)} for i in range(100)], "cursor": "99"}}
             if len(calls) == 1
-            else {"data": {"fillList": [{"tradeId": "100"}]}}
+            else {"data": {"list": [{"execId": "100"}], "cursor": ""}}
         )
 
     monkeypatch.setattr(client, "_signed_request", request)
     result = client.get_order_fills(symbol="BTC/USDT", product_type="USDT-FUTURES", order_id="1")
     assert len(result["data"]["fillList"]) == 101
-    assert calls[1]["idLessThan"] == "99"
+    assert calls[1]["cursor"] == "99"
 
 
 def test_cumulative_fee_update_has_distinct_durable_key():
@@ -397,7 +406,7 @@ def test_bitget_detail_retains_multiple_native_fee_currencies(monkeypatch):
                 "baseVolume": "1",
                 "priceAvg": "100",
                 "state": "filled",
-                "feeDetail": [{"feeCoin": "USDT", "totalFee": "-.1"}, {"feeCoin": "BGB", "totalFee": "-.2"}],
+                "feeDetail": [{"feeCoin": "USDT", "fee": ".1"}, {"feeCoin": "BGB", "fee": ".2"}],
             }
         },
     )

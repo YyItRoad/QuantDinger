@@ -2855,7 +2855,6 @@ def _agent_usage_payload(agent_plan: dict | None, context: dict, language: str) 
     tool_ids: list[tuple[str, str]] = []
     market_data = research.get("market_data") if isinstance(research.get("market_data"), dict) else {}
     news = research.get("news") if isinstance(research.get("news"), dict) else {}
-    macro = research.get("macro") if isinstance(research.get("macro"), dict) else {}
     fundamentals = research.get("fundamentals") if isinstance(research.get("fundamentals"), dict) else {}
     query_plan = ((research.get("request") or {}).get("market_query_plan") or {}) if isinstance(research.get("request"), dict) else {}
     if query_plan:

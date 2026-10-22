@@ -202,21 +202,21 @@ def test_bitget_signed_fee_is_normalized_to_positive_cost(inst_type, fee_detail)
 def test_bitget_spot_fill_uses_official_size_price_and_time_fields():
     event = parse_bitget(
         {
-            "arg": {"channel": "fill", "instType": "SPOT", "instId": "default"},
+            "arg": {"topic": "fill", "instType": "UTA"},
             "data": [{
+                "category": "spot",
                 "symbol": "BTCUSDT",
                 "orderId": "111",
-                "tradeId": "222",
+                "execId": "222",
                 "side": "buy",
-                "priceAvg": "42740.41",
-                "size": "0.0006",
-                "amount": "25.644246",
+                "execPrice": "42740.41",
+                "execQty": "0.0006",
                 "tradeScope": "maker",
                 "feeDetail": [{
                     "feeCoin": "USDT",
-                    "totalFee": "0.01538655",
+                    "fee": "0.01538655",
                 }],
-                "cTime": "1703580202094",
+                "createdTime": "1703580202094",
             }],
         }
     )[0]
@@ -226,6 +226,28 @@ def test_bitget_spot_fill_uses_official_size_price_and_time_fields():
     assert event.price == pytest.approx(42740.41)
     assert event.maker is True
     assert _fee_map(event) == {"USDT": pytest.approx(0.01538655)}
+
+
+def test_bitget_uta_fill_accepts_exec_fee_without_fee_detail():
+    event = parse_bitget(
+        {
+            "arg": {"topic": "fill", "instType": "UTA"},
+            "data": [{
+                "category": "usdt-futures",
+                "symbol": "BTCUSDT",
+                "orderId": "333",
+                "execId": "444",
+                "side": "sell",
+                "execPrice": "62000",
+                "execQty": "0.01",
+                "feeCoin": "USDT",
+                "execFee": "0.31",
+                "createdTime": "1703580202094",
+            }],
+        }
+    )[0]
+    assert event.fee_status == "actual"
+    assert _fee_map(event) == {"USDT": pytest.approx(0.31)}
 
 
 def test_gate_spot_and_futures_fees_are_actual_and_futures_currency_is_inferred():

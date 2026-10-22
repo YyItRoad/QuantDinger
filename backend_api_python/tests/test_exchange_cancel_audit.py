@@ -21,9 +21,10 @@ from app.services.live_trading.base import LiveTradingError
 CASES = [
     (BinanceSpotClient, 'spot', 'DELETE', '/api/v3/order', {'symbol': 'BTCUSDT'}, 'orderId', 'origClientOrderId'),
     (BinanceFuturesClient, 'swap', 'DELETE', '/fapi/v1/order', {'symbol': 'BTCUSDT'}, 'orderId', 'origClientOrderId'),
-    (BitgetSpotClient, 'spot', 'POST', '/api/v2/spot/trade/cancel-order', {'symbol': 'BTCUSDT'}, 'orderId', 'clientOid'),
-    (BitgetMixClient, 'swap', 'POST', '/api/v2/mix/order/cancel-order',
-     {'symbol': 'BTCUSDT', 'productType': 'USDT-FUTURES', 'marginCoin': 'USDT'}, 'orderId', 'clientOid'),
+    (BitgetSpotClient, 'spot', 'POST', '/api/v3/trade/cancel-order',
+     {'category': 'SPOT', 'symbol': 'BTCUSDT'}, 'orderId', 'clientOid'),
+    (BitgetMixClient, 'swap', 'POST', '/api/v3/trade/cancel-order',
+     {'symbol': 'BTCUSDT', 'category': 'USDT-FUTURES'}, 'orderId', 'clientOid'),
     (BybitClient, 'spot', 'POST', '/v5/order/cancel', {'symbol': 'BTCUSDT', 'category': 'spot'}, 'orderId', 'orderLinkId'),
     (BybitClient, 'swap', 'POST', '/v5/order/cancel', {'symbol': 'BTCUSDT', 'category': 'linear'}, 'orderId', 'orderLinkId'),
     (OkxClient, 'spot', 'POST', '/api/v5/trade/cancel-order', {'instId': 'BTC-USDT'}, 'ordId', 'clOrdId'),

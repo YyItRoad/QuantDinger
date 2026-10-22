@@ -512,12 +512,15 @@ class InstrumentRulesProvider:
             })
             return _first_mapping(document.get("data"))
         if exchange == "bitget":
-            if market_type == "swap":
-                document = self._request(exchange, market_type, "/api/v2/mix/market/contracts", {
-                    "productType": "USDT-FUTURES", "symbol": to_bitget_um_symbol(symbol)
-                })
-            else:
-                document = self._request(exchange, market_type, "/api/v2/spot/public/symbols", {})
+            document = self._request(
+                exchange,
+                market_type,
+                "/api/v3/market/instruments",
+                {
+                    "category": "USDT-FUTURES" if market_type == "swap" else "SPOT",
+                    "symbol": to_bitget_um_symbol(symbol),
+                },
+            )
             return _matching_row(document.get("data"), "symbol", to_bitget_um_symbol(symbol))
         if exchange == "gate":
             pair = to_gate_currency_pair(symbol)
@@ -653,30 +656,69 @@ def _parse_bitget(market_type: str, raw: Mapping[str, Any]) -> dict[str, Decimal
     contract = Decimal("1")
     if market_type == "swap":
         contract = _first_positive(raw.get("contractSize"), raw.get("contractSz"), raw.get("ctVal")) or Decimal("1")
-        amount_step = _first_positive(raw.get("sizeMultiplier"), raw.get("sizeStep"), raw.get("lotSize"))
+        amount_step = _first_positive(
+            raw.get("quantityMultiplier"),
+            raw.get("sizeMultiplier"),
+            raw.get("sizeStep"),
+            raw.get("lotSize"),
+        )
         if amount_step <= 0:
-            amount_step = _precision_step(raw.get("sizePlace"))
-        price_tick = _first_positive(raw.get("priceStep"), raw.get("tickSize"))
+            amount_step = _precision_step(raw.get("quantityPrecision") or raw.get("sizePlace"))
+        price_tick = _first_positive(
+            raw.get("priceMultiplier"),
+            raw.get("priceStep"),
+            raw.get("tickSize"),
+        )
         if price_tick <= 0:
-            price_tick = _positive(raw.get("priceEndStep")) * _precision_step(raw.get("pricePlace"))
+            price_tick = _positive(raw.get("priceEndStep")) * _precision_step(
+                raw.get("pricePrecision") or raw.get("pricePlace")
+            )
         values.update({
             "amount_step": amount_step * contract,
-            "min_amount": _first_positive(raw.get("minTradeNum"), raw.get("minQty"), raw.get("minSize")) * contract,
-            "min_notional": _first_positive(raw.get("minTradeUSDT"), raw.get("minNotional")),
+            "min_amount": _first_positive(
+                raw.get("minOrderQty"),
+                raw.get("minTradeNum"),
+                raw.get("minQty"),
+                raw.get("minSize"),
+            ) * contract,
+            "min_notional": _first_positive(
+                raw.get("minOrderAmount"),
+                raw.get("minTradeUSDT"),
+                raw.get("minNotional"),
+            ),
             "price_tick": price_tick,
             "contract_size": contract,
         })
         return values
-    amount_step = _first_positive(raw.get("quantityStep"), raw.get("sizeStep"), raw.get("minTradeIncrement"))
+    amount_step = _first_positive(
+        raw.get("quantityMultiplier"),
+        raw.get("quantityStep"),
+        raw.get("sizeStep"),
+        raw.get("minTradeIncrement"),
+    )
     if amount_step <= 0:
         amount_step = _precision_step(raw.get("quantityPrecision") or raw.get("quantityPlace"))
-    price_tick = _first_positive(raw.get("priceStep"), raw.get("tickSize"), raw.get("priceTick"))
+    price_tick = _first_positive(
+        raw.get("priceMultiplier"),
+        raw.get("priceStep"),
+        raw.get("tickSize"),
+        raw.get("priceTick"),
+    )
     if price_tick <= 0:
         price_tick = _precision_step(raw.get("pricePrecision") or raw.get("pricePlace"))
     values.update({
         "amount_step": amount_step,
-        "min_amount": _first_positive(raw.get("minTradeAmount"), raw.get("minTradeNum"), raw.get("minQty")),
-        "min_notional": _first_positive(raw.get("minTradeUSDT"), raw.get("minNotional")),
+        "min_amount": _first_positive(
+            raw.get("minOrderQty"),
+            raw.get("minTradeAmount"),
+            raw.get("minTradeNum"),
+            raw.get("minQty"),
+        ),
+        "min_notional": _first_positive(
+            raw.get("minOrderAmount"),
+            raw.get("minTradeUSDT"),
+            raw.get("minNotional"),
+        ),
         "price_tick": price_tick,
     })
     return values

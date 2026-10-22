@@ -2,7 +2,13 @@ import pandas as pd
 import pytest
 import numpy as np
 
-from app.services.factors import FactorError, compute_factor, compute_panel_factor, list_factors
+from app.services.factors import (
+    FactorError,
+    compute_factor,
+    compute_panel_factor,
+    factor_warmup_bars,
+    list_factors,
+)
 from app.services.factors.research import information_coefficient, quantile_returns, winsorize_zscore
 from app.utils.technical_indicators import compute_kdj_cn, compute_rsi_wilder
 
@@ -14,6 +20,8 @@ def test_factor_catalog_contains_technical_and_fundamental_definitions():
     assert {item["factor_id"] for item in factors} >= {
         "momentum",
         "realized_volatility",
+        "skewness",
+        "kurtosis",
         "earnings_yield",
         "return_on_equity",
     }
@@ -83,6 +91,24 @@ def test_all_registered_technical_factors_compute_finite_defaults():
         assert np.isfinite(value), definition["factor_id"]
 
 
+def test_all_registered_technical_factors_succeed_at_exact_default_warmup_bars():
+    index = np.arange(240, dtype=float)
+    close = 100.0 + index * 0.2 + np.sin(index / 5.0) * 2.0
+    frame = pd.DataFrame({
+        "open": close - 0.2,
+        "high": close + 1.0,
+        "low": close - 1.0,
+        "close": close,
+        "volume": 1_000.0 + (index % 17) * 25.0,
+    })
+    for definition in list_factors(factor_type="technical"):
+        warmup = definition["default_warmup_bars"]
+        assert warmup >= 1, definition["factor_id"]
+        assert factor_warmup_bars(definition["factor_id"]) == warmup
+        value = compute_factor(definition["factor_id"], frame.iloc[:warmup])
+        assert np.isfinite(value), definition["factor_id"]
+
+
 def test_registered_rsi_and_kdj_match_shared_terminal_conventions():
     close = [100, 101, 102, 101, 100, 99, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107]
     high = [value + 1 for value in close]
@@ -110,3 +136,5 @@ def test_extended_factor_families_have_expected_invariants():
     assert compute_factor("vortex", frame, {"period": 14, "output": "plus"}) > 0
     assert compute_factor("ulcer_index", frame) == pytest.approx(0.0)
     assert compute_factor("parkinson_volatility", frame) > 0
+    assert np.isfinite(compute_factor("skewness", frame))
+    assert np.isfinite(compute_factor("kurtosis", frame))

@@ -164,6 +164,8 @@ def _parse_swap_position_items(items: List[Dict[str, Any]], *, market_type: str 
         try:
             entry = float(
                 item.get("avgPx")
+                or item.get("avgPrice")
+                or item.get("entry_price")
                 or item.get("entryPrice")
                 or item.get("openPriceAvg")
                 or item.get("avgEntryPrice")

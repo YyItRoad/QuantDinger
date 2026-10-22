@@ -92,6 +92,36 @@ def test_parse_htx_spot_balance():
     assert out["total"] == 200.0
 
 
+def test_parse_bitget_uta_swap_asset():
+    raw = {
+        "code": "00000",
+        "data": [{
+            "coin": "USDT",
+            "available": "825.25",
+            "equity": "1004.5",
+            "balance": "1000",
+        }],
+    }
+    out = _parse_balance(raw, "bitget", "swap")
+    assert out["available"] == 825.25
+    assert out["total"] == 1004.5
+
+
+def test_parse_bitget_uta_spot_asset_uses_equity():
+    raw = {
+        "code": "00000",
+        "data": [{
+            "coin": "USDT",
+            "available": "90",
+            "frozen": "5",
+            "equity": "100",
+        }],
+    }
+    out = _parse_balance(raw, "bitget", "spot")
+    assert out["available"] == 90.0
+    assert out["total"] == 100.0
+
+
 def test_htx_v5_normalize_balance_data_list():
     out = htx_v5.normalize_balance({
         "code": 200,

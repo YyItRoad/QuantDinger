@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from app.services.exchange_execution import load_strategy_configs, resolve_exchange_config
 from app.services.execution_streams.repository import ExecutionEventRepository

@@ -27,7 +27,8 @@ def metric_snapshot(result: dict[str, Any]) -> dict[str, float]:
 def composite_score(train: list[dict[str, float]], validation: list[dict[str, float]], weights: dict[str, float]) -> tuple[float, dict[str, float]]:
     train_sharpe = mean(row["sharpe"] for row in train) if train else 0.0
     oos_sharpe = mean(row["sharpe"] for row in validation) if validation else 0.0
-    oos_return = mean(row["return"] for row in validation) if validation else 0.0
+    train_return = _compounded_return(row["return"] for row in train)
+    oos_return = _compounded_return(row["return"] for row in validation)
     drawdown = mean(abs(row["drawdown"]) for row in validation) if validation else 100.0
     variation = pstdev(row["return"] for row in validation) if len(validation) > 1 else 0.0
     stability = max(0.0, 1.0 - min(1.0, variation / (abs(oos_return) + 12.0)))
@@ -48,6 +49,7 @@ def composite_score(train: list[dict[str, float]], validation: list[dict[str, fl
     return round(score, 4), {
         **{key: round(value * 100.0, 2) for key, value in components.items()},
         "trainSharpe": round(train_sharpe, 4),
+        "trainReturn": round(train_return, 4),
         "oosSharpe": round(oos_sharpe, 4),
         "oosReturn": round(oos_return, 4),
         "maxDrawdown": round(drawdown, 4),
@@ -56,6 +58,18 @@ def composite_score(train: list[dict[str, float]], validation: list[dict[str, fl
         "activeValidationFolds": active_folds,
         "activityEvidence": round(evidence * 100.0, 2),
     }
+
+
+def _compounded_return(values: Iterable[float]) -> float:
+    growth = 1.0
+    found = False
+    for value in values:
+        number = float(value)
+        if not math.isfinite(number):
+            continue
+        growth *= max(0.0, 1.0 + number / 100.0)
+        found = True
+    return (growth - 1.0) * 100.0 if found else 0.0
 
 
 def deflated_sharpe(returns: list[float], *, observed_sharpe: float, trials: int) -> dict[str, float | int | bool | str]:

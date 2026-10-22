@@ -1,10 +1,10 @@
-"""Bitget REST reports debits as negative amounts; keep native fee currencies."""
+"""Normalize Bitget fee details while preserving native fee currencies."""
 
 import json
 from decimal import Decimal
 
 
-def fee_breakdown(raw, *, received_currency=""):
+def fee_breakdown(raw, *, received_currency="", v3_positive_cost=False):
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
@@ -45,15 +45,21 @@ def fee_breakdown(raw, *, received_currency=""):
             value = entry.get("fee")
         if value is None:
             continue
-        fee = -Decimal(str(value or 0))
+        fee = Decimal(str(value or 0))
+        if not v3_positive_cost:
+            fee = -fee
         if not fee.is_finite():
             raise ValueError("Non-finite execution fee")
         result[currency] = result.get(currency, 0.0) + float(fee)
     return result
 
 
-def fee_storage(raw, *, received_currency=""):
-    fees = fee_breakdown(raw, received_currency=received_currency)
+def fee_storage(raw, *, received_currency="", v3_positive_cost=False):
+    fees = fee_breakdown(
+        raw,
+        received_currency=received_currency,
+        v3_positive_cost=v3_positive_cost,
+    )
     if len(fees) == 1:
         currency, amount = next(iter(fees.items()))
         return Decimal(str(amount)), currency

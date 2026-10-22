@@ -14,8 +14,9 @@ import pandas as pd
 
 from app.services.factors import (
     FactorError,
+    TalibFactorError,
+    compute_catalog_factor,
     compute_factor,
-    compute_talib_factor,
     compute_talib_indicator,
     get_factor,
     is_talib_available,
@@ -25,7 +26,7 @@ from app.services.instrument_rules import (
     InstrumentRulesSnapshot,
     default_rules_for_symbol,
 )
-from .contract import CompiledStrategyV2, StrategyV2ContractError, compile_strategy_v2
+from .contract import PLATFORM_MAX_LEVERAGE, CompiledStrategyV2, StrategyV2ContractError, compile_strategy_v2
 from .data import MultiAssetDataPortal
 from .frequencies import normalize_frequency, periods_per_year
 from .protection import ProtectionDecision, ProtectionEngine, ProtectionSpec, ProtectionState
@@ -414,11 +415,27 @@ class StrategyRuntimeContext:
         )
         frame = self.portal.visible_frame(target, frequency=frequency)
         library_id = str(name or "").strip()
+        if library_id.lower().startswith("talib:"):
+            return compute_talib_indicator(library_id, frame, params)
+        try:
+            get_factor(library_id.lower())
+        except FactorError as exc:
+            if exc.code != "factor.notFound":
+                raise
+        else:
+            return self._compute_builtin_indicator(
+                library_id,
+                target,
+                frame,
+                params,
+                frequency=frequency,
+            )
         if is_talib_available():
             try:
                 return compute_talib_indicator(library_id, frame, params)
-            except Exception:
-                pass
+            except TalibFactorError as exc:
+                if exc.code != "factor.notFound":
+                    raise
         return self._compute_builtin_indicator(
             library_id,
             target,
@@ -496,14 +513,7 @@ class StrategyRuntimeContext:
         )
         frame = self.portal.visible_frame(target, frequency=frequency)
         factor_id = str(name or "").strip()
-        try:
-            get_factor(factor_id.lower())
-            return compute_factor(factor_id.lower(), frame, params)
-        except FactorError as exc:
-            if exc.code != "factor.notFound":
-                raise
-        output = str(params.pop("output", "") or "")
-        return compute_talib_factor(factor_id, frame, params, output=output)
+        return compute_catalog_factor(factor_id, frame, params)
 
     def get_factors(self, symbols: object, names: object, **params: Any) -> pd.DataFrame:
         requested_symbols = [symbols] if isinstance(symbols, str) else list(symbols or [])
@@ -1720,7 +1730,7 @@ class StrategyV2BacktestRunner:
         requested_leverage = max(1.0, float(leverage or 1.0)) if leverage_enabled else 1.0
         if requested_leverage > 1.0 and not self.program.manifest.leverage_allowed:
             raise StrategyV2ContractError("strategyV2.leverageNotAllowed")
-        if requested_leverage > self.program.manifest.max_leverage:
+        if requested_leverage > PLATFORM_MAX_LEVERAGE:
             raise StrategyV2ContractError("strategyV2.leverageExceedsStrategyLimit")
         self.portal = MultiAssetDataPortal(
             frames,
@@ -2259,6 +2269,7 @@ class StrategyV2LiveSession:
         frequency_frames: Mapping[str, Mapping[str, pd.DataFrame]] | None = None,
         initial_capital: float,
         params: Mapping[str, Any] | None = None,
+        deployment_risk: Mapping[str, Any] | None = None,
         universe_resolver=None,
         schedule_timezone: str = "UTC",
     ) -> None:
@@ -2271,7 +2282,14 @@ class StrategyV2LiveSession:
             universe_resolver=universe_resolver,
         )
         self.portfolio = PortfolioState(initial_capital, initial_capital, total_value=initial_capital)
-        self.context = StrategyRuntimeContext(portal=self.portal, portfolio=self.portfolio, params=params)
+        runtime_params = dict(params or {})
+        if deployment_risk is not None:
+            runtime_params["_deployment_equity_risk_managed"] = True
+        self.context = StrategyRuntimeContext(
+            portal=self.portal,
+            portfolio=self.portfolio,
+            params=runtime_params,
+        )
         self.context.live_order_cancellation = True
         self.persist_strategy_state = (
             _truthy(self.program.namespace.get("PERSIST_RUNTIME_STATE"))
@@ -2284,6 +2302,9 @@ class StrategyV2LiveSession:
         self.protection_specs: dict[str, ProtectionSpec] = {}
         self.protection_states: dict[str, ProtectionState] = {}
         self._protection_exit_pending: set[str] = set()
+        self.deployment_risk = dict(deployment_risk or {})
+        self._deployment_equity_exit_pending = False
+        self._deployment_equity_stop_reason = ""
         self._bind_runtime_api()
 
     def process(
@@ -2463,14 +2484,15 @@ class StrategyV2LiveSession:
         *,
         timestamp: object = None,
     ) -> tuple[list[OrderIntent], list[str], str]:
-        """Evaluate a generated robot's portfolio-wide risk on every live tick.
+        """Evaluate deployment and source portfolio-wide risk on every live tick.
 
-        Generated system templates expose ``_equity_risk_exit``.  Keeping this
-        hook outside ``handle_data`` means a 1H robot can still stop immediately
-        when its live account equity crosses a limit instead of waiting for the
-        next hourly candle.  User-authored and previously purchased sources that
-        do not expose the hook retain their existing behaviour.
+        Deployment limits are owned by the running strategy instance and apply
+        to every Strategy API V2 source. Generated system templates may also
+        expose ``_equity_risk_exit`` for their source-defined behaviour.
         """
+        deployment_result = self._evaluate_deployment_equity_risk(timestamp=timestamp)
+        if deployment_result[2]:
+            return deployment_result
         callback = self.program.namespace.get("_equity_risk_exit")
         if not callable(callback):
             return [], [], ""
@@ -2485,6 +2507,63 @@ class StrategyV2LiveSession:
         if not reason and orders:
             reason = str(orders[0].reason or "").strip()
         return orders, logs, reason
+
+    def _evaluate_deployment_equity_risk(
+        self,
+        *,
+        timestamp: object = None,
+    ) -> tuple[list[OrderIntent], list[str], str]:
+        if self._deployment_equity_exit_pending:
+            return [], [], self._deployment_equity_stop_reason
+        try:
+            take_profit = max(0.0, float(
+                self.deployment_risk.get("equity_take_profit_pct") or 0.0
+            ))
+            stop_loss = max(0.0, float(
+                self.deployment_risk.get("equity_stop_loss_pct") or 0.0
+            ))
+        except (TypeError, ValueError):
+            return [], [], ""
+        starting_equity = float(self.portfolio.starting_cash or 0.0)
+        current_equity = float(self.portfolio.total_value or 0.0)
+        if starting_equity <= 0 or not math.isfinite(current_equity):
+            return [], [], ""
+        total_return = current_equity / starting_equity - 1.0
+        reason = ""
+        if stop_loss > 0 and total_return <= -stop_loss:
+            reason = "strategy_equity_stop_loss"
+        elif take_profit > 0 and total_return >= take_profit:
+            reason = "strategy_equity_take_profit"
+        if not reason:
+            return [], [], ""
+
+        terminal_statuses = {
+            "filled", "cancelled", "canceled", "rejected", "expired", "failed",
+        }
+        for reference in self.context.order_references():
+            status = str(
+                self.context.get_order_status(reference).get("status") or ""
+            ).strip().lower()
+            if status not in terminal_statuses:
+                self.context.cancel_order(reference)
+
+        self.context.current_dt = pd.Timestamp(timestamp or pd.Timestamp.now(tz="UTC"))
+        orders: list[OrderIntent] = []
+        for position_key, position in self.portfolio.positions.items():
+            if abs(float(position.amount or 0.0)) <= 1e-12:
+                continue
+            orders.append(OrderIntent(
+                position.symbol,
+                "target_quantity",
+                0.0,
+                reason,
+                position_side=position.position_side,
+            ))
+            self.context.set_last_exit_reason(position_key, reason)
+            self.context.set_last_exit_reason(position.symbol, reason)
+        self._deployment_equity_exit_pending = True
+        self._deployment_equity_stop_reason = reason
+        return orders, [], reason
 
     def evaluate_price_tick(
         self,
@@ -2522,7 +2601,9 @@ class StrategyV2LiveSession:
         return orders, self.context.flush_logs()
 
     def release_equity_risk_exit(self) -> None:
-        """Re-arm a generated equity exit after its async submission failed."""
+        """Re-arm an equity exit after its async submission failed."""
+        self._deployment_equity_exit_pending = False
+        self._deployment_equity_stop_reason = ""
         callback = self.program.namespace.get("_release_equity_risk_exit")
         if callable(callback):
             callback()

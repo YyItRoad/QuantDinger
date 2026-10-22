@@ -333,6 +333,7 @@ def test_live_dispatch_never_calls_virtual_account(monkeypatch):
 
     live_calls = []
     monkeypatch.setattr(cancellations, "intercept_cancelled_dispatch", lambda row: False)
+    monkeypatch.setattr(worker_module, "load_strategy_configs", lambda strategy_id: {"execution_mode": "live"})
     monkeypatch.setattr(
         virtual_trading,
         "execute_virtual_signal_order",
@@ -351,6 +352,104 @@ def test_live_dispatch_never_calls_virtual_account(monkeypatch):
         "amount": 2,
         "price": 100,
         "payload_json": "{}",
+    })
+
+    assert len(live_calls) == 1
+
+
+def test_stale_signal_entry_is_rejected_without_reaching_either_executor(monkeypatch):
+    from app.services import virtual_trading
+    from app.services.strategy_runtime import cancellations
+
+    live_calls = []
+    virtual_calls = []
+    failures = []
+    monkeypatch.setattr(cancellations, "intercept_cancelled_dispatch", lambda row: False)
+    monkeypatch.setattr(worker_module, "load_strategy_configs", lambda strategy_id: {"execution_mode": "live"})
+    monkeypatch.setattr(
+        virtual_trading,
+        "execute_virtual_signal_order",
+        lambda *args, **kwargs: virtual_calls.append((args, kwargs)),
+    )
+
+    worker = object.__new__(worker_module.PendingOrderWorker)
+    worker._load_strategy_name = lambda strategy_id: "Test"
+    worker._mark_failed = lambda **kwargs: failures.append(kwargs)
+    worker._execute_live_order = lambda **kwargs: live_calls.append(kwargs)
+
+    worker._dispatch_one({
+        "id": 15,
+        "strategy_id": 3,
+        "execution_mode": "signal",
+        "symbol": "BTC/USDT",
+        "signal_type": "open_long",
+        "amount": 2,
+        "price": 100,
+        "payload_json": '{"strategy_id":3,"execution_mode":"signal"}',
+    })
+
+    assert live_calls == []
+    assert virtual_calls == []
+    assert failures and "execution_mode_mismatch" in failures[0]["error"]
+
+
+def test_stale_live_entry_is_rejected_without_reaching_either_executor(monkeypatch):
+    from app.services import virtual_trading
+    from app.services.strategy_runtime import cancellations
+
+    live_calls = []
+    virtual_calls = []
+    failures = []
+    monkeypatch.setattr(cancellations, "intercept_cancelled_dispatch", lambda row: False)
+    monkeypatch.setattr(worker_module, "load_strategy_configs", lambda strategy_id: {"execution_mode": "signal"})
+    monkeypatch.setattr(
+        virtual_trading,
+        "execute_virtual_signal_order",
+        lambda *args, **kwargs: virtual_calls.append((args, kwargs)),
+    )
+
+    worker = object.__new__(worker_module.PendingOrderWorker)
+    worker._load_strategy_name = lambda strategy_id: "Test"
+    worker._mark_failed = lambda **kwargs: failures.append(kwargs)
+    worker._execute_live_order = lambda **kwargs: live_calls.append(kwargs)
+
+    worker._dispatch_one({
+        "id": 16,
+        "strategy_id": 3,
+        "execution_mode": "live",
+        "symbol": "BTC/USDT",
+        "signal_type": "open_long",
+        "amount": 2,
+        "price": 100,
+        "payload_json": '{"strategy_id":3,"execution_mode":"live"}',
+    })
+
+    assert live_calls == []
+    assert virtual_calls == []
+    assert failures and "execution_mode_mismatch" in failures[0]["error"]
+
+
+def test_mode_change_does_not_block_a_risk_reducing_exit(monkeypatch):
+    from app.services.strategy_runtime import cancellations
+
+    live_calls = []
+    monkeypatch.setattr(cancellations, "intercept_cancelled_dispatch", lambda row: False)
+    monkeypatch.setattr(worker_module, "load_strategy_configs", lambda strategy_id: {"execution_mode": "signal"})
+
+    worker = object.__new__(worker_module.PendingOrderWorker)
+    worker._load_strategy_name = lambda strategy_id: "Test"
+    worker._mark_failed = lambda **kwargs: pytest.fail(str(kwargs))
+    worker._execute_live_order = lambda **kwargs: live_calls.append(kwargs)
+
+    worker._dispatch_one({
+        "id": 17,
+        "strategy_id": 3,
+        "execution_mode": "live",
+        "symbol": "BTC/USDT",
+        "signal_type": "close_long_stop",
+        "amount": 2,
+        "price": 100,
+        "payload_json": '{"strategy_id":3,"execution_mode":"live"}',
     })
 
     assert len(live_calls) == 1

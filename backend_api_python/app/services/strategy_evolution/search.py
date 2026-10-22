@@ -17,18 +17,43 @@ class ParameterSampler:
         self.random = random.Random(seed)
 
     def grid(self, limit: int) -> list[dict[str, Any]]:
+        candidates, _stats = self.grid_with_stats(limit)
+        return candidates
+
+    def grid_with_stats(self, limit: int, *, accept=None) -> tuple[list[dict[str, Any]], dict[str, int]]:
         axes = [self._grid_values(item, limit) for item in self.parameters]
-        combinations = itertools.product(*axes)
+        combination_count = math.prod(len(axis) for axis in axes)
+        max_scan = max(limit * 30, limit + 100)
+        if combination_count <= max_scan:
+            combinations = itertools.product(*axes)
+        else:
+            sample_count = min(combination_count, max_scan)
+            sampled_indices = self.random.sample(range(combination_count), sample_count)
+            combinations = (self._combination_at(axes, index) for index in sampled_indices)
         reservoir: list[tuple[int, dict[str, Any]]] = []
-        for index, values in enumerate(combinations):
+        scanned = 0
+        rejected = 0
+        eligible = 0
+        for values in combinations:
+            scanned += 1
             candidate = {item.name: value for item, value in zip(self.parameters, values)}
+            if callable(accept) and not accept(candidate):
+                rejected += 1
+                continue
+            index = eligible
+            eligible += 1
             if index < limit:
                 reservoir.append((index, candidate))
             else:
                 replace = self.random.randint(0, index)
                 if replace < limit:
                     reservoir[replace] = (index, candidate)
-        return [item[1] for item in sorted(reservoir, key=lambda row: row[0])]
+            if combination_count > max_scan and eligible >= limit:
+                break
+        return (
+            [item[1] for item in sorted(reservoir, key=lambda row: row[0])],
+            {"scanned": scanned, "eligible": eligible, "rejected": rejected},
+        )
 
     def grid_size(self, limit: int) -> int:
         size = 1
@@ -37,6 +62,31 @@ class ParameterSampler:
             if size >= limit:
                 return limit
         return size
+
+    def space_size(self, cap: int = 10_000_000) -> int:
+        size = 1
+        for item in self.parameters:
+            size *= self._domain_size(item)
+            if size >= cap:
+                return cap
+        return size
+
+    @staticmethod
+    def _domain_size(item: SearchParameter) -> int:
+        if item.kind == "boolean":
+            return 2
+        if item.choices:
+            return max(1, len(item.choices))
+        low = float(item.minimum or 0)
+        high = float(item.maximum if item.maximum is not None else low)
+        step = float(item.step or ((high - low) / 9.0) or 1.0)
+        if high <= low:
+            return 1
+        span = high - low
+        regular_steps = max(0, int(math.floor((span / step) + 1e-12)))
+        regular_maximum = low + regular_steps * step
+        tolerance = max(1.0, abs(low), abs(high)) * 1e-10
+        return regular_steps + 1 + (1 if regular_maximum < high - tolerance else 0)
 
     def random_candidate(self) -> dict[str, Any]:
         return {item.name: self._random_value(item) for item in self.parameters}
@@ -48,10 +98,17 @@ class ParameterSampler:
         split = max(3, int(len(ranked) * 0.25))
         good = [row[0] for row in ranked[:split]]
         bad = [row[0] for row in ranked[split:]]
+        seen = {
+            tuple(sorted((str(key), repr(value)) for key, value in params.items()))
+            for params, _score in history
+        }
         best = None
         best_ratio = -math.inf
         for _ in range(samples):
             candidate = {item.name: self._tpe_value(item, good) for item in self.parameters}
+            identity = tuple(sorted((str(key), repr(value)) for key, value in candidate.items()))
+            if identity in seen:
+                continue
             ratio = sum(self._density_ratio(item, candidate[item.name], good, bad) for item in self.parameters)
             if ratio > best_ratio:
                 best, best_ratio = candidate, ratio
@@ -65,10 +122,14 @@ class ParameterSampler:
         low = float(item.minimum or 0)
         high = float(item.maximum if item.maximum is not None else low)
         step = float(item.step or ((high - low) / max(1, min(limit, 10) - 1)) or 1)
-        count = max(1, min(limit, int(math.floor((high - low) / step)) + 1))
-        values = [min(high, low + index * step) for index in range(count)]
-        if values[-1] < high and len(values) < limit:
-            values.append(high)
+        domain_size = self._domain_size(item)
+        if domain_size <= limit:
+            indices = range(domain_size)
+        elif limit <= 1:
+            indices = (0,)
+        else:
+            indices = tuple(sorted({round(index * (domain_size - 1) / (limit - 1)) for index in range(limit)}))
+        values = [self._domain_value(item, index, domain_size, low, high, step) for index in indices]
         return [self._cast(item, value) for value in values]
 
     def _random_value(self, item: SearchParameter) -> Any:
@@ -80,7 +141,7 @@ class ParameterSampler:
         high = float(item.maximum if item.maximum is not None else low)
         value = self.random.uniform(low, high)
         if item.step:
-            value = low + round((value - low) / item.step) * item.step
+            value = self._snap_to_domain(item, value)
         return self._cast(item, min(high, max(low, value)))
 
     def _tpe_value(self, item: SearchParameter, good: list[dict[str, Any]]) -> Any:
@@ -97,10 +158,49 @@ class ParameterSampler:
         low = float(item.minimum or 0)
         high = float(item.maximum if item.maximum is not None else low)
         bandwidth = max((high - low) / max(6.0, math.sqrt(len(values)) * 3), float(item.step or 0))
-        value = self.random.gauss(center, bandwidth)
+        value = center
+        for _ in range(8):
+            proposal = self.random.gauss(center, bandwidth)
+            if low <= proposal <= high:
+                value = proposal
+                break
+        else:
+            value = self.random.uniform(low, high)
         if item.step:
-            value = low + round((value - low) / item.step) * item.step
+            value = self._snap_to_domain(item, value)
         return self._cast(item, min(high, max(low, value)))
+
+    @staticmethod
+    def _combination_at(axes: list[list[Any]], flat_index: int) -> tuple[Any, ...]:
+        values: list[Any] = [None] * len(axes)
+        remaining = flat_index
+        for index in range(len(axes) - 1, -1, -1):
+            axis = axes[index]
+            remaining, offset = divmod(remaining, len(axis))
+            values[index] = axis[offset]
+        return tuple(values)
+
+    @staticmethod
+    def _domain_value(item: SearchParameter, index: int, domain_size: int, low: float, high: float, step: float) -> Any:
+        if index >= domain_size - 1:
+            return high
+        return min(high, low + index * step)
+
+    def _snap_to_domain(self, item: SearchParameter, value: float) -> float:
+        low = float(item.minimum or 0)
+        high = float(item.maximum if item.maximum is not None else low)
+        step = float(item.step or 1.0)
+        domain_size = self._domain_size(item)
+        if domain_size <= 1:
+            return low
+        raw_index = (value - low) / step
+        indices = {
+            max(0, min(domain_size - 1, int(math.floor(raw_index)))),
+            max(0, min(domain_size - 1, int(math.ceil(raw_index)))),
+            domain_size - 1,
+        }
+        candidates = [self._domain_value(item, index, domain_size, low, high, step) for index in indices]
+        return min(candidates, key=lambda candidate: (abs(float(candidate) - value), float(candidate)))
 
     def _density_ratio(self, item: SearchParameter, value: Any, good: list[dict[str, Any]], bad: list[dict[str, Any]]) -> float:
         if item.kind == "boolean" or item.choices:

@@ -45,6 +45,7 @@ celery_app.conf.update(
     imports=(
         "app.tasks.agent_jobs",
         "app.tasks.fast_analysis",
+        "app.tasks.indicator_translation",
         "app.tasks.maintenance",
         "app.tasks.fundamental_sync",
         "app.market_state.tasks",
@@ -53,6 +54,7 @@ celery_app.conf.update(
         "quantdinger.tasks.market_state_tick": {"queue": "maintenance"},
         "quantdinger.tasks.market_state_execute": {"queue": "ai"},
         "quantdinger.tasks.fast_analysis": {"queue": "ai"},
+        "quantdinger.tasks.indicator_translation": {"queue": "ai"},
         "quantdinger.tasks.agent_job": {"queue": "jobs"},
         "quantdinger.tasks.expire_agent_jobs": {"queue": "maintenance"},
         "quantdinger.tasks.reflection": {"queue": "maintenance"},

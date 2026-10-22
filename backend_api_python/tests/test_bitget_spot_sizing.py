@@ -9,9 +9,9 @@ from app.services.live_trading.spot_sizing import (
 )
 
 
-def test_fetch_spot_last_price_uses_bitget_last_pr():
+def test_fetch_spot_last_price_uses_bitget_last_price():
     client = MagicMock()
-    client.get_ticker.return_value = {"lastPr": "0.12345", "symbol": "DOGEUSDT"}
+    client.get_ticker.return_value = {"lastPrice": "0.12345", "symbol": "DOGEUSDT"}
     assert fetch_spot_last_price(client, symbol="DOGE/USDT") == 0.12345
 
 
@@ -39,8 +39,9 @@ def test_bitget_market_buy_normalizes_quote_not_base(mock_meta):
         mock_req.return_value = {"data": {"orderId": "1"}}
         client.place_market_order(symbol="DOGE/USDT", side="buy", size=12.3456)
     body = mock_req.call_args.kwargs.get("json_body") or mock_req.call_args[1].get("json_body")
-    assert body["size"] == "12.34"
+    assert body["qty"] == "12.34"
     assert body["side"] == "buy"
+    assert body["category"] == "SPOT"
 
 
 @patch.object(BitgetSpotClient, "get_symbol_meta")
@@ -58,8 +59,9 @@ def test_bitget_market_sell_normalizes_base(mock_meta):
         mock_req.return_value = {"data": {"orderId": "2"}}
         client.place_market_order(symbol="DOGE/USDT", side="sell", size=10.99)
     body = mock_req.call_args.kwargs.get("json_body") or mock_req.call_args[1].get("json_body")
-    assert body["size"] == "10.9"
+    assert body["qty"] == "10.9"
     assert body["side"] == "sell"
+    assert body["category"] == "SPOT"
 
 
 @patch.object(BitgetSpotClient, "get_symbol_meta")
@@ -78,7 +80,7 @@ def test_bitget_limit_order_normalizes_price_precision(mock_meta):
         mock_req.return_value = {"data": {"orderId": "3"}}
         client.place_limit_order(symbol="ETH/USDT", side="buy", size=0.013333333, price=1200.009)
     body = mock_req.call_args.kwargs.get("json_body") or mock_req.call_args[1].get("json_body")
-    assert body["size"] == "0.013333"
+    assert body["qty"] == "0.013333"
     assert body["price"] == "1200"
     assert body["side"] == "buy"
 
@@ -93,7 +95,7 @@ def test_quantity_sized_market_buy_converts_to_bitget_quote_value(mock_meta):
     }
     client = BitgetSpotClient(api_key="k", secret_key="s", passphrase="p")
     with (
-        patch.object(client, "get_ticker", return_value={"lastPr": "100"}),
+        patch.object(client, "get_ticker", return_value={"lastPrice": "100"}),
         patch.object(client, "_signed_request", return_value={"data": {"orderId": "4"}}) as request,
     ):
         place_order_from_signal(
@@ -106,4 +108,45 @@ def test_quantity_sized_market_buy_converts_to_bitget_quote_value(mock_meta):
         )
 
     body = request.call_args.kwargs["json_body"]
-    assert body["size"] == "10"
+    assert body["qty"] == "10"
+
+
+def test_wait_for_fill_fetches_terminal_order_state_before_returning_fills():
+    client = BitgetSpotClient(api_key="k", secret_key="s", passphrase="p")
+    client.get_fills = MagicMock(
+        return_value={
+            "data": [
+                {
+                    "side": "buy",
+                    "size": "0.95",
+                    "priceAvg": "105",
+                    "fee": "-0.00095",
+                    "feeCoin": "SOL",
+                }
+            ]
+        }
+    )
+    client.get_order = MagicMock(
+        return_value={
+            "data": {
+                "orderId": "spot-1",
+                "status": "filled",
+                "baseVolume": "0.95",
+                "priceAvg": "105",
+            }
+        }
+    )
+
+    result = client.wait_for_fill(
+        symbol="SOL/USDT",
+        order_id="spot-1",
+        max_wait_sec=0,
+    )
+
+    assert result["filled"] == 0.95
+    assert result["state"] == "filled"
+    client.get_order.assert_called_once_with(
+        symbol="SOL/USDT",
+        order_id="spot-1",
+        client_order_id="",
+    )

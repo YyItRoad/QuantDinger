@@ -59,13 +59,13 @@ class SearchParameter:
 @dataclass(frozen=True)
 class EvolutionConfig:
     method: str = "tpe"
-    trials: int = 12
+    trials: int = 64
     folds: int = 4
     train_ratio: float = 0.7
     blind_ratio: float = 0.15
     embargo_bars: int = 1
     seed: int = 42
-    auto_prune: bool = True
+    auto_prune: bool = False
     monte_carlo_paths: int = 1000
     block_size: int = 5
     cost_multipliers: tuple[float, ...] = (1.0, 1.5, 2.0, 3.0)
@@ -78,12 +78,19 @@ class EvolutionConfig:
         method = str(values.get("method") or "tpe").lower()
         if method not in SUPPORTED_METHODS:
             raise ValueError("strategyEvolution.methodUnsupported")
+        default_trials = 64
+        minimum_trials = 24 if method == "tpe" else 1
+        maximum_trials = 5000 if method == "grid" else 500
+        trials = max(
+            minimum_trials,
+            min(maximum_trials, int(values.get("trials") or default_trials)),
+        )
         weights = _normalized_weights(values.get("weights"))
         multiplier_values = values.get("costMultipliers") or (1, 1.5, 2, 3)
         multipliers = tuple(sorted({max(0.0, min(10.0, float(item))) for item in multiplier_values}))
         return cls(
             method=method,
-            trials=max(4, min(300, int(values.get("trials") or 12))),
+            trials=trials,
             folds=max(4, min(10, int(values.get("folds") or 4))),
             train_ratio=max(0.55, min(0.85, float(values.get("trainRatio") or 0.7))),
             blind_ratio=max(0.0, min(0.3, float(values.get("blindRatio") if values.get("blindRatio") is not None else 0.15))),
@@ -101,7 +108,7 @@ class EvolutionConfig:
                 ),
             ),
             seed=int(values.get("seed") or 42),
-            auto_prune=bool(values.get("autoPrune", True)),
+            auto_prune=bool(values.get("autoPrune", False)),
             monte_carlo_paths=max(100, min(5000, int(values.get("monteCarloPaths") or 1000))),
             block_size=max(1, min(60, int(values.get("blockSize") or 5))),
             cost_multipliers=multipliers or (1.0,),

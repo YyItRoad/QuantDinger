@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from app.services.grid.config import GridBotConfig
 from app.services.grid.levels import generate_cells, generate_levels

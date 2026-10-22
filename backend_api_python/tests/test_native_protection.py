@@ -47,6 +47,7 @@ def test_binance_uses_current_algo_order_endpoint():
     from app.services.live_trading.binance import BinanceFuturesClient
 
     client = BinanceFuturesClient.__new__(BinanceFuturesClient)
+    client.broker_id = BinanceFuturesClient._BROKER_ID
     client.get_dual_side_position = lambda: False
     calls = []
     client._signed_request = lambda method, path, params: calls.append((method, path, params)) or {"algoId": 1}
@@ -57,6 +58,39 @@ def test_binance_uses_current_algo_order_endpoint():
     assert {call[2]["type"] for call in calls} == {"STOP_MARKET", "TAKE_PROFIT_MARKET"}
     assert all(call[1] == "/fapi/v1/algoOrder" for call in calls)
     assert all(call[2]["reduceOnly"] == "true" for call in calls)
+    assert all(
+        call[2]["clientAlgoId"].startswith(f"x-{BinanceFuturesClient._BROKER_ID}")
+        for call in calls
+    )
+    assert len({call[2]["clientAlgoId"] for call in calls}) == 2
+
+
+def test_binance_trailing_protection_keeps_partner_attribution():
+    from app.services.live_trading.binance import BinanceFuturesClient
+
+    client = BinanceFuturesClient.__new__(BinanceFuturesClient)
+    client.broker_id = BinanceFuturesClient._BROKER_ID
+    client.get_dual_side_position = lambda: False
+    calls = []
+    client._signed_request = (
+        lambda method, path, params: calls.append((method, path, params)) or {"algoId": 1}
+    )
+
+    result = place_native_protection_orders(
+        client,
+        _request(
+            stop_loss_price=0,
+            take_profit_price=0,
+            trailing_stop_pct=0.02,
+            trailing_activation_pct=0.01,
+        ),
+    )
+
+    assert len(result) == 1
+    assert calls[0][2]["type"] == "TRAILING_STOP_MARKET"
+    assert calls[0][2]["clientAlgoId"].startswith(
+        f"x-{BinanceFuturesClient._BROKER_ID}"
+    )
 
 
 def test_okx_hedge_protection_uses_position_side_without_net_only_reduce_flag():
@@ -107,10 +141,13 @@ def test_bitget_keeps_channel_header_path_and_position_side():
 
     place_native_protection_orders(client, _request())
 
-    assert len(calls) == 2
-    assert all(path == "/api/v2/mix/order/place-tpsl-order" for path, _ in calls)
-    assert all(body["holdSide"] == "long" for _, body in calls)
-    assert {body["planType"] for _, body in calls} == {"loss_plan", "profit_plan"}
+    assert len(calls) == 1
+    path, body = calls[0]
+    assert path == "/api/v3/trade/place-strategy-order"
+    assert body["posSide"] == "long"
+    assert body["reduceOnly"] == "yes"
+    assert body["stopLoss"] == "90.0"
+    assert body["takeProfit"] == "120.0"
 
 
 def test_bybit_conditional_orders_are_reduce_only():

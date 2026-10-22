@@ -5,7 +5,8 @@ All market data adapters should normalize K-line rows to the shape defined here.
 """
 from abc import ABC, abstractmethod
 from typing import Dict, List, Any, Optional
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+import time
 
 from app.utils.logger import get_logger
 
@@ -23,6 +24,48 @@ TIMEFRAME_SECONDS = {
     '1D': 86400,
     '1W': 604800
 }
+
+
+def timeframe_seconds(value: Any) -> int:
+    """Return the fixed duration for a supported candle interval."""
+    raw = str(value or "").strip()
+    aliases = {
+        "1h": 3600,
+        "2h": 7200,
+        "4h": 14400,
+        "6h": 21600,
+        "8h": 28800,
+        "12h": 43200,
+        "1d": 86400,
+        "1w": 604800,
+    }
+    seconds = TIMEFRAME_SECONDS.get(raw)
+    if seconds is None:
+        seconds = aliases.get(raw.lower())
+    if seconds is None:
+        raise ValueError("marketData.unsupportedTimeframe")
+    return int(seconds)
+
+
+def filter_closed_klines(
+    klines: List[Dict[str, Any]],
+    timeframe: str,
+    *,
+    reference_time: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Return unique candles whose full interval has elapsed."""
+    interval = timeframe_seconds(timeframe)
+    cutoff = int(reference_time if reference_time is not None else time.time())
+    by_timestamp: Dict[int, Dict[str, Any]] = {}
+    for row in klines or []:
+        try:
+            opened_at = int(row.get("time"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        opened_at_seconds = opened_at // 1000 if opened_at > 10_000_000_000 else opened_at
+        if opened_at_seconds + interval <= cutoff:
+            by_timestamp[opened_at] = row
+    return [by_timestamp[timestamp] for timestamp in sorted(by_timestamp)]
 
 
 class BaseDataSource(ABC):

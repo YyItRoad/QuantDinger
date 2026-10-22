@@ -251,7 +251,7 @@ def test_source_adapter_binds_identity_and_uppercase_timeframe(setup, monkeypatc
     service.get_kline.assert_called_once_with(
         market='Crypto', symbol='BTC/USDT', timeframe='1H', limit=181,
         exchange_id='binance', market_type='swap', instrument_id='BTCUSDT')
-    with pytest.raises(ValueError, match='行情来源身份'):
+    with pytest.raises(ValueError, match=r'^marketData\.unsupportedCryptoExchange$'):
         fetch_bars({**task, 'exchange_id': 'unknown'}, 181)
 
 

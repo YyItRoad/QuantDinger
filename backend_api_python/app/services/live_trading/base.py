@@ -14,9 +14,11 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
+from urllib.parse import urlsplit
 
 import requests
 
+from app.services.live_trading.http_transport import get_exchange_http_session
 from app.utils.resource_guard import (
     ResourceExhaustedError,
     assert_fd_available,
@@ -86,6 +88,45 @@ def _get_requests_verify() -> Union[bool, str]:
     return _requests_verify_value
 
 
+# Cached proxy setting for all live-trading REST calls.
+_proxies_value: Optional[Dict[str, str]] = None
+_proxies_resolved = False
+
+
+def _get_proxies() -> Optional[Dict[str, str]]:
+    """
+    Resolve the proxy for live-trading REST calls.
+
+    ``PROXY_URL`` is documented (see ``env.example``) to cover "market data,
+    exchange and broker API traffic": CCXT already honors it for market data,
+    but plain ``requests`` does not understand that variable, so without this
+    bridge live-trading REST calls bypass the configured proxy entirely.
+
+    - ``PROXY_URL`` set (http(s):// or socks5(h)://, PySocks is in requirements):
+      returned explicitly and takes precedence over environment proxies.
+    - ``PROXY_URL`` unset: returns ``None`` — nothing is forced and standard
+      ``HTTPS_PROXY`` / ``HTTP_PROXY`` / ``ALL_PROXY`` environment variables
+      still apply through ``requests`` trust_env (with ``NO_PROXY`` bypasses).
+    """
+    global _proxies_value, _proxies_resolved
+    if not _proxies_resolved:
+        proxy_url = (os.environ.get("PROXY_URL") or "").strip()
+        if proxy_url:
+            _proxies_value = {"http": proxy_url, "https": proxy_url}
+        _proxies_resolved = True
+    return _proxies_value
+
+
+def cancel_all_algo_orders_enabled() -> bool:
+    """Whether this process may cancel *all* algo orders on an OKX instrument/account.
+
+    Off by default. Those sweeps cannot tell this system's protective orders from a
+    user's manually placed TP/SL, so enabling them can silently remove live
+    protection; the scoped cancel that unblocks error 59669 does not need this.
+    """
+    return str(os.environ.get("OKX_CANCEL_ALL_ALGO_ORDERS", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass
 class LiveOrderResult:
     exchange_id: str
@@ -130,12 +171,17 @@ class BaseRestClient:
         data: Optional[Any] = None,
     ) -> Tuple[int, Dict[str, Any], str]:
         url = self._url(path)
+        method_name = str(method or "GET").upper()
+        started_at = time.perf_counter()
+        status_code: Optional[int] = None
+        session = None
         try:
             assert_fd_available("exchange REST")
             request_headers = dict(headers or {})
-            request_headers.setdefault("Connection", "close")
-            with requests.request(
-                    method=str(method or "GET").upper(),
+            session = getattr(self, "_request_session", None) or get_exchange_http_session()
+            request_headers.setdefault("Connection", "keep-alive")
+            with session.request(
+                    method=method_name,
                     url=url,
                     params=params or None,
                     json=json_body if json_body is not None else None,
@@ -143,14 +189,16 @@ class BaseRestClient:
                     headers=request_headers or None,
                     timeout=self.timeout_sec,
                     verify=_get_requests_verify(),
+                    proxies=_get_proxies(),
             ) as resp:
+                status_code = int(resp.status_code)
                 text = resp.text or ""
                 parsed: Dict[str, Any] = {}
                 try:
                     parsed = resp.json() if text else {}
                 except Exception:
                     parsed = {"raw_text": text[:2000]}
-                return int(resp.status_code), parsed, text
+                return status_code, parsed, text
         except UnicodeEncodeError as e:
             # requests/http.client requires header values to be latin-1 encodable.
             # This usually means user pasted API keys/passphrases containing non-ASCII characters,
@@ -180,6 +228,27 @@ class BaseRestClient:
             raise
         except ResourceExhaustedError as e:
             raise LiveTradingError(f"Resource exhausted: too many open files while calling exchange REST: {e}") from e
+        finally:
+            if session is not None:
+                try:
+                    session.cookies.clear()
+                except Exception:
+                    pass
+            elapsed_ms = int(max(0.0, time.perf_counter() - started_at) * 1000)
+            try:
+                threshold_ms = max(1, int(os.environ.get("LIVE_TRADING_HTTP_SLOW_MS", "750")))
+            except (TypeError, ValueError):
+                threshold_ms = 750
+            target = urlsplit(url)
+            safe_target = f"{target.netloc}{target.path}"
+            log = logger.info if elapsed_ms >= threshold_ms else logger.debug
+            log(
+                "Exchange REST timing method=%s target=%s status=%s elapsed_ms=%s pooled=true",
+                method_name,
+                safe_target,
+                status_code if status_code is not None else "error",
+                elapsed_ms,
+            )
 
     @staticmethod
     def _now_ms() -> int:

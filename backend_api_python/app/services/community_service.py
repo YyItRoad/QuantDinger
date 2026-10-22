@@ -788,6 +788,7 @@ class CommunityService:
         indicator_id: int,
         user_id: int = None,
         accept_language: str = 'en-US',
+        is_admin: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """获取指标详情。
 
@@ -825,7 +826,7 @@ class CommunityService:
                 
                 is_owner = row['user_id'] == user_id
                 is_approved = row.get('review_status') in (None, '', 'approved')
-                if not is_owner and (not row['publish_to_community'] or not is_approved):
+                if not is_owner and not is_admin and (not row['publish_to_community'] or not is_approved):
                     cur.close()
                     return None
                 
@@ -1149,9 +1150,11 @@ class CommunityService:
                 is_vip, _ = self.billing.get_user_vip_status(buyer_id)
                 billing_enabled = self.billing.is_billing_enabled()
 
-                # Global billing-off means marketplace delivery remains available
-                # but no buyer/seller credit movement is recorded.
-                effective_price = 0.0 if ((not billing_enabled) or (vip_free and is_vip)) else price
+                if pricing_type != 'free' and not billing_enabled:
+                    cur.close()
+                    return False, 'billing_disabled', {}
+
+                effective_price = 0.0 if (vip_free and is_vip) else price
                 gross_price, platform_fee, seller_amount, fee_rate = _split_marketplace_amounts(effective_price)
                 
                 if seller_id == buyer_id:

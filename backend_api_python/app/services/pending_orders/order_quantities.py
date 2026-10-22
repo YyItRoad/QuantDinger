@@ -156,3 +156,40 @@ def reconciled_queue_status(
     if str(exchange_status or "").strip().lower() == "cancelled":
         return "cancelled", executable
     return "sent", executable
+
+
+def quick_trade_status_quantity(
+    client: Any,
+    *,
+    row: Dict[str, Any],
+    metadata: Dict[str, Any],
+    market_type: str,
+    exchange_config: Dict[str, Any],
+) -> tuple[float, bool]:
+    """Resolve the base quantity used to classify a Quick Trade order status."""
+    changed = False
+    requested = max(0.0, float(metadata.get("requested_base_qty") or 0.0))
+    executable = max(0.0, float(metadata.get("executable_base_qty") or 0.0))
+    mode = str(metadata.get("status_quantity_mode") or "").strip().lower()
+    if (
+        not mode
+        and market_type == "spot"
+        and str(row.get("side") or "").strip().lower() == "buy"
+        and str(metadata.get("amount_semantics") or "").strip().lower() == "quote_notional"
+    ):
+        mode = "exchange_status"
+        metadata["status_quantity_mode"] = mode
+        changed = True
+    if executable <= 0 and requested > 0:
+        executable = exchange_executable_base_quantity(
+            client,
+            exchange_id=str(row.get("exchange_id") or exchange_config.get("exchange_id") or ""),
+            symbol=str(row.get("symbol") or ""),
+            market_type=market_type,
+            requested=requested,
+            exchange_config=exchange_config,
+        )
+        if executable > 0:
+            metadata["executable_base_qty"] = executable
+            changed = True
+    return (0.0 if mode == "exchange_status" else executable or requested), changed

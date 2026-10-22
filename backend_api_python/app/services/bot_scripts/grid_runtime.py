@@ -4,7 +4,6 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional
 
-import numpy as np
 import pandas as pd
 
 from app.utils.logger import get_logger
@@ -298,7 +297,6 @@ def prepare_bot_market_guards(
     _apply_defaults(params)
     px = float(price or 0.0)
     hi = float(high or px)
-    lo = float(low or px)
     if px <= 0:
         return params
 

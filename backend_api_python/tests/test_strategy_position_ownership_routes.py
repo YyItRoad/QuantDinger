@@ -59,6 +59,42 @@ def test_ownership_repair_rejects_non_numeric_strategy_id(app):
     assert response.get_json()["msg"] == "positionOwnership.invalidRepairRequest"
 
 
+def test_fresh_ownership_snapshot_updates_account_mirror(monkeypatch):
+    from app.services.live_trading import account_positions
+
+    calls = []
+    monkeypatch.setattr(
+        account_positions,
+        "sync_account_positions",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    routes._persist_fresh_account_mirror(
+        rows=[{
+            "symbol": "BTC/USDT",
+            "side": "short",
+            "size": 0.0053,
+            "entry_price": 82085.7,
+            "mark_price": 82110.7,
+            "inst_id": "BTC_USDT",
+        }],
+        user_id=7,
+        credential_id=33,
+        exchange_id="gate",
+        market_type="swap",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["user_id"] == 7
+    assert calls[0]["credential_id"] == 33
+    assert calls[0]["exchange_id"] == "gate"
+    assert calls[0]["market_type"] == "swap"
+    assert len(calls[0]["legs"]) == 1
+    assert calls[0]["legs"][0].symbol == "BTC/USDT"
+    assert calls[0]["legs"][0].side == "short"
+    assert calls[0]["legs"][0].size == pytest.approx(0.0053)
+
+
 @pytest.mark.parametrize(
     ("market_type", "exchange_id", "available"),
     [

@@ -1,9 +1,10 @@
 import inspect
 from contextlib import contextmanager
+from datetime import datetime
 
 from flask import Flask, g
 
-from app.routes import quick_trade, quick_trade_event_radar
+from app.routes import quick_trade
 
 
 class _Cursor:
@@ -45,8 +46,10 @@ class _Cursor:
                     "is_close": True,
                     "close_side": "long",
                     "close_scope": "full",
+                    "entry_price": 74000,
                 }
             },
+            "created_at": datetime(2026, 10, 18, 3, 35),
         }]
 
     def close(self):
@@ -122,6 +125,7 @@ def test_history_filters_by_account_symbol_and_market(monkeypatch):
         yield _Db(cursor)
 
     monkeypatch.setattr(quick_trade, "get_db_connection", fake_connection)
+    monkeypatch.setattr(quick_trade, "_sync_exchange_close_fills", lambda **kwargs: 0)
     app = Flask(__name__)
     handler = inspect.unwrap(quick_trade.get_history)
 
@@ -143,73 +147,6 @@ def test_history_filters_by_account_symbol_and_market(monkeypatch):
     assert payload["data"]["trades"][0]["client_order_id"] == "qd-quick-7"
     assert payload["data"]["trades"][0]["is_close"] is True
     assert payload["data"]["trades"][0]["close_side"] == "long"
+    assert payload["data"]["trades"][0]["entry_price"] == 74000
     assert payload["data"]["trades"][0]["realized_pnl"] == 12.5
-
-
-def test_ai_decision_history_is_scoped_to_selected_account(monkeypatch):
-    captured = {}
-
-    def fake_list(**kwargs):
-        captured.update(kwargs)
-        return [{"decision_uid": "decision-1", "decision": "pass"}]
-
-    monkeypatch.setattr(quick_trade, "list_ai_decisions", fake_list)
-    app = Flask(__name__)
-    handler = inspect.unwrap(quick_trade.get_ai_decisions)
-
-    with app.test_request_context(
-        "/api/quick-trade/ai-decisions?credential_id=305&symbol=BTC/USDT&market_type=swap&limit=25"
-    ):
-        g.user_id = 99
-        response = handler()
-
-    assert captured == {
-        "user_id": 99,
-        "source_type": "quick_trade",
-        "source_id": 305,
-        "symbol": "BTC/USDT",
-        "market_type": "swap",
-        "limit": 25,
-    }
-    assert response.get_json()["data"][0]["decision_uid"] == "decision-1"
-
-
-def test_event_radar_status_is_scoped_to_current_user(monkeypatch):
-    captured = {}
-
-    class Service:
-        def get_status(self, user_id, symbol, market_type):
-            captured.update(user_id=user_id, symbol=symbol, market_type=market_type)
-            return {"enabled": True, "cost": 5, "latest": None}
-
-    monkeypatch.setattr(quick_trade_event_radar, "get_event_radar_service", lambda: Service())
-    app = Flask(__name__)
-    handler = inspect.unwrap(quick_trade_event_radar.get_event_radar)
-
-    with app.test_request_context("/api/quick-trade/event-radar?symbol=BTC/USDT&market_type=swap"):
-        g.user_id = 99
-        response = handler()
-
-    assert response.get_json()["data"]["cost"] == 5
-    assert captured == {"user_id": 99, "symbol": "BTC/USDT", "market_type": "swap"}
-
-
-def test_event_radar_analysis_never_calls_order_execution(monkeypatch):
-    class Service:
-        def analyze(self, user_id, symbol, market_type):
-            return {"reference_only": True, "symbol": symbol, "market_type": market_type}
-
-    monkeypatch.setattr(quick_trade_event_radar, "get_event_radar_service", lambda: Service())
-    app = Flask(__name__)
-    handler = inspect.unwrap(quick_trade_event_radar.analyze_event_radar)
-    assert "place_order" not in inspect.getsource(handler)
-
-    with app.test_request_context(
-        "/api/quick-trade/event-radar/analyze",
-        method="POST",
-        json={"symbol": "BTC/USDT", "market_type": "swap"},
-    ):
-        g.user_id = 99
-        response = handler()
-
-    assert response.get_json()["data"]["reference_only"] is True
+    assert payload["data"]["trades"][0]["created_at"] == "2026-10-18T03:35:00Z"

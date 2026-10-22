@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -16,7 +17,8 @@ from app.services.backtest_execution import (
     parse_rate,
 )
 from app.services.backtest_limits import BacktestRangeLimitError
-from app.services.billing_service import get_billing_service
+from app.services.billing_service import BillingError, get_billing_service
+from app.services.backtest_jobs import run_backtest_job
 from app.services.script_source import get_script_source_service
 from app.services.strategy_v2 import (
     FactorResearchRepository,
@@ -25,6 +27,7 @@ from app.services.strategy_v2 import (
 )
 from app.utils.auth import login_required
 from app.utils.logger import get_logger
+from app.utils import agent_jobs
 
 
 logger = get_logger(__name__)
@@ -168,6 +171,112 @@ def _refund_backtest_credits(billing: Any, user_id: int, charge: dict[str, Any])
         logger.error("Backtest credit refund failed for user %s: %s", user_id, message)
 
 
+def _job_payload(prepared: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "code": prepared["code"],
+        "startDate": prepared["start_date"].strftime("%Y-%m-%d"),
+        "endDate": prepared["end_date"].strftime("%Y-%m-%d"),
+        "initialCapital": prepared["initial_capital"],
+        "commission": prepared["commission"],
+        "slippage": prepared["slippage"],
+        "leverageEnabled": prepared["leverage_enabled"],
+        "leverage": prepared["leverage"],
+        "params": prepared["params"],
+        "instrumentRulesSnapshotId": prepared["instrument_rules_snapshot_id"],
+        "persist": bool(payload.get("persist", True)),
+        "sourceId": prepared["source_id"],
+        "strategyId": prepared["strategy_id"],
+        "strategyName": prepared["strategy_name"],
+        "__user_id": prepared["user_id"],
+        "__source_id": prepared["source_id"],
+        "__strategy_id": prepared["strategy_id"],
+        "__strategy_name": prepared["strategy_name"],
+    }
+
+
+def _public_backtest_job(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    result = row.get("result")
+    progress = row.get("progress")
+    if isinstance(result, str):
+        result = json.loads(result)
+    if isinstance(progress, str):
+        progress = json.loads(progress)
+    request_payload = row.get("request") or {}
+    if isinstance(request_payload, str):
+        request_payload = json.loads(request_payload)
+    billing = row.get("billing")
+    if billing is None and isinstance(request_payload, dict):
+        billing = request_payload.get("__billing")
+    return {
+        "jobId": row.get("job_id"),
+        "status": row.get("status"),
+        "progress": progress or {},
+        "result": result,
+        "error": row.get("error"),
+        "billing": billing,
+        "createdAt": row.get("created_at"),
+        "startedAt": row.get("started_at"),
+        "finishedAt": row.get("finished_at"),
+    }
+
+
+@backtest_center_blp.route("/jobs", methods=["POST"])
+@login_required
+def create_strategy_backtest_job():
+    try:
+        payload = request.get_json(silent=True) or {}
+        prepared = _prepare_run(payload, int(g.user_id))
+        receipt = agent_jobs.submit_job(
+            user_id=int(g.user_id),
+            agent_token_id=None,
+            kind="backtest",
+            request_payload=_job_payload(prepared, payload),
+            runner=run_backtest_job,
+        )
+        return jsonify({
+            "code": 1,
+            "msg": "common.success",
+            "data": _public_backtest_job(receipt),
+        }), 202
+    except BillingError as exc:
+        return jsonify({
+            "code": 0,
+            "msg": exc.code,
+            "data": {"error_type": exc.code, **exc.details},
+        }), exc.status
+    except (BacktestRangeLimitError, ValueError) as exc:
+        data = exc.details if isinstance(exc, BacktestRangeLimitError) else None
+        return jsonify({"code": 0, "msg": str(exc), "data": data}), 400
+    except Exception:
+        logger.exception("Strategy backtest job submission failed")
+        return jsonify({"code": 0, "msg": "strategyV2.backtest.runFailed", "data": None}), 500
+
+
+@backtest_center_blp.route("/jobs/<job_id>", methods=["GET"])
+@login_required
+def get_strategy_backtest_job(job_id: str):
+    row = agent_jobs.get_job(job_id, user_id=int(g.user_id))
+    if not row or row.get("kind") != "backtest":
+        return jsonify({"code": 0, "msg": "strategyV2.backtest.jobNotFound", "data": None}), 404
+    return jsonify({"code": 1, "msg": "common.success", "data": _public_backtest_job(row)})
+
+
+@backtest_center_blp.route("/jobs/<job_id>/cancel", methods=["POST"])
+@login_required
+def cancel_strategy_backtest_job(job_id: str):
+    row = agent_jobs.get_job(job_id, user_id=int(g.user_id))
+    if not row or row.get("kind") != "backtest":
+        return jsonify({"code": 0, "msg": "strategyV2.backtest.jobNotFound", "data": None}), 404
+    cancelled = agent_jobs.cancel_job(job_id, user_id=int(g.user_id))
+    return jsonify({
+        "code": 1,
+        "msg": "common.success",
+        "data": _public_backtest_job(cancelled or row),
+    })
+
+
 @backtest_center_blp.route("/run", methods=["POST"])
 @login_required
 def run_strategy_backtest():
@@ -220,6 +329,14 @@ def run_strategy_backtest():
 
 
 @backtest_center_blp.route("/factor-research", methods=["POST"])
+@backtest_center_blp.doc(
+    summary="Run factor research with built-in or TA-Lib 0.8.1 factors",
+    description=(
+        "Accepts factorId and optional factorParams. TA-Lib factors use the "
+        "talib: namespace and support explicit output selection for "
+        "multi-output functions."
+    ),
+)
 @login_required
 def run_factor_research():
     try:
@@ -232,6 +349,7 @@ def run_factor_research():
         if not start_raw or not end_raw:
             raise ValueError("strategyV2.dateRangeRequired")
         factor_id = str(payload.get("factorId") or "momentum_20")
+        factor_params = payload.get("factorParams") if isinstance(payload.get("factorParams"), dict) else {}
         groups = max(2, min(10, int(payload.get("groups") or 5)))
         holding_period = max(1, int(payload.get("holdingPeriod") or 5))
         commission = parse_rate(payload.get("commission"), default=default_commission_if_missing(None))
@@ -243,6 +361,7 @@ def run_factor_research():
             start_date=datetime.strptime(start_raw, "%Y-%m-%d"),
             end_date=datetime.strptime(end_raw, "%Y-%m-%d").replace(hour=23, minute=59, second=59),
             factor_id=factor_id,
+            factor_params=factor_params,
             groups=groups,
             holding_period=holding_period,
             commission=commission,

@@ -11,7 +11,7 @@ def native_row(exchange, oid):
     if exchange == "bybit":
         return {**common, "qty": "0.004", "cumExecQty": "0.001", "orderStatus": "PartiallyFilled", "orderType": "Limit"}
     if exchange == "bitget":
-        return {**common, "size": "0.004", "baseVolume": "0.001", "status": "partially_filled", "orderType": "limit"}
+        return {**common, "qty": "0.004", "cumExecQty": "0.001", "orderStatus": "partially_filled", "orderType": "limit"}
     if exchange == "binance":
         return {**common, "origQty": "0.004", "executedQty": "0.001", "status": "PARTIALLY_FILLED", "type": "LIMIT"}
     if exchange == "okx":
@@ -23,7 +23,7 @@ def payload(exchange, rows, cursor="", market_type="spot"):
     if exchange == "bybit":
         return {"result": {"list": rows, "nextPageCursor": cursor}}
     if exchange == "bitget":
-        return {"data": rows if market_type == "spot" else {"entrustedList": rows, "endId": cursor}}
+        return {"data": {"list": rows, "cursor": cursor}}
     if exchange == "okx":
         return {"data": rows}
     return rows
@@ -64,21 +64,21 @@ def test_bitget_reads_more_than_one_hundred_orders(market_type):
     client = MagicMock()
     client._signed_request.side_effect = [
         payload("bitget", [native_row("bitget", n) for n in range(200, 100, -1)], "101", market_type),
-        payload("bitget", [native_row("bitget", 100)], "100", market_type),
+        payload("bitget", [native_row("bitget", 100)], "", market_type),
     ]
     orders = fetch_exchange_open_orders(client, exchange_id="bitget", market_type=market_type)
     assert len(orders) == 101
     params = client._signed_request.call_args.kwargs["params"]
-    assert params["idLessThan"] == "101"
-    assert params.get("productType") == ("USDT-FUTURES" if market_type == "swap" else None)
+    assert params["cursor"] == "101"
+    assert params["category"] == ("USDT-FUTURES" if market_type == "swap" else "SPOT")
 
 
 def test_bitget_spot_open_order_price_is_price_avg_not_execution_price():
     client = MagicMock()
     row = native_row("bitget", 1)
     row.pop("price")
-    row.update(priceAvg="3474.75", basePrice="0")
-    client._signed_request.return_value = {"data": [row]}
+    row.update(avgPrice="3474.75")
+    client._signed_request.return_value = {"data": {"list": [row], "cursor": ""}}
     order = fetch_exchange_open_orders(client, exchange_id="bitget", market_type="spot")[0]
     assert order["price"] == 3474.75
 
@@ -87,14 +87,14 @@ def test_bitget_null_pending_order_list_is_empty_success():
     client = MagicMock()
     client._signed_request.return_value = {
         "code": "00000",
-        "data": {"entrustedList": None, "endId": None},
+        "data": {"list": [], "cursor": ""},
     }
     assert fetch_exchange_open_orders(client, exchange_id="bitget", market_type="swap") == []
 
 
 def test_bitget_missing_pending_order_list_is_rejected():
     client = MagicMock()
-    client._signed_request.return_value = {"code": "00000", "data": {"endId": None}}
+    client._signed_request.return_value = {"code": "00000", "data": {"cursor": ""}}
     with pytest.raises(LiveTradingError, match="invalid_open_orders_response"):
         fetch_exchange_open_orders(client, exchange_id="bitget", market_type="swap")
 
@@ -104,7 +104,7 @@ def test_bitget_missing_pending_order_list_is_rejected():
     ("okx", "/api/v5/trade/orders-pending", "instId", "ETH-USDT-SWAP"),
     ("gate", "/api/v4/futures/usdt/orders", "contract", "ETH_USDT"),
     ("bybit", "/v5/order/realtime", "symbol", "ETHUSDT"),
-    ("bitget", "/api/v2/mix/order/orders-pending", "symbol", "ETHUSDT"),
+    ("bitget", "/api/v3/trade/unfilled-orders", "symbol", "ETHUSDT"),
 ])
 def test_swap_routes_use_contract_endpoints_and_strip_settlement_suffix(exchange, path, symbol_key, native_symbol):
     client = MagicMock()

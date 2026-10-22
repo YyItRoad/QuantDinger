@@ -130,7 +130,7 @@ class StrategyV2StorageCompatibilityTests(unittest.TestCase):
         self.assertEqual(compact["equityCurve"][0], rows[0])
         self.assertEqual(compact["equityCurve"][-1], rows[-1])
 
-    def test_trade_review_snapshots_keep_up_to_three_thousand_candles(self):
+    def test_trade_review_snapshots_keep_up_to_fifteen_hundred_candles(self):
         candles = [{"time": index, "close": index} for index in range(3500)]
 
         compact = _compact_backtest_result({
@@ -143,9 +143,9 @@ class StrategyV2StorageCompatibilityTests(unittest.TestCase):
         })
 
         snapshot = compact["reviewCandles"]["Crypto:ETH/USDT@swap"]
-        self.assertEqual(len(snapshot["candles"]), 3000)
-        self.assertEqual(snapshot["candles"][0], candles[500])
-        self.assertEqual(compact["historyStorage"]["limits"]["reviewCandlesPerSymbol"], 3000)
+        self.assertEqual(len(snapshot["candles"]), 1500)
+        self.assertEqual(snapshot["candles"][0], candles[2000])
+        self.assertEqual(compact["historyStorage"]["limits"]["reviewCandlesPerSymbol"], 1500)
 
     def test_history_curve_preserves_drawdown_peak_and_trough_after_recovery(self):
         rows = [{"time": index, "value": 100.0} for index in range(10000)]

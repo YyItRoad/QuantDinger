@@ -13,9 +13,8 @@ from __future__ import annotations
 import json
 import re
 import time
-import traceback
 from typing import Any, Dict, List
-from flask import Response, g, jsonify, request
+from flask import Response, g, jsonify, request, send_from_directory
 from app.openapi.blueprint import HumanBlueprint as Blueprint
 
 from app.utils.db import get_db_connection
@@ -44,18 +43,16 @@ from app.services.indicator_versions import (
     restore_version as restore_indicator_code_version,
 )
 from app.utils.auth import login_required
-from app.services.indicator_params import IndicatorParamsParser
 from app.services.indicator_validation import (
     generate_mock_df,
     indicator_debug_summary,
     merge_indicator_params,
     validate_indicator_code,
 )
-from app.services.indicator_translator import (
-    translate_indicator,
-    SUPPORTED_LANGUAGES as _SUPPORTED_LANGUAGES_FOR_TRANSLATE,
+from app.services.indicator_preview_storage import (
+    preview_image_root,
+    save_indicator_preview,
 )
-import requests
 
 logger = get_logger(__name__)
 
@@ -402,6 +399,10 @@ def save_indicator():
         name = (data.get("name") or "").strip()
         description = (data.get("description") or "").strip()
         publish_to_community = 1 if data.get("publishToCommunity") or data.get("publish_to_community") else 0
+        if publish_to_community:
+            from app.services.settings.capabilities import is_marketplace_enabled
+            if not is_marketplace_enabled():
+                return jsonify({"code": 0, "msg": "marketplace_disabled"}), 404
         allow_empty_draft = (
             data.get("allowEmptyDraft") is True
             or data.get("allow_empty_draft") is True
@@ -413,7 +414,9 @@ def save_indicator():
             price = float(data.get("price") or 0)
         except Exception:
             price = 0.0
-        preview_image = (data.get("previewImage") or data.get("preview_image") or "").strip()
+        preview_image_supplied = "previewImage" in data or "preview_image" in data
+        requested_preview_image = (data.get("previewImage") or data.get("preview_image") or "").strip()
+        preview_image = requested_preview_image
         asset_type = "indicator"
 
         is_empty_code = not str(code).strip()
@@ -452,11 +455,13 @@ def save_indicator():
             existing_is_buy = 0
             if indicator_id and indicator_id > 0:
                 cur.execute(
-                    "SELECT is_buy FROM qd_indicator_codes WHERE id = ? AND user_id = ?",
+                    "SELECT is_buy, preview_image FROM qd_indicator_codes WHERE id = ? AND user_id = ?",
                     (indicator_id, user_id),
                 )
                 _existing_buy = cur.fetchone()
                 existing_is_buy = int((_existing_buy or {}).get("is_buy") or 0)
+                if not preview_image_supplied:
+                    preview_image = str((_existing_buy or {}).get("preview_image") or "")
                 if publish_to_community and existing_is_buy == 1:
                     cur.close()
                     return jsonify(
@@ -551,38 +556,17 @@ def save_indicator():
                     or request.headers.get('Accept-Language', '').split(',')[0].strip()
                     or 'en-US'
                 )
-                if ui_lang not in _SUPPORTED_LANGUAGES_FOR_TRANSLATE:
-                    ui_lang = None  # let translator auto-detect
+                from app.tasks.indicator_translation import translate_indicator_metadata
 
-                name_i18n, desc_i18n, src_lang = translate_indicator(
-                    name=name,
-                    description=description,
-                    source_language=ui_lang,
+                translate_indicator_metadata.delay(
+                    indicator_id,
+                    user_id,
+                    name,
+                    description,
+                    ui_lang,
                 )
-
-                with get_db_connection() as db:
-                    cur = db.cursor()
-                    cur.execute(
-                        """
-                        UPDATE qd_indicator_codes
-                        SET source_language = ?,
-                            name_i18n = ?,
-                            description_i18n = ?,
-                            updated_at = NOW()
-                        WHERE id = ? AND user_id = ?
-                        """,
-                        (
-                            src_lang,
-                            json.dumps(name_i18n, ensure_ascii=False) if name_i18n else None,
-                            json.dumps(desc_i18n, ensure_ascii=False) if desc_i18n else None,
-                            indicator_id,
-                            user_id,
-                        ),
-                    )
-                    db.commit()
-                    cur.close()
             except Exception as _e:
-                logger.warning(f"save_indicator: i18n translation skipped: {_e}")
+                logger.warning(f"save_indicator: i18n translation enqueue skipped: {_e}")
 
         return jsonify({"code": 1, "msg": "success", "data": {"id": indicator_id, "userid": user_id}})
     except Exception as e:
@@ -752,6 +736,68 @@ def preview_indicator_chart():
         return jsonify({"code": 0, "msg": str(exc), "data": None}), 500
 
 
+@indicator_blp.route("/preview-image", methods=["POST"])
+@login_required
+def upload_indicator_preview_image():
+    """Store a generated chart image for an indicator owned by the current user."""
+    try:
+        data = request.get_json() or {}
+        indicator_id = int(data.get("indicatorId") or data.get("indicator_id") or 0)
+        if indicator_id <= 0:
+            return jsonify({"code": 0, "msg": "indicatorId is required", "data": None}), 400
+
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                SELECT id
+                FROM qd_indicator_codes
+                WHERE id = ? AND user_id = ? AND (is_buy IS NULL OR is_buy = 0)
+                LIMIT 1
+                """,
+                (indicator_id, int(g.user_id)),
+            )
+            if not cur.fetchone():
+                cur.close()
+                return jsonify({"code": 0, "msg": "indicator not found", "data": None}), 404
+
+            image_url, _ = save_indicator_preview(
+                user_id=int(g.user_id),
+                indicator_id=indicator_id,
+                image_data=data.get("imageData") or data.get("image_data") or "",
+            )
+            cur.execute(
+                """
+                UPDATE qd_indicator_codes
+                SET preview_image = ?, updated_at = NOW()
+                WHERE id = ? AND user_id = ?
+                """,
+                (image_url, indicator_id, int(g.user_id)),
+            )
+            db.commit()
+            cur.close()
+
+        return jsonify({"code": 1, "msg": "success", "data": {"preview_image": image_url}})
+    except ValueError as exc:
+        return jsonify({"code": 0, "msg": str(exc), "data": None}), 400
+    except Exception as exc:
+        logger.error(f"upload_indicator_preview_image failed: {str(exc)}", exc_info=True)
+        return jsonify({"code": 0, "msg": str(exc), "data": None}), 500
+
+
+@indicator_blp.route("/preview-images/<filename>", methods=["GET"])
+def get_indicator_preview_image(filename: str):
+    """Serve generated marketplace preview images."""
+    response = send_from_directory(
+        str(preview_image_root()),
+        filename,
+        conditional=True,
+        max_age=86400,
+    )
+    response.headers["Cache-Control"] = "public, max-age=86400, immutable"
+    return response
+
+
 @indicator_blp.route("/aiWorkspace/<int:indicator_id>", methods=["GET"])
 @login_required
 def indicator_ai_workspace(indicator_id: int):
@@ -878,6 +924,7 @@ def ai_generate():
         discussion_system = """You are QuantDinger's indicator-code reviewer.
 Answer the user's question about the currently open indicator. Use the same language as the user.
 Explain concrete logic, parameters, plots, visual signals, edge cases, and limitations from the supplied source.
+Recognize native `line`, `bar`, `circle`, and `cloud` plots. A cloud uses per-bar `upper` and `lower` boundaries, optional per-bar color, restrained opacity, and `None` gaps; it is the preferred representation for a continuous band instead of repeated zone or box layers.
 Never claim that code was changed. Do not return a full replacement script and do not create a code candidate.
 When useful, cite short variable or function names from the source, but keep the answer concise and readable.
 Lead with the conclusion. By default use 4-8 short points and stay under 700 Chinese characters or 350 English words; only go deeper when the user explicitly asks for a detailed walkthrough.
@@ -1188,6 +1235,15 @@ If the question actually requests a code modification, explain what should chang
 
         code_text, debug_info, edit_plan = _generate_final_code()
 
+        # Signal the template fallback to the client; otherwise a failed model
+        # call is indistinguishable from a successful template-shaped answer.
+        if edit_plan.get("error"):
+            debug_info["generation_error"] = str(edit_plan["error"])[:500]
+        if edit_plan.get("model"):
+            debug_info["generation_model"] = edit_plan["model"]
+            debug_info["generation_provider"] = edit_plan.get("provider") or ""
+            debug_info["generation_model_fallback"] = bool(edit_plan.get("model_fallback"))
+
         if workspace_context:
             validation = _validate_indicator_code_internal(code_text)
             validation["edit_plan"] = edit_plan
@@ -1238,6 +1294,7 @@ def code_quality_hints():
 
     Request body:
         code (required): Indicator source code
+        runtimeCheck (optional): Run the sandboxed smoke execution. Defaults to true.
 
     Returns hints with severity, code, and params. Static analysis catches
     structural issues; a sandboxed dry-run surfaces runtime errors before backtest.
@@ -1246,13 +1303,14 @@ def code_quality_hints():
 
     data = request.get_json() or {}
     code_str = data.get("code") or ""
+    runtime_check = data.get("runtimeCheck", True) is not False
     hints = analyze_indicator_code_quality(code_str)
 
     # If static analysis already found a deterministic error, skip the dry-run.
     # We do NOT skip on warn/info because those don't block execution and the user
     # benefits from the runtime check finishing the picture.
     has_static_error = any(h.get("severity") == "error" for h in hints)
-    if not has_static_error and code_str.strip():
+    if runtime_check and not has_static_error and code_str.strip():
         try:
             validation = _validate_indicator_code_internal(code_str)
         except Exception as e:  # never let the smoke run break the endpoint

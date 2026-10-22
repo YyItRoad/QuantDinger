@@ -7,7 +7,6 @@
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
 import os
-import time
 import requests
 import yfinance as yf
 

@@ -74,14 +74,15 @@ def test_four_hour_year_requests_enough_bars(monkeypatch):
     monkeypatch.setattr(market_data.DataSourceFactory, "get_kline", get_kline)
     monkeypatch.setattr(market_data._cache, "get", lambda _key: None)
 
-    market_data.load_strategy_frame(
-        "Crypto",
-        "BTC/USDT",
-        "4h",
-        datetime(2025, 1, 1),
-        datetime(2026, 1, 1),
-        market_type="spot",
-    )
+    with pytest.raises(MarketDataUnavailableError):
+        market_data.load_strategy_frame(
+            "Crypto",
+            "BTC/USDT",
+            "4h",
+            datetime(2025, 1, 1),
+            datetime(2026, 1, 1),
+            market_type="spot",
+        )
 
     assert captured["limit"] > 2400
 

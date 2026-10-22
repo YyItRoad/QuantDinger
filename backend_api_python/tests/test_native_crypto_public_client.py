@@ -92,6 +92,28 @@ def test_okx_historical_window_uses_forward_compatible_after_cursor(monkeypatch)
     assert captured["params"]["after"] == 1700000000000
 
 
+def test_bitget_historical_window_is_capped_at_ninety_days(monkeypatch):
+    client = NativeCryptoPublicClient("bitget", "swap")
+    captured = {}
+
+    def fake_get(url, params):
+        captured.update(url=url, params=params)
+        return {"code": "00000", "data": []}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    start = 1700000000000
+    client.fetch_ohlcv("BTC/USDT", "1d", since=start, limit=1000)
+
+    assert captured["url"].endswith("/api/v3/market/candles")
+    assert captured["params"]["endTime"] - start <= 90 * 24 * 60 * 60 * 1000
+
+
+def test_bitget_weekly_is_resampled_instead_of_sent_as_unsupported_native_interval():
+    client = NativeCryptoPublicClient("bitget", "swap")
+
+    assert "1w" not in client.timeframes
+
+
 def test_market_catalog_exposes_perpetual_alias(monkeypatch):
     client = NativeCryptoPublicClient("binance", "swap")
     monkeypatch.setattr(
@@ -156,12 +178,12 @@ def test_bitget_ticker_parses_change_rate_without_unbound_state(market_type, mon
             "data": [
                 {
                     "symbol": "BTCUSDT",
-                    "lastPr": "101.25",
-                    "open": "100",
-                    "high24h": "103",
-                    "low24h": "99",
-                    "change24h": "0.0125",
-                    "quoteVolume": "2500000",
+                    "lastPrice": "101.25",
+                    "openPrice24h": "100",
+                    "highPrice24h": "103",
+                    "lowPrice24h": "99",
+                    "price24hPcnt": "0.0125",
+                    "turnover24h": "2500000",
                     "ts": "1700000000123",
                 }
             ],

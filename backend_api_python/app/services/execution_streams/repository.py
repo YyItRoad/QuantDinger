@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 
 from app.services.execution_streams.events import ExecutionEvent, normalize_symbol

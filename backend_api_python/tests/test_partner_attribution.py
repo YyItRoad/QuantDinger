@@ -97,6 +97,17 @@ def test_all_exchange_request_attribution_is_built_in():
             },
             market_type="swap",
         ),
+        "bitget_reality": create_client(
+            {
+                "exchange_id": "bitget",
+                "api_key": "key",
+                "secret_key": "secret",
+                "passphrase": "pass",
+                "api_family": "reality",
+                "instrument_id": "AAPLUSDT",
+            },
+            market_type="spot",
+        ),
         "bybit": create_client(
             {"exchange_id": "bybit", "api_key": "key", "secret_key": "secret"},
             market_type="swap",
@@ -104,6 +115,19 @@ def test_all_exchange_request_attribution_is_built_in():
         "gate": create_client(
             {"exchange_id": "gate", "api_key": "key", "secret_key": "secret"},
             market_type="spot",
+        ),
+        "gate_stock": create_client(
+            {
+                "exchange_id": "gate",
+                "api_key": "key",
+                "secret_key": "secret",
+                "api_family": "stock",
+            },
+            market_type="spot",
+        ),
+        "gate_swap": create_client(
+            {"exchange_id": "gate", "api_key": "key", "secret_key": "secret"},
+            market_type="swap",
         ),
         "htx": create_client(
             {"exchange_id": "htx", "api_key": "key", "secret_key": "secret"},
@@ -125,13 +149,18 @@ def test_all_exchange_request_attribution_is_built_in():
     assert captured["json_body"]["tag"] == profile.okx_broker_code
 
     assert clients["bitget_spot"]._headers(
-        "1", "sign", "/api/v2/spot/trade/place-order"
+        "1", "sign", "/api/v3/trade/place-order"
     )["X-CHANNEL-API-CODE"] == profile.bitget_channel_api_code
     assert clients["bitget_swap"]._headers(
-        "1", "sign", "/api/v2/mix/order/place-order"
+        "1", "sign", "/api/v3/trade/place-order"
+    )["X-CHANNEL-API-CODE"] == profile.bitget_channel_api_code
+    assert clients["bitget_reality"]._headers(
+        "1", "sign", "/api/v3/trade/place-reality-order"
     )["X-CHANNEL-API-CODE"] == profile.bitget_channel_api_code
     assert clients["bybit"]._headers("1", "sign")["Referer"] == profile.bybit_referer
     assert clients["gate"]._headers("1", "sign")["X-Gate-Channel-Id"] == profile.gate_channel_id
+    assert clients["gate_stock"]._headers("1", "sign")["X-Gate-Channel-Id"] == profile.gate_channel_id
+    assert clients["gate_swap"]._headers("1", "sign")["X-Gate-Channel-Id"] == profile.gate_channel_id
     assert clients["htx"]._format_spot_client_order_id("order").startswith(profile.htx_broker_id)
     assert clients["htx"].spot_source == profile.htx_spot_source
 
