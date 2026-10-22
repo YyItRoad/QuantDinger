@@ -166,6 +166,110 @@ def test_allowlists_apply_to_actual_instrument_not_only_client_symbol(client, bo
     boundary["service"].create_strategy.assert_not_called()
 
 
+@pytest.mark.parametrize("leg_patch, inst_id", [
+    ({"symbol": "ETH/USDT", "inst_id": "ETHUSDT"}, "ETHUSDT"),
+    ({}, "NONEXISTENT"),
+    ({"market_type": "spot"}, "BTCUSDT"),
+])
+def test_conflicting_target_rejected_even_with_wildcard_permissions(client, boundary, leg_patch, inst_id):
+    boundary["snapshot"].return_value["swap_positions"][0].update(leg_patch)
+    response = adopt(client, {**BODY, "inst_id": inst_id})
+    assert response.status_code == 400 and "does not match" in response.json["message"]
+    boundary["service"].create_strategy.assert_not_called()
+    boundary["upsert"].assert_not_called()
+    boundary["enqueue"].assert_not_called()
+
+
+def test_canonical_symbol_and_instrument_can_refer_to_same_whole_leg(client, boundary):
+    response = adopt(client, {**BODY, "symbol": "btcusdt", "inst_id": " BTCUSDT "})
+    assert response.status_code == 201 and response.json["data"]["symbol"] == "BTC/USDT"
+
+
+def test_pre_creation_outage_replays_error_but_allows_safe_new_key(client, boundary):
+    boundary["snapshot"].side_effect = RuntimeError("temporary exchange outage")
+    first = adopt(client)
+    assert first.status_code == 500 and first.json["retriable"] is True
+    assert first.json["details"] == {"creation_attempted": False, "retry_safe": True,
+        "retry_action": "refresh_positions_then_retry_with_new_key"}
+    boundary["snapshot"].side_effect = None
+    replay = adopt(client)
+    assert replay.status_code == 500 and replay.json == first.json
+    assert replay.headers["Idempotent-Replayed"] == "true"
+    assert adopt(client, {**BODY, "name": "changed"}).status_code == 409
+    assert boundary["snapshot"].call_count == 1
+    boundary["service"].create_strategy.assert_not_called()
+    recovered = adopt(client, headers={**HEADERS, "Idempotency-Key": "safe-retry"})
+    assert recovered.status_code == 201 and recovered.json["data"]["status"] == "starting"
+    boundary["service"].create_strategy.assert_called_once()
+    boundary["enqueue"].assert_called_once()
+
+
+def test_lease_busy_before_creation_can_retry_without_duplicate(client, boundary, monkeypatch):
+    available = management._management_leg_lock
+
+    @contextmanager
+    def busy(**kwargs):
+        raise management.PositionManagementError("busy", status_code=409)
+        yield
+
+    monkeypatch.setattr(management, "_management_leg_lock", busy)
+    first = adopt(client)
+    assert first.status_code == 409 and first.json["details"]["retry_safe"] is True
+    boundary["service"].create_strategy.assert_not_called()
+    monkeypatch.setattr(management, "_management_leg_lock", available)
+    assert adopt(client, headers={**HEADERS, "Idempotency-Key": "lease-retry"}).status_code == 201
+    boundary["service"].create_strategy.assert_called_once()
+
+
+def test_unknown_failure_after_create_attempt_never_advertises_safe_retry(client, boundary):
+    def possibly_committed(payload):
+        boundary["listing"].return_value = [dict(symbol="BTC/USDT", side="long", market_type="swap")]
+        raise RuntimeError("connection lost after strategy commit")
+
+    boundary["service"].create_strategy.side_effect = possibly_committed
+    first = adopt(client)
+    assert first.status_code == 500 and first.json["retriable"] is False
+    assert first.json["details"] == {"creation_attempted": True, "retry_safe": False,
+                                      "retry_action": "inspect_existing_strategy"}
+    assert adopt(client).json == first.json
+    # Even an accidental fresh request cannot duplicate an assigned leg.
+    assert adopt(client, headers={**HEADERS, "Idempotency-Key": "unsafe-retry"}).status_code == 409
+    boundary["service"].create_strategy.assert_called_once()
+    boundary["upsert"].assert_not_called()
+    boundary["enqueue"].assert_not_called()
+
+
+def test_start_failure_replay_does_not_create_or_restart_another_instance(client, boundary):
+    boundary["service"].update_strategy_status.return_value = False
+    first = adopt(client)
+    assert first.status_code == 201 and first.json["data"]["status"] == "stopped"
+    assert first.json["data"]["warning"]
+    boundary["service"].update_strategy_status.return_value = True
+    assert adopt(client).json == first.json
+    boundary["listing"].return_value = [dict(symbol="BTC/USDT", side="long", market_type="swap")]
+    assert adopt(client, headers={**HEADERS, "Idempotency-Key": "start-retry"}).status_code == 409
+    boundary["service"].create_strategy.assert_called_once()
+    boundary["service"].update_strategy_status.assert_called_once()
+    boundary["enqueue"].assert_not_called()
+
+
+def test_other_write_endpoint_keeps_original_failure_replay(client, boundary, monkeypatch):
+    from app.routes.agent_v1 import strategies
+    create = Mock(side_effect=RuntimeError("temporary workspace failure"))
+    monkeypatch.setattr(strategies._strategy_service, "create_strategy", create)
+    headers = {**HEADERS, "Idempotency-Key": "other-write"}
+    body = {"name": "Stopped configuration"}
+    first = client.post("/api/agent/v1/strategies", json=body, headers=headers)
+    assert first.status_code == 500
+    create.side_effect = None
+    create.return_value = 44
+    replay = client.post("/api/agent/v1/strategies", json=body, headers=headers)
+    assert replay.status_code == 500 and replay.json == first.json
+    assert replay.headers["Idempotent-Replayed"] == "true"
+    assert "retry_safe" not in replay.text
+    create.assert_called_once()
+
+
 def test_allowlists_filter_reads_and_reject_adoption(client, boundary):
     boundary["token"]["instruments"] = "ETH/USDT"
     boundary["listing"].return_value = [{"symbol": "BTC/USDT"}, {"symbol": "ETH/USDT"}]
@@ -241,6 +345,16 @@ def test_mcp_to_gateway_keeps_whole_workflow_and_http_errors(client, boundary, m
                       transport=httpx.MockTransport(respond)) as transport:
         monkeypatch.setattr(server, "_client", transport)
         args = {**BODY, "credential_id": 2, "idempotency_key": "mcp-adopt"}
+        boundary["snapshot"].side_effect = RuntimeError("temporary snapshot failure")
+        failed = asyncio.run(server.mcp.call_tool("adopt_position_management", args))
+        assert failed.isError
+        failure_body = json.loads(failed.content[0].text)["body"]
+        assert failure_body["details"]["retry_safe"] is True
+        assert failure_body["details"]["retry_action"] == "refresh_positions_then_retry_with_new_key"
+        boundary["snapshot"].side_effect = None
+        replay = asyncio.run(server.mcp.call_tool("adopt_position_management", args))
+        assert replay.isError and boundary["snapshot"].call_count == 1
+        args["idempotency_key"] = "mcp-safe-retry"
         result = asyncio.run(server.mcp.call_tool("adopt_position_management", args))
         assert json.loads(result[0].text)["size"] == "7"
         boundary["token"]["scopes"] = "R"

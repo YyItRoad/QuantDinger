@@ -129,6 +129,10 @@ def test_position_management_contract_uses_w_and_existing_strategy_fields():
     }
     assert schema["properties"]["confirm_adoption"]["enum"] == [True]
     assert any(p["name"] == "Idempotency-Key" and p["required"] for p in operation["parameters"])
+    failure_schema = spec["components"]["schemas"]["PositionManagementAdoptionError"]
+    details = failure_schema["allOf"][1]["properties"]["details"]
+    assert set(details["required"]) == {"creation_attempted", "retry_safe", "retry_action"}
+    assert "Same-key calls replay the error" in operation["responses"]["500"]["description"]
 
 
 def test_builtin_skill_registry_does_not_advertise_retired_experiments():

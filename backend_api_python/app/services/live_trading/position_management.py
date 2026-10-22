@@ -421,8 +421,6 @@ def create_managed_strategy(
         market_type=_market_type(position_ref.get("market_type")),
     )
     fresh = _fresh_position(snapshot, position_ref)
-    if authorize_position is not None:
-        authorize_position(fresh)
     fresh = _complete_fresh_position_price(
         user_id=uid,
         credential_id=credential_id,
@@ -441,6 +439,7 @@ def create_managed_strategy(
             position_ref=position_ref,
             strategy_payload=strategy_payload,
             fresh=fresh,
+            authorize_position=authorize_position,
         )
 
 
@@ -451,6 +450,7 @@ def _create_managed_strategy_locked(
     position_ref: Dict[str, Any],
     strategy_payload: Dict[str, Any],
     fresh: Dict[str, Any],
+    authorize_position: Callable[[Dict[str, Any]], None] | None = None,
 ) -> Dict[str, Any]:
     uid = int(user_id)
     existing = list_managed_positions_for_account(user_id=uid, credential_id=credential_id)
@@ -509,6 +509,10 @@ def _create_managed_strategy_locked(
         },
     })
     service = get_strategy_service()
+    # Run optional adapter policy immediately before the first mutation. Web
+    # callers omit it; Agent callers can conservatively track creation attempts.
+    if authorize_position is not None:
+        authorize_position(fresh)
     strategy_id = int(service.create_strategy(payload))
     strategy = service.get_strategy(strategy_id, user_id=uid) or {}
     if not _strategy_monitors_position(strategy, symbol, market_type, side):

@@ -22,6 +22,44 @@
       }
     },
     "schemas": {
+      "PositionManagementAdoptionError": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Error"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "details": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "creation_attempted",
+                  "retry_safe",
+                  "retry_action"
+                ],
+                "properties": {
+                  "creation_attempted": {
+                    "type": "boolean"
+                  },
+                  "retry_safe": {
+                    "type": "boolean",
+                    "description": "True only before the first strategy creation attempt. Never infer this from a transport timeout."
+                  },
+                  "retry_action": {
+                    "type": "string",
+                    "enum": [
+                      "correct_request",
+                      "refresh_positions_then_retry_with_new_key",
+                      "inspect_existing_strategy"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
       "PositionManagementAdoptionRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -54,7 +92,8 @@
             ]
           },
           "inst_id": {
-            "type": "string"
+            "type": "string",
+            "description": "When provided, must match the actual position together with the canonical symbol, side and market type; conflicts are rejected before creation."
           },
           "source_id": {
             "type": "integer",
@@ -549,7 +588,7 @@
     "/api/agent/v1/trading/accounts/{credential_id}/managed-strategies": {
       "post": {
         "summary": "Adopt a whole existing position using the Web management workflow",
-        "description": "W authorizes whole-position registration and automatic strategy startup, including future live strategy exits. OAuth requires quantdinger.write. Does not submit a new entry, cancel orders or consume quick-order notional quota. T, paper_only and AGENT_LIVE_TRADING_ENABLED are quick-order controls and do not gate this explicitly confirmed W operation. Current exchange size, prices and leverage are authoritative; existing manual holdings are included. Pending fills are not guaranteed future allocation. Existing managed legs are rejected; exact idempotent retries replay the original result. Source, direction, stop, account and strategy checks use the shared Web service.",
+        "description": "W authorizes whole-position registration and automatic strategy startup, including future live strategy exits. OAuth requires quantdinger.write. Does not submit a new entry, cancel orders or consume quick-order notional quota. T, paper_only and AGENT_LIVE_TRADING_ENABLED are quick-order controls and do not gate this explicitly confirmed W operation. Current exchange size, prices and leverage are authoritative; existing manual holdings are included. Pending fills are not guaranteed future allocation. Existing managed legs are rejected; exact idempotent retries replay the original result, including completed errors. Conflicting position identifiers are rejected before creation. Only an explicit details.retry_safe=true establishes no strategy creation attempt; refresh assignments before retrying with a new key. Otherwise inspect the existing strategy. A transport timeout alone never proves a new key is safe. Source, direction, stop, account and strategy checks use the shared Web service.",
         "security": [
           {
             "AgentToken": []
@@ -629,7 +668,8 @@
             "description": "Rate limit exceeded"
           },
           "500": {
-            "description": "Adoption failed; inspect existing assignments before recovery"
+            "description": "Adoption failed. details.creation_attempted=false and retry_safe=true allow a new key only after refreshing assignments; otherwise inspect the existing strategy. Same-key calls replay the error.",
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PositionManagementAdoptionError"}}}
           },
           "503": {
             "description": "Idempotency service unavailable; request not executed"

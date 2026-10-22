@@ -43,7 +43,12 @@ def register_position_management_tools(server):
         position or cancels pending orders. Existing manual holdings are included.
         After startup, the selected source controls subsequent strategy orders.
         Use params.fixed_stop_price for a fixed stop; source parameters and
-        timeframe rules remain authoritative. Retry with the same idempotency_key.
+        timeframe rules remain authoritative. Reuse the key to recover an unknown
+        outcome; completed errors also replay unchanged. Only a Gateway error
+        explicitly reporting details.retry_safe=true permits a new key after
+        refreshing assignments. Otherwise inspect the existing strategy first.
+        Transport timeouts alone never prove a new key is safe. Startup warnings
+        require recovery of the returned instance, not another adoption.
         starting is not proof of a running Worker; inspect returned warnings.
         W authorizes adoption and startup, independent of T quick-order controls.
         """

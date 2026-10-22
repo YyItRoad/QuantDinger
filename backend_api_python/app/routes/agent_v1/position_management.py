@@ -74,6 +74,35 @@ def _authorize_position(position: dict) -> None:
         raise management.PositionManagementError("Position is outside token allowlists", status_code=403)
 
 
+def _authorize_target(actual: dict, requested: dict) -> None:
+    _authorize_position(actual)
+    if (
+        normalize_strategy_symbol(actual.get("symbol")) != requested["symbol"]
+        or str(actual.get("side") or "").strip().lower() != requested["side"]
+        or str(actual.get("market_type") or "").strip().lower() != requested["market_type"]
+        or (str(requested.get("inst_id") or "").strip()
+            and str(actual.get("inst_id") or "").strip() != requested["inst_id"].strip())
+    ):
+        raise management.PositionManagementError(
+            "Fresh position does not match the requested symbol, side, market or instrument", status_code=400,
+        )
+
+
+def _adoption_error(status: int, message: str, *, creation_attempted: bool):
+    # Keep shared Gateway idempotency unchanged, including error replay. Only
+    # failures before create_strategy are known safe for a new operation key.
+    retry_safe = not creation_attempted
+    if creation_attempted:
+        retry_action = "inspect_existing_strategy"
+    elif status == 409 or status >= 500:
+        retry_action = "refresh_positions_then_retry_with_new_key"
+    else:
+        retry_action = "correct_request"
+    return error(status, message, http=status, retriable=retry_safe and status >= 500,
+                 details={"creation_attempted": creation_attempted, "retry_safe": retry_safe,
+                          "retry_action": retry_action})
+
+
 @agent_v1_bp.route("/trading/accounts/<int:credential_id>/managed-positions", methods=["GET"])
 @agent_required(SCOPE_R)
 def list_managed_positions(credential_id: int):
@@ -100,19 +129,27 @@ def adopt_position_management(credential_id: int):
         position, strategy = _adoption_payload(body, credential_id)
     except (ValueError, TypeError, OverflowError) as exc:
         return error(400, str(exc), http=400)
+    creation_attempted = False
+
+    def authorize_target(actual):
+        nonlocal creation_attempted
+        _authorize_target(actual, position)
+        creation_attempted = True
+
     try:
         if not _credential(credential_id):
             return error(404, "Trading account not found", http=404)
         _authorize_position(position)
         result = management.create_managed_strategy(
             user_id=current_user_id(), position_ref=position, strategy_payload=strategy,
-            authorize_position=_authorize_position,
+            authorize_position=authorize_target,
         )
         return envelope(result, message="position-management-created", status=201)
     except management.PositionManagementError as exc:
-        return error(exc.status_code, str(exc), http=exc.status_code)
+        return _adoption_error(exc.status_code, str(exc), creation_attempted=creation_attempted)
     except ValueError as exc:
-        return error(400, str(exc), http=400)
+        return _adoption_error(400, str(exc), creation_attempted=creation_attempted)
     except Exception:
         logger.exception("Agent position adoption failed")
-        return error(500, "Failed to adopt position management", http=500)
+        return _adoption_error(500, "Failed to adopt position management",
+                               creation_attempted=creation_attempted)
