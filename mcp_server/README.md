@@ -133,4 +133,4 @@ schema migration or additional permission is needed. See
 
 ## 计划模块
 
-新增 18 个计划读写工具，使用 R/W 权限保存草稿、修订、分析引用、信号判断、已有交易关联和复盘，不调用交易执行。详情见[计划管理](../docs/agent/TRADE_PLAN_MANAGEMENT_CN.md)。数字货币实盘快捷开仓需填写 `entry_reason`，沿用开仓原因保存市场状态和想法；现货卖出、平仓和撤单规则不变。
+新增 18 个计划读写工具，使用 R/W 权限保存草稿、修订、分析引用、信号判断、已有交易关联和复盘，不调用交易执行。详情见[计划管理](../docs/trading/计划/MCP接入.md)。数字货币实盘快捷开仓需填写 `entry_reason`，沿用开仓原因保存市场状态和想法；现货卖出、平仓和撤单规则不变。

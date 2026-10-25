@@ -82,6 +82,8 @@ ownership or shared state.
 
 ### Getting started and product guides
 
+- [计划模块（中文）](trading/计划/README.md)
+
 - [First run with QuantDinger](getting-started/FIRST_RUN.md)
 - [AI Research guide](product/AI_RESEARCH.md)
 - [From strategy idea to operation](product/STRATEGY_WORKFLOW.md)
