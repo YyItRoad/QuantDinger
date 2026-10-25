@@ -20,6 +20,8 @@ from . import __version__
 from .notifications import register_notification_tools
 from .position_management_history import register_position_management_history_tools
 from .position_management import register_position_management_tools
+from .trade_plans import register_trade_plan_tools
+from .trade_plan_contract import TOOL_ROUTES as TRADE_PLAN_ROUTES
 from .oauth_auth import apply_oauth_upstream_token, build_hybrid_http_auth
 from .tool_contract import register_tool
 from .security import (
@@ -98,6 +100,8 @@ MCP_TOOL_NAMES = (
     "run_signal_alert",
     "send_notification",
 )
+
+MCP_TOOL_NAMES += tuple(TRADE_PLAN_ROUTES)
 
 
 def _env(name: str, required: bool = True) -> str:
@@ -418,8 +422,9 @@ def place_quick_order(
     idempotency_key: str = "",
     confirm_order: bool = False,
     confirm_live_trading: bool = False,
+    entry_reason: str = "",
 ) -> Any:
-    """Place a quick order through Agent Gateway (requires T scope)."""
+    """Place a quick order (T scope). Live entries require market state and idea in entry_reason (max 500 chars)."""
     if not confirm_order:
         return {
             "error": True,
@@ -464,6 +469,8 @@ def place_quick_order(
         payload["tp_price"] = float(tp_price)
     if sl_price is not None:
         payload["sl_price"] = float(sl_price)
+    if entry_reason:
+        payload["entry_reason"] = entry_reason
     headers = _idempotency_headers(idempotency_key)
     return _post("/api/agent/v1/quick-trade/orders", json=payload, headers=headers)
 
@@ -1048,6 +1055,7 @@ list_managed_positions, adopt_position_management = register_position_management
 
 
 send_notification = register_notification_tools(sys.modules[__name__])
+globals().update(register_trade_plan_tools(sys.modules[__name__]))
 
 
 @_tool

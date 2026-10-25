@@ -108,6 +108,9 @@ class BillingOrderRequestSchema(Schema):
 
 
 class QuickTradeOrderRequestSchema(Schema):
+    entry_reason = fields.String(load_default="", validate=validate.Length(max=500), metadata={
+        "description": "Market state and opening idea in one text field. Required for spot buys and swap entries; spot sells are exits."
+    })
     credential_id = fields.Integer(required=True, validate=validate.Range(min=1))
     symbol = fields.String(required=True, validate=validate.Length(min=1, max=64))
     side = fields.String(required=True, validate=validate.OneOf(("buy", "sell")))

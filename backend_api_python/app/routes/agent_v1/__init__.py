@@ -45,6 +45,7 @@ def register(app) -> None:
     from . import jobs as jobs_module  # noqa: F401
     from . import indicators  # noqa: F401
     from . import research  # noqa: F401
+    from app.trade_plans import agent_routes  # noqa: F401
     from . import trading_data  # noqa: F401
     from . import position_management_history  # noqa: F401
     from . import position_management  # noqa: F401

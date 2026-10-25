@@ -602,11 +602,13 @@ def _complete_idempotency(token_id: int, key: str, response) -> None:
         cur.close()
 
 
-def agent_required(scope: str = SCOPE_R):
+def agent_required(scope: str = SCOPE_R, *, domain_idempotency: bool = False):
     """Flask decorator: enforce token auth + scope + rate limit + audit.
 
     Sets `g.agent_token` (dict) and `g.agent_user_id` (int) for downstream code.
     Logs every call (success or denial) into qd_agent_audit.
+    domain_idempotency requires atomic domain request hashes and replay guards;
+    authentication, scopes, rate limits, header validation and audit still apply.
     """
     if scope not in ALL_SCOPES:
         raise ValueError(f"invalid scope: {scope}")
@@ -677,8 +679,9 @@ def agent_required(scope: str = SCOPE_R):
                     response = make_response(*_err(400, "Idempotency-Key exceeds 120 characters", status=400))
                     _audit(scope, 400, response.get_json(silent=True), int((time.time() - t0) * 1000))
                     return _with_rate_headers(response, rate)
+                # Transactional domains supply atomic replay with current visibility checks.
                 try:
-                    idem_state, idem_row = _reserve_idempotency(row["id"], idempotency_key)
+                    idem_state, idem_row = ("domain", None) if domain_idempotency else _reserve_idempotency(row["id"], idempotency_key)
                 except Exception as exc:
                     logger.error("agent_auth: idempotency reservation failed: %s", exc, exc_info=True)
                     response = make_response(*_err(
@@ -723,7 +726,7 @@ def agent_required(scope: str = SCOPE_R):
 
             status_code = int(response.status_code)
             payload_summary: Any = response.get_json(silent=True)
-            if needs_idempotency and idempotency_key:
+            if needs_idempotency and idempotency_key and not domain_idempotency:
                 try:
                     _complete_idempotency(row["id"], idempotency_key, response)
                 except Exception as exc:

@@ -120,6 +120,9 @@ def register_human_blueprints(api: Api) -> None:
     for blp, prefix in registrations:
         api.register_blueprint(blp, url_prefix=prefix)
 
+    from app.trade_plans import register_human_api
+    register_human_api(api)
+
     # Ensure tag metadata exists in the spec.
     opts = api.spec.options.setdefault("tags", [])
     existing = {t["name"] for t in opts if isinstance(t, dict) and "name" in t}

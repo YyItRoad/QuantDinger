@@ -9,6 +9,8 @@ from .oauth_auth import authorize_tool_call, tool_security_meta
 from .security import redact_secrets
 
 
+from .trade_plan_contract import PLAN_WRITE_TOOLS
+
 WRITE_TOOLS = {
     "adopt_position_management": True,
     "send_notification": False,
@@ -34,6 +36,8 @@ WRITE_TOOLS = {
     "run_signal_alert": True,
 }
 
+WRITE_TOOLS.update(dict.fromkeys(PLAN_WRITE_TOOLS, False))
+
 
 def register_tool(server):
     def register(fn):
@@ -41,7 +45,7 @@ def register_tool(server):
         annotations = ToolAnnotations(
             readOnlyHint=not writable,
             destructiveHint=WRITE_TOOLS.get(fn.__name__, False),
-            idempotentHint=not writable,
+            idempotentHint=not writable or fn.__name__ in PLAN_WRITE_TOOLS,
             openWorldHint=True,
         )
 

@@ -706,6 +706,9 @@ MCP_AGENT_TOOLS = MCP_AGENT_TOOLS + tuple(
     for name, route in _MCP_EXTENSION_ROUTES.items()
 )
 
+from app.trade_plans.tool_metadata import tool_definitions as _trade_plan_tools
+MCP_AGENT_TOOLS += _trade_plan_tools(ToolDefinition)
+
 
 def list_tools(language: str = "zh-CN") -> list[dict[str, Any]]:
     items = sorted((tool for tool in (*TOOLS, *MCP_AGENT_TOOLS) if tool.enabled), key=lambda tool: (-tool.priority, tool.id))

@@ -484,7 +484,12 @@
           "leverage": { "type": "integer", "default": 1 },
           "margin_mode": { "type": "string", "enum": ["cross","isolated"], "nullable": true },
           "tp_price": { "type": "number", "nullable": true, "description": "Optional take-profit price for live orders" },
-          "sl_price": { "type": "number", "nullable": true, "description": "Optional stop-loss price for live orders" }
+          "sl_price": { "type": "number", "nullable": true, "description": "Optional stop-loss price for live orders" },
+          "entry_reason": {
+            "type": "string",
+            "maxLength": 500,
+            "description": "Current market state and opening idea in one plain-text field. Required for live spot buys and swap entries. Spot sells are exits; paper orders may omit it."
+          }
         }
       },
       "StrategySourceWriteRequest": {
@@ -509,6 +514,274 @@
           "template_key": { "type": "string" },
           "param_schema": { "type": "object" },
           "metadata":     { "type": "object" }
+        }
+      },
+      "TradePlanSnapshot": {
+        "type": "object",
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "primary_strategy": {
+            "type": "string",
+            "maxLength": 120
+          },
+          "hypothesis": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "entry_trigger": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "invalidation": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "exit_rules": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "wait_conditions": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "evidence": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "counter_evidence": {
+            "type": "string",
+            "maxLength": 4000
+          },
+          "schema_version": {
+            "type": "integer",
+            "enum": [
+              1
+            ]
+          },
+          "instrument": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "market": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "symbol": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "exchange_id": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "market_type": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "instrument_id": {
+                "type": "string",
+                "maxLength": 100
+              },
+              "settlement_ccy": {
+                "type": "string",
+                "maxLength": 100
+              }
+            }
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "",
+              "long",
+              "short",
+              "watch"
+            ]
+          },
+          "analysis_timeframe": {
+            "type": "string"
+          },
+          "decision_timeframe": {
+            "type": "string"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "retrospective": {
+            "type": "boolean"
+          },
+          "research_refs": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {
+              "type": "object"
+            }
+          },
+          "risk_inputs": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "model": {
+                "type": "string"
+              },
+              "entry_price": {
+                "type": "string"
+              },
+              "stop_price": {
+                "type": "string"
+              },
+              "target_price": {
+                "type": "string"
+              },
+              "quantity": {
+                "type": "string"
+              },
+              "risk_budget": {
+                "type": "string"
+              },
+              "equity": {
+                "type": "string"
+              },
+              "currency": {
+                "type": "string"
+              },
+              "equity_currency": {
+                "type": "string"
+              },
+              "equity_at": {
+                "type": "string"
+              }
+            },
+            "not": {
+              "required": [
+                "quantity",
+                "risk_budget"
+              ]
+            }
+          }
+        }
+      },
+      "TradePlanMutationResult": {
+        "type": "object",
+        "required": [
+          "id",
+          "version_id",
+          "version_no",
+          "row_revision",
+          "request_id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "version_no": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "row_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "request_id": {
+            "type": "string",
+            "maxLength": 120
+          }
+        }
+      },
+      "TradePlanReviewAssessment": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "market_judgment",
+          "strategy_rules",
+          "execution",
+          "improvement"
+        ],
+        "properties": {
+          "improvement": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "market_judgment": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "value",
+              "reason"
+            ],
+            "properties": {
+              "value": {
+                "type": "string",
+                "enum": [
+                  "matches",
+                  "differs",
+                  "not_evaluable"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 2000
+              }
+            }
+          },
+          "strategy_rules": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "value",
+              "reason"
+            ],
+            "properties": {
+              "value": {
+                "type": "string",
+                "enum": [
+                  "applicable",
+                  "not_applicable",
+                  "not_evaluable"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 2000
+              }
+            }
+          },
+          "execution": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "value",
+              "reason"
+            ],
+            "properties": {
+              "value": {
+                "type": "string",
+                "enum": [
+                  "followed",
+                  "deviated",
+                  "not_evaluable"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 2000
+              }
+            }
+          }
         }
       }
     }
@@ -1444,6 +1717,2045 @@
         "security": [{ "HumanJWT": [] }],
         "parameters": [{ "in": "query", "name": "limit", "required": false, "schema": { "type": "integer", "default": 100 } }],
         "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/api/agent/v1/trade-plans": {
+      "get": {
+        "operationId": "list_trade_plans",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "R",
+        "x-scope-class": "R",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lifecycle",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "direction",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "primary_strategy",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "retrospective",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "source_kind",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "strategy",
+                "order",
+                "quick_order",
+                "trade",
+                "history"
+              ]
+            }
+          },
+          {
+            "name": "source_id",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "create_trade_plan",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "snapshot": {
+                    "$ref": "#/components/schemas/TradePlanSnapshot"
+                  }
+                },
+                "required": [
+                  "request_id",
+                  "snapshot"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}": {
+      "get": {
+        "operationId": "get_trade_plan",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "R",
+        "x-scope-class": "R",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/versions": {
+      "get": {
+        "operationId": "list_trade_plan_versions",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "R",
+        "x-scope-class": "R",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "revise_trade_plan",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading. Once a symbol is selected, instrument identity cannot change in revisions. A title-only draft may select its instrument for the first time. Analysis references must match the plan instrument when identity fields are known.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "snapshot": {
+                    "$ref": "#/components/schemas/TradePlanSnapshot"
+                  },
+                  "change_reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "request_id",
+                  "expected_revision",
+                  "snapshot",
+                  "change_reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/versions/{version_id}": {
+      "get": {
+        "operationId": "get_trade_plan_version",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "R",
+        "x-scope-class": "R",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/state": {
+      "post": {
+        "operationId": "set_trade_plan_state",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "lifecycle": {
+                    "type": "string",
+                    "enum": [
+                      "draft",
+                      "observing",
+                      "cancelled",
+                      "completed"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                },
+                "required": [
+                  "request_id",
+                  "expected_revision",
+                  "lifecycle",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/copy": {
+      "post": {
+        "operationId": "copy_trade_plan",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "request_id",
+                  "expected_revision"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/events": {
+      "get": {
+        "operationId": "list_trade_plan_events",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "R",
+        "x-scope-class": "R",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ]
+      },
+      "post": {
+        "operationId": "record_trade_plan_decision",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "unconfirmed",
+                      "confirmed",
+                      "withdrawn"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 2000
+                  },
+                  "observed_at": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "assessment_author": {
+                    "type": "string",
+                    "enum": [
+                      "human",
+                      "ai_suggestion"
+                    ],
+                    "default": "human"
+                  }
+                },
+                "required": [
+                  "request_id",
+                  "expected_revision",
+                  "status",
+                  "reason",
+                  "observed_at"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/requests/{request_id}": {
+      "get": {
+        "operationId": "get_trade_plan_request",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "R",
+        "x-scope-class": "R",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/v1/trade-plans/accounts": {
+      "get": {
+        "operationId": "list_trade_plan_accounts",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "R",
+        "x-scope-class": "R",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": []
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/sources": {
+      "get": {
+        "operationId": "list_trade_plan_sources",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "R",
+        "x-scope-class": "R",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "credential_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "source_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "strategy",
+                "order",
+                "quick_order",
+                "trade",
+                "history"
+              ]
+            }
+          },
+          {
+            "name": "version_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "source_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            }
+          }
+        ]
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/attempts": {
+      "post": {
+        "operationId": "create_trade_plan_attempt",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "expected_revision",
+                  "version_id",
+                  "credential_id",
+                  "execution_mode"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "version_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "credential_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "execution_mode": {
+                    "type": "string",
+                    "enum": [
+                      "live",
+                      "paper"
+                    ]
+                  },
+                  "note": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/links": {
+      "post": {
+        "operationId": "link_trade_plan_record",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "expected_revision",
+                  "attempt_id",
+                  "source_kind",
+                  "source_id",
+                  "attribution",
+                  "reason"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "attempt_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "source_kind": {
+                    "type": "string",
+                    "enum": [
+                      "strategy",
+                      "order",
+                      "quick_order",
+                      "trade",
+                      "history"
+                    ]
+                  },
+                  "source_id": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "attribution": {
+                    "type": "string",
+                    "enum": [
+                      "confirmed",
+                      "pending"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/links/revoke": {
+      "post": {
+        "operationId": "revoke_trade_plan_link",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "expected_revision",
+                  "attempt_id",
+                  "link_id",
+                  "reason"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "attempt_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "link_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 2000
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/links/refresh": {
+      "post": {
+        "operationId": "refresh_trade_plan_link",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "expected_revision",
+                  "attempt_id",
+                  "link_id",
+                  "reason"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "attempt_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "link_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "maxLength": 2000
+                  },
+                  "attribution": {
+                    "type": "string",
+                    "enum": [
+                      "confirmed",
+                      "pending"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agent/v1/trade-plans/{plan_id}/reviews": {
+      "post": {
+        "operationId": "save_trade_plan_review",
+        "tags": [
+          "TradePlans"
+        ],
+        "summary": "Recording-only trade plan management; never executes trades",
+        "security": [
+          {
+            "AgentToken": []
+          }
+        ],
+        "x-required-scope": "W",
+        "x-scope-class": "W",
+        "description": "Recording-only plans; revisions preserve history. Retry writes with the same key and body. Never executes trading.",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "integer",
+                      "enum": [
+                        0
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/TradePlanMutationResult"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input"
+          },
+          "401": {
+            "description": "Unauthenticated"
+          },
+          "403": {
+            "description": "Scope or instrument forbidden"
+          },
+          "404": {
+            "description": "Not found"
+          },
+          "409": {
+            "description": "Revision or idempotency conflict"
+          },
+          "422": {
+            "description": "Invalid lifecycle transition, immutable instrument change, or mismatched analysis reference"
+          },
+          "503": {
+            "description": "Storage unavailable"
+          }
+        },
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 120
+            },
+            "description": "Must equal body.request_id; retries must reuse both."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "request_id",
+                  "expected_revision",
+                  "attempt_id",
+                  "assessment",
+                  "change_reason"
+                ],
+                "properties": {
+                  "request_id": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "expected_revision": {
+                    "type": "integer",
+                    "minimum": 1
+                  },
+                  "attempt_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "assessment": {
+                    "$ref": "#/components/schemas/TradePlanReviewAssessment"
+                  },
+                  "change_reason": {
+                    "type": "string",
+                    "maxLength": 500
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
