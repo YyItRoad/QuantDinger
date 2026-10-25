@@ -7,12 +7,13 @@ from tests.test_trade_plan_app import full_app, login
 from tests.test_trade_plan_management import card
 
 
-def setup_plan(full_app):
+def setup_plan(full_app, snapshot=None):
     client,admin,password,_=full_app
     headers=login(client,'plan-test',password)
     with admin.cursor() as cur:
         cur.execute("INSERT INTO qd_exchange_credentials(id,user_id,name,exchange_id,encrypted_config) VALUES(901,1,'fixture','binance','not-a-real-secret'),(902,2,'other','binance','not-a-real-secret')")
-    snapshot=card(instrument={'market':'Crypto','symbol':'BTC/USDT','market_type':'spot','exchange_id':'binance','instrument_id':'BTCUSDT','settlement_ccy':'USDT'})
+    if snapshot is None:
+        snapshot=card(instrument={'market':'Crypto','symbol':'BTC/USDT','market_type':'spot','exchange_id':'binance','instrument_id':'BTCUSDT','settlement_ccy':'USDT'})
     created=client.post('/api/trade-plans',headers=headers,json={'request_id':str(uuid4()),'snapshot':snapshot})
     assert created.status_code==200,created.get_json()
     pid=created.get_json()['data']['id']
@@ -295,3 +296,92 @@ def test_exact_source_preview_filters_before_pagination(full_app):
     assert response.get_json()['data']['items'][0]['source_id']==first
     for filters in [{'source_kind':'trade'},{'source_id':first},{'source_kind':'trade','source_id':'not-an-id'}]:
         assert client.get('/api/trade-plans',headers=headers,query_string=filters).status_code==400
+
+
+def managed_strategy_fixture(admin, account_key='credential_id', **position_overrides):
+    from psycopg2.extras import Json
+    with admin.cursor() as cur:
+        cur.execute("""INSERT INTO qd_strategies_trading
+            (user_id,strategy_name,symbol,market_category,market_type,execution_mode,trading_config,exchange_config)
+            VALUES(1,'managed fixture','NEAR/USDT','Crypto','swap','live',%s,%s) RETURNING id""",
+            (Json({'position_management':{'enabled':True,'side':'short'},
+                   'instrument_products':[{'instrument_id':'BTCUSDT'}]}),
+             Json({account_key:901,'exchange_id':'binance','api_key':'must-not-be-projected'})))
+        sid=cur.fetchone()[0]
+        values={'user_id':1,'symbol':'NEAR/USDT','market_type':'swap','side':'short',
+                'credential_id':901,'inst_id':'NEARUSDT'}
+        values.update(position_overrides)
+        cur.execute("""INSERT INTO qd_strategy_positions
+            (strategy_id,user_id,symbol,market_type,side,credential_id,inst_id,size)
+            VALUES(%s,%s,%s,%s,%s,%s,%s,48)""",
+            (sid,values['user_id'],values['symbol'],values['market_type'],values['side'],
+             values['credential_id'],values['inst_id']))
+    return sid
+
+
+def near_card():
+    return card(direction='short',retrospective=True,instrument={'market':'Crypto','symbol':'NEAR/USDT',
+        'market_type':'swap','exchange_id':'binance','instrument_id':'NEARUSDT','settlement_ccy':'USDT'})
+
+
+@pytest.mark.parametrize('account_key',['credential_id','credentialId'])
+def test_managed_strategy_identity_preview_and_confirm_refresh(full_app,account_key):
+    client,admin,headers,pid,read,write=setup_plan(full_app,near_card())
+    sid=managed_strategy_fixture(admin,account_key)
+    response=client.get('/api/trade-plans/'+pid+'/sources',headers=headers,
+        query_string={'credential_id':901,'source_kind':'strategy','source_id':sid})
+    data=response.get_json()['data']
+    assert data['total']==1
+    fact=data['items'][0]
+    assert fact['credential_id']==901 and fact['exchange_id']=='binance'
+    assert fact['inst_id']=='NEARUSDT'
+    assert 'must-not-be-projected' not in str(data)
+    assert client.get('/api/trade-plans/'+pid+'/sources',headers=headers,
+        query_string={'credential_id':902,'source_kind':'strategy'}).status_code==404
+    write('links',attempt_id=read()['attempts'][0]['id'],source_kind='strategy',source_id=sid,
+        attribution='pending',reason='existing position research')
+    old=deepcopy(read()['attempts'][0]['links'][0])
+    row=write('links/refresh',attempt_id=read()['attempts'][0]['id'],link_id=old['id'],
+        attribution='confirmed',reason='identity verified from owned position')
+    links=row['attempts'][0]['links']
+    prior=next(x for x in links if x['id']==old['id'])
+    current=next(x for x in links if not x['revoked'])
+    assert prior['revoked'] and prior['snapshot']==old['snapshot']
+    assert current['attribution']=='confirmed' and current['snapshot']['inst_id']=='NEARUSDT'
+    assert row['attempts'][0]['summary']['opened_quantity']=='0'
+    assert row['attempts'][0]['summary']['net_r'] is None
+
+
+@pytest.mark.parametrize('wrong_identity',[
+    {'user_id':2},{'credential_id':902},{'symbol':'BTC/USDT'},
+    {'market_type':'spot'},{'side':'long'}, {'inst_id':''},
+])
+def test_managed_strategy_does_not_borrow_unmatched_position_identity(full_app,wrong_identity):
+    client,admin,headers,pid,read,write=setup_plan(full_app,near_card())
+    sid=managed_strategy_fixture(admin,**wrong_identity)
+    response=client.post('/api/trade-plans/'+pid+'/links',headers=headers,json={
+        'request_id':str(uuid4()),'expected_revision':read()['row_revision'],
+        'attempt_id':read()['attempts'][0]['id'],'source_kind':'strategy','source_id':sid,
+        'attribution':'confirmed','reason':'must retain incomplete identity guard'})
+    assert response.status_code==422
+    assert response.get_json()['msg']=='record_identity_incomplete'
+    assert 'inst_id' in response.get_json()['data']['details']['fields']
+    assert not read()['attempts'][0]['links']
+
+
+
+def test_managed_strategy_ambiguous_native_identity_stays_unconfirmed(full_app):
+    client,admin,headers,pid,read,write=setup_plan(full_app,near_card())
+    sid=managed_strategy_fixture(admin)
+    with admin.cursor() as cur:
+        cur.execute("""INSERT INTO qd_strategy_positions
+            (strategy_id,user_id,symbol,market_type,side,credential_id,inst_id,size)
+            VALUES(%s,1,'near/usdt','swap','short',901,'OTHER_NATIVE_ID',1)""",(sid,))
+    response=client.get('/api/trade-plans/'+pid+'/sources',headers=headers,
+        query_string={'credential_id':901,'source_kind':'strategy','source_id':sid})
+    assert response.get_json()['data']['items'][0]['inst_id'] is None
+    response=client.post('/api/trade-plans/'+pid+'/links',headers=headers,json={
+        'request_id':str(uuid4()),'expected_revision':read()['row_revision'],
+        'attempt_id':read()['attempts'][0]['id'],'source_kind':'strategy','source_id':sid,
+        'attribution':'confirmed','reason':'ambiguous identity must not be guessed'})
+    assert response.status_code==422 and not read()['attempts'][0]['links']

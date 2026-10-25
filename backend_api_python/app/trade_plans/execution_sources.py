@@ -3,6 +3,8 @@ from .repository import public
 from .validation import PlanError
 
 KINDS = ('strategy', 'order', 'quick_order', 'trade', 'history')
+STRATEGY_CREDENTIAL = ("COALESCE(NULLIF(s.exchange_config->>'credential_id',''), "
+                       "NULLIF(s.exchange_config->>'credentialId',''))")
 
 
 def accounts(cur, user_id):
@@ -24,13 +26,21 @@ def account(cur, user_id, credential_id):
 def query(kind):
     # Explicit projections must never include credentials, strategy code, or raw exchange payloads.
     if kind == 'strategy':
-        return '''SELECT s.id,s.strategy_name AS name,s.symbol,s.market_category AS market,s.market_type,
+        return f'''SELECT s.id,s.strategy_name AS name,s.symbol,s.market_category AS market,s.market_type,
           s.status,s.execution_mode,s.created_at AS recorded_at,
           s.trading_config->'position_management'->>'side' AS position_side,
-          s.exchange_config->>'credentialId' AS credential_id,
-          c.exchange_id,c.name AS account_name
+          {STRATEGY_CREDENTIAL} AS credential_id,
+          c.exchange_id,c.name AS account_name,position_identity.inst_id
           FROM qd_strategies_trading s LEFT JOIN qd_exchange_credentials c
-          ON c.id::text=s.exchange_config->>'credentialId' AND c.user_id=s.user_id
+          ON c.id::text={STRATEGY_CREDENTIAL} AND c.user_id=s.user_id
+          LEFT JOIN LATERAL (
+            SELECT MIN(NULLIF(p.inst_id,'')) AS inst_id FROM qd_strategy_positions p
+            WHERE p.strategy_id=s.id AND p.user_id=s.user_id
+              AND p.credential_id::text={STRATEGY_CREDENTIAL}
+              AND UPPER(p.symbol)=UPPER(s.symbol) AND p.market_type=s.market_type
+              AND p.side=s.trading_config->'position_management'->>'side'
+            HAVING COUNT(DISTINCT NULLIF(p.inst_id,''))=1
+          ) position_identity ON TRUE
           WHERE s.user_id=%s AND s.trading_config->'position_management'->>'enabled'='true' '''
     if kind == 'order':
         return '''SELECT p.id,p.symbol,s.market_category AS market,p.market_type,p.status,p.execution_mode,
@@ -100,7 +110,7 @@ def list_sources(cur, user_id, kind, credential_id, symbol, page, page_size, sco
     sql = query(kind)
     alias = {'strategy': 's', 'order': 'p', 'quick_order': '', 'trade': 't', 'history': 'h'}[kind]
     prefix = alias + '.' if alias else ''
-    account_field = "s.exchange_config->>'credentialId'" if kind == 'strategy' else prefix + 'credential_id'
+    account_field = STRATEGY_CREDENTIAL if kind == 'strategy' else prefix + 'credential_id'
     base = sql + ' AND ' + account_field + '=%s AND UPPER(' + prefix + 'symbol)=%s'
     params = (user_id, str(credential_id) if kind == 'strategy' else credential_id, symbol.upper())
     if source_id is not None:
