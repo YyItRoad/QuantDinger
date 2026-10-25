@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
+import bcrypt
 import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import RealDictCursor
@@ -44,11 +45,10 @@ def full_app(monkeypatch):
     monkeypatch.setenv('SINGLE_USER_MODE', 'false')
     monkeypatch.setenv('TURNSTILE_SITE_KEY', '')
     monkeypatch.setenv('TURNSTILE_SECRET_KEY', '')
-    from app.services.user_service import UserService
     from app.services import security_service
     monkeypatch.setattr(security_service, '_security_service', None)
     password = 'isolated-plan-test-password'
-    hashed = UserService().hash_password(password)
+    hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt(rounds=12)).decode()
     agent_raw = 'qd_agent_isolated_' + uuid4().hex
     with admin.cursor() as cur:
         cur.execute("INSERT INTO qd_users(id,username,password_hash,role,password_changed_at) VALUES (1,'plan-test',%s,'user',NOW()),(2,'plan-viewer',%s,'viewer',NOW()),(3,'plan-admin',%s,'admin',NOW())", (hashed, hashed, hashed))

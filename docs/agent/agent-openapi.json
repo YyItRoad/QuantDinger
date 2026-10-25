@@ -8,6 +8,9 @@
   "servers": [
     { "url": "http://localhost:8888" }
   ],
+  "tags": [
+    { "name": "TradePlans", "description": "Recording-only plans, versions, trade links and reviews." }
+  ],
   "components": {
     "securitySchemes": {
       "AgentToken": {

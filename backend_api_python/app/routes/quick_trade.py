@@ -206,7 +206,12 @@ def place_order(body):
                 body.get("entry_reason", ""), required=market_type == "swap" or side == "buy",
             )
         except ValueError as exc:
-            return jsonify({"code": 0, "msg": str(exc)}), 400
+            reason_error = (
+                "quickTrade.entryReasonRequired"
+                if exc.args == ("quickTrade.entryReasonRequired",)
+                else "quickTrade.entryReasonInvalid"
+            )
+            return jsonify({"code": 0, "msg": reason_error}), 400
         if market_type == "swap" and not margin_mode:
             margin_mode = "cross"
         uses_base_quantity = market_type == "spot" and requested_base_quantity > 0
