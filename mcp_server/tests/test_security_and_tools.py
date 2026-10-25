@@ -30,7 +30,7 @@ def fresh_module(monkeypatch):
 
 
 def test_mcp_tool_registry_complete(fresh_module):
-    assert len(fresh_module.MCP_TOOL_NAMES) == 63
+    assert len(fresh_module.MCP_TOOL_NAMES) == 81
     # Every exported name should correspond to a registered @mcp.tool function.
     for name in fresh_module.MCP_TOOL_NAMES:
         assert hasattr(fresh_module, name), f"missing tool function: {name}"
@@ -88,7 +88,7 @@ def test_mcp_tools_are_actually_registered(fresh_module):
 
 
 def test_every_tool_has_explicit_risk_annotations(fresh_module):
-    from quantdinger_mcp.tool_contract import WRITE_TOOLS
+    from quantdinger_mcp.tool_contract import WRITE_TOOLS, PLAN_WRITE_TOOLS
 
     tools = asyncio.run(fresh_module.mcp.list_tools())
     assert set(WRITE_TOOLS).issubset({tool.name for tool in tools})
@@ -97,7 +97,7 @@ def test_every_tool_has_explicit_risk_annotations(fresh_module):
         assert hints is not None
         assert hints.readOnlyHint is (tool.name not in WRITE_TOOLS)
         assert hints.destructiveHint is WRITE_TOOLS.get(tool.name, False)
-        assert hints.idempotentHint is (tool.name not in WRITE_TOOLS)
+        assert hints.idempotentHint is (tool.name not in WRITE_TOOLS or tool.name in PLAN_WRITE_TOOLS)
         assert hints.openWorldHint is True
 
 

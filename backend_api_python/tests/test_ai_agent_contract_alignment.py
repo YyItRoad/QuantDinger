@@ -48,7 +48,10 @@ def _mcp_tool_names() -> set[str]:
     for node in tree.body:
         if isinstance(node, ast.Assign):
             if any(isinstance(target, ast.Name) and target.id == "MCP_TOOL_NAMES" for target in node.targets):
-                return set(ast.literal_eval(node.value))
+                base = set(ast.literal_eval(node.value))
+                module = ast.parse((server_path.parent / 'trade_plan_contract.py').read_text())
+                assignment = next(n for n in module.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == 'TOOL_ROUTES' for t in n.targets))
+                return base | set(ast.literal_eval(assignment.value))
     raise AssertionError("MCP_TOOL_NAMES is missing")
 
 
@@ -59,7 +62,7 @@ def _normalize_path(path: str) -> str:
 def _agent_route_operations() -> set[tuple[str, str]]:
     routes_root = BACKEND_ROOT / "backend_api_python" / "app" / "routes" / "agent_v1"
     operations: set[tuple[str, str]] = set()
-    for route_file in routes_root.glob("*.py"):
+    for route_file in [*routes_root.glob("*.py"), BACKEND_ROOT / "backend_api_python/app/trade_plans/agent_routes.py"]:
         if route_file.name == "me_tokens.py":
             continue
         tree = ast.parse(route_file.read_text(encoding="utf-8-sig"))
@@ -102,7 +105,7 @@ def _agent_route_scopes() -> dict[tuple[str, str], str | None]:
     """Map (method, path) to the scope letter declared by @agent_required(SCOPE_X)."""
     routes_root = BACKEND_ROOT / "backend_api_python" / "app" / "routes" / "agent_v1"
     scopes: dict[tuple[str, str], str | None] = {}
-    for route_file in routes_root.glob("*.py"):
+    for route_file in [*routes_root.glob("*.py"), BACKEND_ROOT / "backend_api_python/app/trade_plans/agent_routes.py"]:
         if route_file.name == "me_tokens.py":
             continue
         tree = ast.parse(route_file.read_text(encoding="utf-8-sig"))

@@ -209,7 +209,7 @@ def list_agent_quick_trades():
             SELECT id, credential_id, exchange_id, symbol, side, order_type,
                    amount, price, leverage, market_type, status,
                    exchange_order_id, filled_amount, avg_fill_price,
-                   commission, commission_ccy, error_msg, source, created_at
+                   commission, commission_ccy, error_msg, source, created_at, raw_result
             FROM qd_quick_trades
             WHERE user_id = %s AND source = 'agent_mcp'{cursor_sql}
             ORDER BY id DESC LIMIT %s
@@ -220,6 +220,9 @@ def list_agent_quick_trades():
         cur.close()
     has_more = len(rows) > limit
     items = rows[:limit]
+    from app.services.quick_trade.history import parse_quick_trade_metadata
+    for row in items:
+        row.update(parse_quick_trade_metadata(row.pop("raw_result", None)))
     return envelope({
         "items": items,
         "next_cursor": items[-1]["id"] if has_more and items else None,

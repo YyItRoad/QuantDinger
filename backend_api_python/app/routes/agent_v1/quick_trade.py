@@ -17,6 +17,7 @@ import uuid
 from typing import Any
 
 from app.services.kline import KlineService
+from app.services.quick_trade.history import normalize_entry_reason
 from app.utils.agent_auth import (
     SCOPE_T, agent_required, current_token, current_user_id,
     instrument_allowed, market_allowed, paper_only, with_idempotency,
@@ -34,6 +35,7 @@ _kline = KlineService()
 _ORDER_FIELDS = {
     "market", "symbol", "side", "qty", "order_type", "limit_price",
     "credential_id", "market_type", "leverage", "margin_mode", "tp_price", "sl_price",
+    "entry_reason",
 }
 
 
@@ -225,6 +227,9 @@ def _place_live_order(*, body: dict, user_id: int) -> dict:
         market_type = "swap"
     if market_type not in ("spot", "swap"):
         market_type = "swap" if leverage > 1 else "spot"
+    entry_reason = normalize_entry_reason(
+        body.get("entry_reason", ""), required=market_type == "swap" or side == "buy",
+    )
     if market_type == "swap" and not margin_mode:
         margin_mode = "cross"
     if order_type == "limit" and limit_price_f <= 0:
@@ -271,6 +276,18 @@ def _place_live_order(*, body: dict, user_id: int) -> dict:
         )
 
     client_order_id = f"qa{str(int(time.time()))[-6:]}{uuid.uuid4().hex[:8]}"
+    entry_record_id = None
+    if market_type == "swap" or side == "buy":
+        entry_record_id = _record_quick_trade(
+            user_id=user_id, credential_id=credential_id, exchange_id=exchange_id,
+            symbol=symbol, side=side, order_type=order_type, amount=qty,
+            price=limit_price_f, leverage=leverage, market_type=market_type,
+            tp_price=float(body.get("tp_price") or 0), sl_price=float(body.get("sl_price") or 0),
+            status="pending", exchange_order_id="", filled=0, avg_price=0, error_msg="",
+            source="agent_mcp", raw_result={}, client_order_id=client_order_id, entry_reason=entry_reason,
+        )
+        if not entry_record_id:
+            raise ValueError("quickTrade.entryReasonSaveFailed")
     if order_type == "market":
         from app.services.live_trading.execution import place_order_from_signal
 
@@ -395,10 +412,14 @@ def _place_live_order(*, body: dict, user_id: int) -> dict:
         error_msg="",
         source="agent_mcp",
         raw_result=raw_record,
+        entry_reason=entry_reason,
+        record_id=entry_record_id,
+        client_order_id=client_order_id,
         commission=commission,
         commission_ccy=commission_ccy,
         commission_quote=commission_quote,
     )
+    trade_id = trade_id or entry_record_id
 
     return {
         "trade_id": trade_id,
@@ -455,6 +476,10 @@ def place_order():
             return error(400, "limit_price is required for limit orders")
 
     body = dict(body)
+    try:
+        body["entry_reason"] = normalize_entry_reason(body.get("entry_reason", ""))
+    except ValueError as exc:
+        return error(400, str(exc), http=400)
     body["qty"] = qty_f
     body["order_type"] = order_type
 

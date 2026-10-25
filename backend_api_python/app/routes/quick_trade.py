@@ -54,7 +54,7 @@ from app.services.quick_trade.orders import (
     quick_order_status,
 )
 from app.services.quick_trade.symbols import is_supported_crypto_exchange, symbols_match as quick_trade_symbols_match
-from app.services.quick_trade.history import parse_quick_trade_metadata, history_order_status
+from app.services.quick_trade.history import normalize_entry_reason, parse_quick_trade_metadata, history_order_status, record_quick_trade as persist_quick_trade
 from app.services.quick_trade.fee_reconciliation import fee_update_from_fill, reconcile_quick_trade_fees
 from app.services.quick_trade.products import (
     build_product_aware_config as _build_product_aware_config,
@@ -129,58 +129,11 @@ def _record_quick_trade(
     commission_ccy: str = "",
     commission_quote: Optional[float] = None,
     client_order_id: str = "",
+    entry_reason: str = "",
+    record_id: Optional[int] = None,
 ):
-    """Insert a quick trade record into the database."""
-    from app.services.live_trading.partner_attribution import redact_partner_attribution
-
-    raw_result = redact_partner_attribution(raw_result or {})
-    try:
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                INSERT INTO qd_quick_trades
-                    (user_id, credential_id, exchange_id, symbol, side, order_type,
-                     amount, price, leverage, market_type, tp_price, sl_price,
-                     status, exchange_order_id, filled_amount, avg_fill_price,
-                     commission, commission_ccy, commission_quote,
-                     client_order_id, error_msg, source, raw_result, created_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                RETURNING id
-                """,
-                (
-                    user_id, credential_id, exchange_id, symbol, side, order_type,
-                    amount, price, leverage, market_type, tp_price, sl_price,
-                    status, exchange_order_id, filled, avg_price,
-                    float(commission or 0.0), str(commission_ccy or "").strip().upper(),
-                    float(commission_quote) if commission_quote is not None else None,
-                    str(client_order_id or "")[:100], error_msg, source, json.dumps(raw_result or {}),
-                ),
-            )
-            row = cur.fetchone()
-            db.commit()
-            cur.close()
-            trade_id = int((row or {}).get("id") or 0)
-            if trade_id > 0 and exchange_order_id:
-                from app.services.execution_streams.repository import ExecutionEventRepository
-
-                ExecutionEventRepository().register_binding(
-                    credential_id=int(credential_id or 0),
-                    exchange_id=str(exchange_id or ""),
-                    market_type=str(market_type or "swap"),
-                    owner_type="quick_trade",
-                    owner_id=trade_id,
-                    user_id=int(user_id or 1),
-                    symbol=str(symbol or ""),
-                    signal_type=str(side or ""),
-                    client_order_id=str(client_order_id or ""),
-                    exchange_order_id=str(exchange_order_id or ""),
-                    observed_filled=float(filled or 0.0),
-                )
-            return trade_id
-    except Exception as e:
-        logger.error(f"Failed to record quick trade: {e}")
-        return None
+    """Persist through the shared ledger helper while preserving the route adapter."""
+    return persist_quick_trade(**locals(), connection_factory=get_db_connection, logger=logger)
 
 
 # ---------- endpoints ----------
@@ -209,6 +162,8 @@ def place_order(body):
       source         (str)    - "ai_radar" / "ai_analysis" / "indicator" / "manual"
     """
     exchange_id = ""
+    entry_record_id = None
+    entry_reason = ""
     try:
         user_id = g.user_id
         credential_id = int(body.get("credential_id") or 0)
@@ -246,6 +201,17 @@ def place_order(body):
             market_type = "swap"
         if market_type not in ("spot", "swap"):
             market_type = "swap" if leverage > 1 else "spot"
+        try:
+            entry_reason = normalize_entry_reason(
+                body.get("entry_reason", ""), required=market_type == "swap" or side == "buy",
+            )
+        except ValueError as exc:
+            reason_error = (
+                "quickTrade.entryReasonRequired"
+                if exc.args == ("quickTrade.entryReasonRequired",)
+                else "quickTrade.entryReasonInvalid"
+            )
+            return jsonify({"code": 0, "msg": reason_error}), 400
         if market_type == "swap" and not margin_mode:
             margin_mode = "cross"
         uses_base_quantity = market_type == "spot" and requested_base_quantity > 0
@@ -462,6 +428,20 @@ def place_order(body):
         uuid_suffix = uuid.uuid4().hex[:8]  # 8 hex chars
         client_order_id = f"qt{timestamp_suffix}{uuid_suffix}"  # Total: 2 + 6 + 8 = 16 chars
 
+        # Persist the trader's words before submitting an entry to the exchange.
+        if entry_reason and (market_type == "swap" or side == "buy"):
+            entry_record_id = _record_quick_trade(
+                user_id=user_id, credential_id=credential_id, exchange_id=exchange_id,
+                symbol=symbol, side=side, order_type=order_type, amount=usdt_amount,
+                price=price, leverage=leverage, market_type=market_type,
+                tp_price=tp_price, sl_price=sl_price, status="pending",
+                exchange_order_id="", filled=0, avg_price=0, error_msg="", source=source,
+                raw_result={"_quick_trade": {"requested_base_qty": base_qty, "margin_mode": margin_mode}},
+                client_order_id=client_order_id, entry_reason=entry_reason,
+            )
+            if not entry_record_id:
+                return jsonify({"code": 0, "msg": "quickTrade.entryReasonSaveFailed"}), 503
+
         result = None
         if order_type == "market":
             from app.services.live_trading.execution import place_order_from_signal
@@ -618,11 +598,15 @@ def place_order(body):
             error_msg=protection_error,
             source=source,
             raw_result=raw_record,
+            entry_reason=entry_reason,
+            record_id=entry_record_id,
             commission=commission,
             commission_ccy=commission_ccy,
             commission_quote=commission_quote,
             client_order_id=client_order_id,
         )
+
+        trade_id = trade_id or entry_record_id
 
         return jsonify({
             "code": 1,
@@ -646,27 +630,39 @@ def place_order(body):
 
         # Try to record the failure
         try:
-            _record_quick_trade(
-                user_id=g.user_id,
-                credential_id=int(body.get("credential_id") or 0),
-                exchange_id="",
-                symbol=str(body.get("symbol") or ""),
-                side=str(body.get("side") or ""),
-                order_type=str(body.get("order_type") or "market"),
-                amount=float(body.get("amount") or 0),  # Original USDT amount
-                price=0,
-                leverage=int(body.get("leverage") or 1),
-                market_type=str(body.get("market_type") or "swap"),
-                tp_price=0,
-                sl_price=0,
-                status="failed",
-                exchange_order_id="",
-                filled=0,
-                avg_price=0,
-                error_msg=str(e)[:500],
-                source=str(body.get("source") or "manual"),
-                raw_result={},
-            )
+            if entry_record_id:
+                # Preserve the already committed identity and request metadata on uncertainty.
+                with get_db_connection() as db:
+                    cur = db.cursor()
+                    cur.execute("UPDATE qd_quick_trades SET error_msg=%s WHERE id=%s AND user_id=%s",
+                                (str(e)[:500], entry_record_id, g.user_id))
+                    db.commit()
+                    cur.close()
+            else:
+                _record_quick_trade(
+                    user_id=g.user_id,
+                    credential_id=int(body.get("credential_id") or 0),
+                    exchange_id=exchange_id,
+                    symbol=str(body.get("symbol") or ""),
+                    side=str(body.get("side") or ""),
+                    order_type=str(body.get("order_type") or "market"),
+                    amount=float(body.get("amount") or 0),  # Original USDT amount
+                    price=0,
+                    leverage=int(body.get("leverage") or 1),
+                    market_type=str(locals().get("market_type") or body.get("market_type") or "swap"),
+                    tp_price=0,
+                    sl_price=0,
+                    status="pending" if entry_record_id else "failed",
+                    exchange_order_id="",
+                    filled=0,
+                    avg_price=0,
+                    error_msg=str(e)[:500],
+                    source=str(body.get("source") or "manual"),
+                    raw_result={},
+                    entry_reason=entry_reason,
+                    record_id=entry_record_id,
+                    client_order_id=locals().get("client_order_id", ""),
+                )
         except Exception:
             pass
 
