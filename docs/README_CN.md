@@ -90,6 +90,8 @@ Celery broker 与结果存储。修改进程归属或共享状态前，请先阅
 
 ### 交易与研究
 
+- [计划：市场状态、想法与基础复盘](trading/计划/README.md)
+
 - [Strategy API V2 策略开发](trading/STRATEGY_DEV_GUIDE_CN.md)
 - [图表指标开发](trading/INDICATOR_DEV_GUIDE_CN.md)
 - [持仓管理使用指南](trading/POSITION_MANAGEMENT_GUIDE_CN.md)

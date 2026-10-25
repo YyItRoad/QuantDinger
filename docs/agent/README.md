@@ -18,4 +18,4 @@ Repository-level coding-agent instructions live in [`AGENTS.md`](../../AGENTS.md
 
 [持仓管理交易历史 MCP 使用与数据口径](持仓管理交易历史_MCP.md)
 
-计划模块使用 R/W 保存研究、关联已有交易与复盘，不执行交易。详见[计划管理](TRADE_PLAN_MANAGEMENT_CN.md)与[使用说明](../trading/交易计划使用说明.md)。
+计划模块使用 R/W 保存研究、关联已有交易与复盘，不执行交易。详见[计划管理](../trading/计划/MCP接入.md)与[使用说明](../trading/计划/使用说明.md)。
