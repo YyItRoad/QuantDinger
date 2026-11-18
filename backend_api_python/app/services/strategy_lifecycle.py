@@ -41,9 +41,12 @@ def is_fatal_exchange_error(msg: str) -> bool:
         "50111",
         "invalid api-key",
         "invalid api key",
+        "api-signature-not-valid",
         "invalid ok-access-key",
         "invalid ip",
         "invalid_ip",
+        "incorrect ip address",
+        "ip地址错误",
         "40018",
         "permissions for action",
         "unauthorized",
@@ -73,6 +76,7 @@ def is_fatal_exchange_error(msg: str) -> bool:
         "no credential",
         "exchange credential",
         "unsupported client for grid",
+        "trading_venue_disabled",
     )
     return any(t in m for t in tokens)
 
@@ -177,6 +181,26 @@ def auto_stop_live_strategy(
             cur.close()
     except Exception as e:
         logger.warning("auto_stop: DB update failed for strategy %s: %s", sid, e)
+
+    try:
+        from app.services.strategy_runtime.identity import finish_strategy_run
+
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                SELECT id FROM strategy_runs
+                WHERE strategy_id = %s
+                  AND runtime_status IN ('running', 'recovering', 'paused', 'needs_review')
+                ORDER BY id DESC LIMIT 1
+                """,
+                (sid,),
+            )
+            row = cur.fetchone() or {}
+            cur.close()
+        finish_strategy_run(int(row.get("id") or 0), reason=log_msg)
+    except Exception as e:
+        logger.debug("auto_stop: strategy run finalization failed for strategy %s: %s", sid, e)
 
     try:
         from app import get_trading_executor

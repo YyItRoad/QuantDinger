@@ -40,6 +40,20 @@ def _parse_positive_int(value) -> int:
         return 0
 
 
+def _user_list_options():
+    """Collect the shared user-list filters from the current request."""
+    user_id = _parse_positive_int(request.args.get('user_id'))
+    return {
+        'search': request.args.get('search', '', type=str),
+        'user_id': user_id if user_id > 0 else None,
+        'role': request.args.get('role', '', type=str),
+        'status': request.args.get('status', '', type=str),
+        'vip_status': request.args.get('vip_status', '', type=str),
+        'sort_by': request.args.get('sort_by', '', type=str),
+        'sort_order': request.args.get('sort_order', '', type=str),
+    }
+
+
 def _ensure_chart_templates_column():
     """Back-compatible wrapper for older route-local callers."""
     ensure_chart_templates_column()
@@ -59,18 +73,20 @@ def list_users():
         page_size: int (default 20, max 100)
         search: str (optional, search by username/email/nickname/id)
         user_id: int (optional, exact user id filter)
+        role: str (optional)
+        status: str (optional, active or disabled)
+        vip_status: str (optional, active or inactive)
+        sort_by: str (optional, credits)
+        sort_order: str (optional, asc or desc)
     """
     try:
         page = request.args.get('page', 1, type=int)
         page_size = request.args.get('page_size', 20, type=int)
-        search = request.args.get('search', '', type=str)
-        user_id = _parse_positive_int(request.args.get('user_id'))
-        if user_id <= 0:
-            user_id = None
         page_size = min(100, max(1, page_size))
+        options = _user_list_options()
         
         result = get_user_service().list_users(
-            page=page, page_size=page_size, search=search, user_id=user_id,
+            page=page, page_size=page_size, **options,
         )
         
         return jsonify({
@@ -89,11 +105,7 @@ def list_users():
 def export_users():
     """Export all users as an Excel-friendly CSV file (admin only)."""
     try:
-        search = request.args.get('search', '', type=str)
-        user_id = _parse_positive_int(request.args.get('user_id'))
-        if user_id <= 0:
-            user_id = None
-        users = get_user_service().list_all_users_for_export(search=search, user_id=user_id)
+        users = get_user_service().list_all_users_for_export(**_user_list_options())
 
         output = StringIO()
         output.write('\ufeff')
@@ -1073,7 +1085,7 @@ def _admin_strategy_ledger_metrics(
     """Build admin metrics from the ledger selected by execution mode."""
     mode = str(execution_mode or '').strip().lower()
     initial_capital = float(strategy_initial_capital or 0)
-    if mode == 'signal' and float(trade_stats.get('virtual_initial_capital') or 0) > 0:
+    if initial_capital <= 0 and mode == 'signal' and float(trade_stats.get('virtual_initial_capital') or 0) > 0:
         initial_capital = float(trade_stats['virtual_initial_capital'])
     total_unrealized_pnl = sum(float(p.get('unrealized_pnl') or 0) for p in positions)
     total_realized_pnl = float(trade_stats.get('total_realized_pnl') or 0)
@@ -1159,11 +1171,12 @@ def get_system_strategies():
             'position_count': (
                 "(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal' "
                 "THEN (SELECT COUNT(*) FROM qd_strategy_virtual_positions vp WHERE vp.strategy_id = s.id AND ABS(COALESCE(vp.size, 0)) > 0) "
-                "ELSE (SELECT COUNT(*) FROM qd_strategy_positions p WHERE p.strategy_id = s.id AND ABS(COALESCE(p.size, 0)) > 0) END)"
+                "ELSE (SELECT COUNT(*) FROM qd_strategy_positions p WHERE p.strategy_id = s.id AND ABS(COALESCE(p.size, 0)) > 0 AND COALESCE(p.position_state, 'open') <> 'exit_residual') END)"
             ),
             'total_equity': (
                 "(CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal' THEN "
-                "COALESCE((SELECT va.initial_cash + va.realized_pnl FROM qd_strategy_virtual_accounts va WHERE va.strategy_id = s.id), s.initial_capital, 0) "
+                "COALESCE(s.initial_capital, (SELECT va.initial_cash FROM qd_strategy_virtual_accounts va WHERE va.strategy_id = s.id), 0) "
+                "+ COALESCE((SELECT va.realized_pnl FROM qd_strategy_virtual_accounts va WHERE va.strategy_id = s.id), 0) "
                 "+ COALESCE((SELECT SUM(vp.unrealized_pnl) FROM qd_strategy_virtual_positions vp WHERE vp.strategy_id = s.id), 0) "
                 "ELSE COALESCE((SELECT SUM(p.equity) FROM qd_strategy_positions p WHERE p.strategy_id = s.id), 0) END)"
             ),
@@ -1302,11 +1315,14 @@ def get_system_strategies():
                     f"""
                     SELECT ledger.strategy_id, ledger.symbol, ledger.side, ledger.size,
                            ledger.entry_price, ledger.current_price, ledger.unrealized_pnl,
-                           ledger.pnl_percent, ledger.equity, ledger.updated_at
+                           ledger.pnl_percent, ledger.equity, ledger.position_state,
+                           ledger.tradable_size, ledger.residual_reason, ledger.updated_at
                     FROM (
                         SELECT p.strategy_id, p.symbol, p.side, p.size, p.entry_price,
                                p.current_price, p.unrealized_pnl, p.pnl_percent,
-                               p.equity, p.updated_at
+                                p.equity, COALESCE(p.position_state, 'open') AS position_state,
+                                COALESCE(p.tradable_size, 0) AS tradable_size,
+                                COALESCE(p.residual_reason, '') AS residual_reason, p.updated_at
                         FROM qd_strategy_positions p
                         JOIN qd_strategies_trading s ON s.id = p.strategy_id
                         WHERE p.strategy_id IN ({placeholders})
@@ -1315,7 +1331,8 @@ def get_system_strategies():
                         UNION ALL
                         SELECT vp.strategy_id, vp.symbol, vp.side, vp.size, vp.entry_price,
                                vp.current_price, vp.unrealized_pnl, vp.pnl_percent,
-                               0 AS equity, vp.updated_at
+                                0 AS equity, 'open' AS position_state, 0 AS tradable_size,
+                                '' AS residual_reason, vp.updated_at
                         FROM qd_strategy_virtual_positions vp
                         JOIN qd_strategies_trading s ON s.id = vp.strategy_id
                         WHERE vp.strategy_id IN ({placeholders})
@@ -1364,7 +1381,7 @@ def get_system_strategies():
                            CASE WHEN LOWER(COALESCE(s.execution_mode, 'signal')) = 'signal'
                                 THEN COALESCE(va.realized_pnl, 0)
                                 ELSE COALESCE(lt.total_realized_pnl, 0) END AS total_realized_pnl,
-                           COALESCE(va.initial_cash, s.initial_capital, 0) AS virtual_initial_capital,
+                           COALESCE(s.initial_capital, va.initial_cash, 0) AS virtual_initial_capital,
                            COALESCE(va.cash_balance, 0) AS virtual_cash_balance
                     FROM qd_strategies_trading s
                     LEFT JOIN live_trades lt ON lt.strategy_id = s.id

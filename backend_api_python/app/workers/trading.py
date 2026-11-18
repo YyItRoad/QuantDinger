@@ -33,6 +33,11 @@ class TradingWorker:
         self.strategy_lease_seconds = max(10, int(os.getenv("STRATEGY_RUNTIME_LEASE_SEC", "30")))
         self.poll_seconds = max(0.1, float(os.getenv("STRATEGY_COMMAND_WORKER_POLL_SEC", "0.5")))
         self.max_attempts = max(1, int(os.getenv("STRATEGY_COMMAND_MAX_ATTEMPTS", "3")))
+        self.restore_max_attempts = max(
+            1,
+            int(os.getenv("STRATEGY_RESTORE_MAX_ATTEMPTS", "5")),
+        )
+        self._restore_failure_counts: dict[int, int] = {}
         self._stop = threading.Event()
         self._last_heartbeat = 0.0
         self._global_lease_key = "trading-global-services"
@@ -118,8 +123,16 @@ class TradingWorker:
 
     def restore_desired_strategies(self) -> None:
         from app.services.strategy import StrategyService
+        from app.services.strategy_lifecycle import maybe_auto_stop_on_exchange_error
 
         rows = StrategyService().get_running_strategies_with_type()
+        desired_ids = {
+            int(row["id"])
+            for row in (rows or [])
+            if int(row.get("id") or 0) > 0
+        }
+        for strategy_id in set(self._restore_failure_counts) - desired_ids:
+            self._restore_failure_counts.pop(strategy_id, None)
         restored = 0
         for row in rows or []:
             self._maintain_ownership()
@@ -146,11 +159,36 @@ class TradingWorker:
                 result = self._start(strategy_id, wait_ready=False)
                 if result.get("runtime_owner") == "trading-worker-pool":
                     self._remote_strategy_ids.add(strategy_id)
+                self._restore_failure_counts.pop(strategy_id, None)
                 restored += int(result.get("status") == "running")
-            except Exception:
-                # A predecessor's lease or a temporary dependency failure must
-                # not erase the persisted intention to run after a restart.
-                logger.warning("Strategy restore will retry: %s", strategy_id, exc_info=True)
+            except Exception as exc:
+                # Retry transient recovery failures, but stop deterministic or
+                # repeatedly failing strategies so recovery cannot loop forever.
+                failures = self._restore_failure_counts.get(strategy_id, 0) + 1
+                self._restore_failure_counts[strategy_id] = failures
+                stopped = maybe_auto_stop_on_exchange_error(
+                    strategy_id,
+                    str(exc),
+                    source="strategy_restore",
+                    consecutive_failures=failures,
+                    consecutive_threshold=self.restore_max_attempts,
+                )
+                if stopped:
+                    self._restore_failure_counts.pop(strategy_id, None)
+                    logger.error(
+                        "Strategy restore stopped after failure: strategy=%s attempts=%s",
+                        strategy_id,
+                        failures,
+                        exc_info=True,
+                    )
+                    continue
+                logger.warning(
+                    "Strategy restore will retry: strategy=%s attempt=%s/%s",
+                    strategy_id,
+                    failures,
+                    self.restore_max_attempts,
+                    exc_info=True,
+                )
             finally:
                 self._maintain_ownership()
         if restored:
@@ -184,7 +222,14 @@ class TradingWorker:
                     **({"exit_reason": command.payload["exit_reason"]} if command.payload.get("exit_reason") else {}),
                 )
             elif command.command_type == "restart":
-                self._stop_strategy(command.strategy_id)
+                from app.services.strategy import StrategyService
+
+                if not StrategyService().request_strategy_runtime_restart(
+                    command.strategy_id,
+                    user_id=command.user_id or None,
+                ):
+                    raise RuntimeError("Strategy is not running or no longer exists.")
+                self._stop_strategy(command.strategy_id, persist_status=False)
                 result = self._start(command.strategy_id)
             else:
                 result = self._reconcile(command.strategy_id)
@@ -280,7 +325,14 @@ class TradingWorker:
         check = getattr(self.repository, "has_active_strategy_lease", None)
         return bool(callable(check) and check(int(strategy_id)))
 
-    def _stop_strategy(self, strategy_id: int, *, close_positions: bool = False, exit_reason: str = "") -> dict:
+    def _stop_strategy(
+        self,
+        strategy_id: int,
+        *,
+        close_positions: bool = False,
+        exit_reason: str = "",
+        persist_status: bool = True,
+    ) -> dict:
         append_strategy_log(strategy_id, "info", "strategyRuntime.stopCommand")
         if self.distributed_bar_evaluation:
             from app.services.strategy_event_subscriptions import (
@@ -310,7 +362,7 @@ class TradingWorker:
             )
             self.repository.revoke_strategy_lease(strategy_id=strategy_id)
             return result
-        if not self.executor.stop_strategy(strategy_id, persist_status=True):
+        if not self.executor.stop_strategy(strategy_id, persist_status=persist_status):
             raise RuntimeError("Executor failed to stop the local strategy runtime.")
         self._lease_heartbeat.forget_strategy(strategy_id)
         self.repository.release_strategy_lease(strategy_id=strategy_id, owner_id=self.worker_id)

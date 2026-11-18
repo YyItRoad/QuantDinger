@@ -62,7 +62,8 @@ def get_positions():
                 cur.execute(
                     """
                     SELECT id, strategy_id, symbol, side, size, entry_price, current_price, highest_price,
-                           unrealized_pnl, pnl_percent, equity, updated_at
+                           unrealized_pnl, pnl_percent, equity, position_state, tradable_size,
+                           residual_reason, residual_classified_at, updated_at
                     FROM qd_strategy_positions
                     WHERE strategy_id = ?
                     ORDER BY id DESC
@@ -118,7 +119,8 @@ def get_positions():
             {
                 "symbol": st.get("symbol"),
                 "trading_config": trading_config,
-            }
+            },
+            strategy_id=int(strategy_id),
         )
         if allowed:
             allowed_upper = {
