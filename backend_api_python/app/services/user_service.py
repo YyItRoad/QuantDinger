@@ -4,6 +4,7 @@ User Service - Multi-user management
 Handles user CRUD operations, password hashing, and role management.
 """
 import hashlib
+import hmac
 import re
 import os
 from typing import Optional, Dict, Any, List
@@ -22,7 +23,7 @@ try:
     HAS_BCRYPT = True
 except ImportError:
     HAS_BCRYPT = False
-    logger.warning("bcrypt not installed. Using SHA256 for password hashing (less secure).")
+    logger.warning("bcrypt is unavailable. Password creation requires bcrypt.")
 
 
 _DEFAULT_WATCHLIST = [
@@ -484,16 +485,12 @@ class UserService:
             return False
 
     def hash_password(self, password: str) -> str:
-        """Hash password using bcrypt (preferred) or SHA256 (fallback)"""
-        if HAS_BCRYPT:
-            salt = bcrypt.gensalt(rounds=12)
-            return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-        else:
-            # Fallback to SHA256 with salt
-            salt = os.urandom(16).hex()
-            hashed = hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
-            return f"sha256${salt}${hashed}"
-    
+        """Hash new passwords with bcrypt."""
+        if not HAS_BCRYPT:
+            raise RuntimeError("bcrypt is required to create a password hash")
+        salt = bcrypt.gensalt(rounds=12)
+        return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
     def verify_password(self, password: str, password_hash: str) -> bool:
         """Verify password against hash"""
         if password_hash.startswith('$2b$') or password_hash.startswith('$2a$'):
@@ -505,14 +502,14 @@ class UserService:
                     return False
             return False
         elif password_hash.startswith('sha256$'):
-            # SHA256 fallback hash
+            # Verify legacy hashes so existing accounts can still sign in.
             parts = password_hash.split('$')
             if len(parts) != 3:
                 return False
             salt = parts[1]
             stored_hash = parts[2]
             computed = hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
-            return computed == stored_hash
+            return hmac.compare_digest(computed.encode("ascii"), stored_hash.encode("utf-8"))
         return False
     
     def get_user_by_id(self, user_id: int) -> Optional[Dict[str, Any]]:

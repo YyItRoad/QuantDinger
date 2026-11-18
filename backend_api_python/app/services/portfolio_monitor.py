@@ -1508,8 +1508,8 @@ def run_single_monitor(
             user_credits = billing.get_user_credits(monitor_user_id)
             if user_credits < total_cost:
                 logger.warning(
-                    f"Monitor #{monitor_id} skipped: insufficient credits "
-                    f"({user_credits} < {total_cost} for {symbol_count} symbols)"
+                    "Monitor #%s skipped: insufficient credits for %s symbols",
+                    monitor_id, symbol_count,
                 )
                 skip_result = {
                     'success': False,
@@ -1521,13 +1521,13 @@ def run_single_monitor(
                 return skip_result
             for i in range(symbol_count):
                 pos = positions[i]
-                ok, msg = billing.check_and_consume(
+                ok, _ = billing.check_and_consume(
                     user_id=monitor_user_id,
                     feature='ai_analysis',
                     reference_id=f"monitor_{monitor_id}_{pos.get('symbol', '')}"
                 )
                 if not ok:
-                    logger.warning(f"Monitor #{monitor_id} billing failed at symbol #{i+1}: {msg}")
+                    logger.warning("Monitor #%s billing failed at symbol #%s", monitor_id, i + 1)
                     break
 
         if monitor_type == 'ai':
