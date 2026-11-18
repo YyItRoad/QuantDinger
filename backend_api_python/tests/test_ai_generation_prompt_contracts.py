@@ -9,6 +9,7 @@ from app.services.ai_generation_contracts import (
     SCRIPT_STRATEGY_REPAIR_REQUIREMENTS,
     SCRIPT_STRATEGY_SYSTEM_PROMPT,
 )
+from app.utils.safe_exec import RESERVED_SANDBOX_IDENTIFIERS
 
 
 def test_strategy_generation_prompt_is_v2_and_source_controlled():
@@ -106,6 +107,26 @@ def test_strategy_generation_prompt_matches_market_and_execution_boundaries():
     assert "Keep deployment `execution_mode` out of strategy source" in SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
 
 
+def test_strategy_generation_and_repair_prompts_match_reserved_identifier_rules():
+    for prompt in (SCRIPT_STRATEGY_SYSTEM_PROMPT, SCRIPT_STRATEGY_REPAIR_REQUIREMENTS):
+        for name in RESERVED_SANDBOX_IDENTIFIERS:
+            assert f"`{name}`" in prompt
+        assert "callback" in prompt
+        assert "exact-name" in prompt.lower()
+        assert "`open_long`" in prompt
+        assert "substring" in prompt
+        assert "dunder" in prompt
+
+
+def test_indicator_generation_and_repair_prompts_match_reserved_identifier_rules():
+    for prompt in (INDICATOR_GENERATION_CONTRACT, INDICATOR_REPAIR_REQUIREMENTS):
+        assert "reserved sandbox identifiers" in prompt
+        for name in RESERVED_SANDBOX_IDENTIFIERS:
+            assert f"`{name}`" in prompt
+        assert "`open_long`" in prompt
+        assert "dunder" in prompt
+
+
 def test_indicator_prompt_remains_chart_only():
     assert "chart indicator is visual analysis code only" in INDICATOR_SYSTEM_CONTRACT
     assert "must not open, close, size, backtest, or live trade" in INDICATOR_SYSTEM_CONTRACT
@@ -118,7 +139,34 @@ def test_indicator_generation_prompt_uses_notification_safe_signal_contract():
     assert "Signal names are dynamic" in INDICATOR_GENERATION_CONTRACT
     assert "does not restrict signal names" in INDICATOR_GENERATION_CONTRACT
     assert "one-bar edge events" in INDICATOR_GENERATION_CONTRACT
+    assert "never emit `type='up'` or `type='down'`" in INDICATOR_GENERATION_CONTRACT
     assert "never infer activation from `text` or `textData`" in INDICATOR_REPAIR_REQUIREMENTS
+
+
+def test_indicator_generation_prompt_preserves_pine_projection_semantics():
+    assert "Pine pivot backpainting is a visual exception" in INDICATOR_GENERATION_CONTRACT
+    assert "`extendRight=True`" in INDICATOR_GENERATION_CONTRACT
+    assert "Wilder/RMA seeding" in INDICATOR_GENERATION_CONTRACT
+    assert "canonical renderer style fields" in INDICATOR_GENERATION_CONTRACT
+
+
+def test_indicator_generation_prompt_defines_zone_layer_contract():
+    assert "'top': number, 'bottom': number" in INDICATOR_GENERATION_CONTRACT
+    assert "never cloud-only `upper`/`lower`" in INDICATOR_GENERATION_CONTRACT
+    assert "connecting successive boxes with continuous line plots" in INDICATOR_GENERATION_CONTRACT
+    assert "final mutated fill, border, and dashed state" in INDICATOR_REPAIR_REQUIREMENTS
+
+
+def test_indicator_generation_prompt_preserves_stateful_pine_object_lifecycle():
+    assert "chronological single-pass object state machine" in INDICATOR_GENERATION_CONTRACT
+    assert "freeze the previous object's endpoint and style" in INDICATOR_GENERATION_CONTRACT
+    assert "apply later `set_*` mutations only to the object currently referenced" in INDICATOR_GENERATION_CONTRACT
+    assert "merge support, resistance, bullish, bearish" in INDICATOR_GENERATION_CONTRACT
+    assert "never concatenate objects by semantic type" in INDICATOR_GENERATION_CONTRACT
+    assert "solid historical trend plot" in INDICATOR_GENERATION_CONTRACT
+    assert "two source points preserve the exact slope" in INDICATOR_GENERATION_CONTRACT
+    assert "without adding a distant autoscale point" in INDICATOR_GENERATION_CONTRACT
+    assert "Do not approximate the projection with a horizontal ray" in INDICATOR_GENERATION_CONTRACT
 
 
 def test_indicator_generation_prompt_uses_native_cloud_contract():
@@ -129,6 +177,12 @@ def test_indicator_generation_prompt_uses_native_cloud_contract():
     assert "never emit one `zone` or box layer per bar" in INDICATOR_GENERATION_CONTRACT
     assert "Preserve valid `cloud` plots" in INDICATOR_REPAIR_REQUIREMENTS
     assert "replace them with one `cloud` plot" in INDICATOR_REPAIR_REQUIREMENTS
+
+
+def test_indicator_generation_prompt_routes_sparse_price_events_to_signals():
+    assert "Pine `plotshape`, labels, diamonds" in INDICATOR_GENERATION_CONTRACT
+    assert "to `signals`, not to `circle` plots" in INDICATOR_GENERATION_CONTRACT
+    assert "do not change renderer or plot contracts" in INDICATOR_REPAIR_REQUIREMENTS
 
 
 def test_indicator_generation_and_repair_prompts_are_english_only():

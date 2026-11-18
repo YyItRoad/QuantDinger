@@ -1,15 +1,15 @@
 """MCP security + tool registry tests."""
 from __future__ import annotations
 
-import importlib
 import asyncio
+import importlib
 import json
 import re
 import sys
 from pathlib import Path
 
-import pytest
 import httpx
+import pytest
 
 pytest.importorskip("mcp")
 
@@ -30,7 +30,7 @@ def fresh_module(monkeypatch):
 
 
 def test_mcp_tool_registry_complete(fresh_module):
-    assert len(fresh_module.MCP_TOOL_NAMES) == 81
+    assert len(fresh_module.MCP_TOOL_NAMES) == 84
     # Every exported name should correspond to a registered @mcp.tool function.
     for name in fresh_module.MCP_TOOL_NAMES:
         assert hasattr(fresh_module, name), f"missing tool function: {name}"
@@ -456,3 +456,43 @@ def test_archive_tool_schema_rejects_bad_input(fresh_module, monkeypatch, tool, 
     with pytest.raises(ToolError, match='validation error'):
         asyncio.run(fresh_module.mcp.call_tool(tool, args))
     get.assert_not_called()
+def test_redaction_masks_notification_credentials_and_auth_headers():
+    from quantdinger_mcp.security import redact_secrets
+
+    payload = {
+        "telegram_bot_token": "telegram-secret",
+        "telegramToken": "telegram-alias",
+        "webhook.token": "webhook-secret",
+        "webhookSigningSecret": "signing-secret",
+        "webhook_headers": {
+            "Authorization": "Bearer private",
+            "X-Api-Key": "header-secret",
+            "Content-Type": "application/json",
+        },
+        "telegram_chat_id": "12345",
+        "webhook_url": "https://example.com/hook",
+    }
+
+    out = redact_secrets(payload)
+
+    assert out["telegram_bot_token"] == "***"
+    assert out["telegramToken"] == "***"
+    assert out["webhook.token"] == "***"
+    assert out["webhookSigningSecret"] == "***"
+    assert out["webhook_headers"]["Authorization"] == "***"
+    assert out["webhook_headers"]["X-Api-Key"] == "***"
+    assert out["webhook_headers"]["Content-Type"] == "application/json"
+    assert out["telegram_chat_id"] == "12345"
+    assert out["webhook_url"] == "https://example.com/hook"
+
+
+def test_redaction_masks_json_encoded_webhook_headers():
+    from quantdinger_mcp.security import redact_secrets
+
+    out = redact_secrets({
+        "webhook_headers": '{"Authorization":"Bearer private","Content-Type":"application/json"}',
+    })
+
+    assert "Bearer private" not in out["webhook_headers"]
+    assert '"Authorization":"***"' in out["webhook_headers"]
+    assert '"Content-Type":"application/json"' in out["webhook_headers"]

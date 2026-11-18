@@ -652,7 +652,8 @@ def _classify_agent_intent(message: str, attachments: list[dict], context: dict,
         "available_research_domains": sorted(RESEARCH_DATA_DOMAINS),
     })
     try:
-        raw = LLMService().safe_call_llm(system_prompt, user_prompt, schema.copy())
+        # Cap each classification request; model/provider fallbacks can take longer in total.
+        raw = LLMService().safe_call_llm(system_prompt, user_prompt, schema.copy(), timeout_seconds=20)
         plan = _normalize_agent_intent(raw, message, has_image, context, language)
         report = str(raw.get("report") or "")
         if report.startswith("Analysis failed:") or report.startswith("Failed to parse"):
@@ -1889,14 +1890,14 @@ def _macro_setup_guidance(indicator: str, provider_status: dict) -> list[dict]:
             "reason": "Provides structured global macro calendar fields such as actual, forecast, and previous.",
         },
         {
-            "target": "Google Custom Search fallback",
-            "settings": ["SEARCH_GOOGLE_API_KEY", "SEARCH_GOOGLE_CX"],
-            "reason": "Recommended low-cost fallback for current macro releases, company news, symbol discovery, and source verification.",
+            "target": "Configured web search",
+            "settings": ["TAVILY_API_KEYS", "SEARCH_SEARXNG_BASE_URL", "SERPAPI_KEYS"],
+            "reason": "Provides current macro releases, company news, symbol discovery, and source verification.",
         },
         {
-            "target": "Other search providers",
-            "settings": ["SEARCH_SEARXNG_BASE_URL", "SEARCH_GOOGLE_API_KEY + SEARCH_GOOGLE_CX", "SEARCH_BING_API_KEY", "TAVILY_API_KEYS"],
-            "reason": "Lets Copilot verify newly released macro figures when the calendar provider is missing them.",
+            "target": "Legacy Google Custom Search",
+            "settings": ["SEARCH_GOOGLE_API_KEY", "SEARCH_GOOGLE_CX"],
+            "reason": "Existing Google Custom Search customers can use it during the provider migration period.",
         },
     ]
     if indicator == "US_NONFARM_PAYROLLS":

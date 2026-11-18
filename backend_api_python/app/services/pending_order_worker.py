@@ -8,6 +8,7 @@ This worker polls `pending_orders` periodically and dispatches orders based on `
 
 from __future__ import annotations
 
+import hashlib
 import json
 from app.services.strategy_runtime.cancellations import dispatch_requested_cancel
 import os
@@ -68,6 +69,7 @@ from app.services.pending_orders.live_order_phases import (
     maker_limit_price,
     wait_live_order_fill,
 )
+from app.services.pending_orders.alpaca_sync_persistence import AlpacaOrderSyncPersistenceMixin
 from app.services.pending_orders.entry_position_guard import (
     evaluate_entry_position_guard,
     strategy_allows_simultaneous_legs as _strategy_allows_simultaneous_legs,  # noqa: F401 - compatibility export
@@ -84,7 +86,7 @@ from app.services.pending_orders.order_quantities import (
 )
 from app.services.pending_orders.broker_support import (
     broker_order_type as _broker_order_type,
-    broker_protection_prices as _broker_protection_prices,
+    broker_protection_prices as _broker_protection_prices, native_stock_protection_allowed as _stock_protection,
     redact_exchange_json as _redact_exchange_json,
 )
 from app.services.pending_orders.submission_recovery import SubmissionRecoveryMixin
@@ -118,6 +120,7 @@ _serialized_live_dispatch = lambda func: serialized_live_dispatch(func, strategy
 
 
 class PendingOrderWorker(
+    AlpacaOrderSyncPersistenceMixin,
     SubmissionRecoveryMixin,
     PendingOrderLoops,
     PendingOrderPositionSyncMixin,
@@ -414,86 +417,6 @@ class PendingOrderWorker(
                     e,
                 )
 
-    def _fetch_alpaca_sent_orders(self, limit: int = 50) -> List[Dict[str, Any]]:
-        try:
-            try:
-                stale_sec = int(self._stale_processing_sec or 0)
-            except Exception:
-                stale_sec = 0
-            if stale_sec > 0:
-                with get_db_connection() as db:
-                    cur = db.cursor()
-                    cur.execute(
-                        """
-                        UPDATE pending_orders
-                        SET status = 'sent',
-                            dispatch_note = 'alpaca_fill_sync:requeued_stale_sync',
-                            updated_at = NOW()
-                        WHERE status = 'syncing'
-                          AND LOWER(COALESCE(exchange_id, '')) = 'alpaca'
-                          AND updated_at < NOW() - (%s * INTERVAL '1 second')
-                        """,
-                        (stale_sec,),
-                    )
-                    db.commit()
-                    cur.close()
-            with get_db_connection() as db:
-                cur = db.cursor()
-                cur.execute(
-                    """
-                    SELECT *
-                    FROM pending_orders
-                    WHERE (status = 'sent' OR (status IN ('filled', 'cancelled') AND COALESCE(filled, 0) >
-                          COALESCE((SELECT SUM(t.amount) FROM qd_strategy_trades t
-                                    WHERE t.pending_order_id = pending_orders.id), 0)))
-                      AND LOWER(COALESCE(exchange_id, '')) = 'alpaca'
-                      AND (
-                            COALESCE(exchange_order_id, '') <> ''
-                            OR COALESCE(client_order_id, '') <> ''
-                          )
-                    ORDER BY sent_at ASC NULLS FIRST, id ASC
-                    LIMIT %s
-                    """,
-                    (int(limit),),
-                )
-                rows = cur.fetchall() or []
-                cur.close()
-            return rows
-        except Exception as e:
-            logger.warning("fetch_alpaca_sent_orders failed: %s", e)
-            return []
-
-    def _claim_alpaca_sent_order(self, order_id: int) -> Optional[Dict[str, Any]]:
-        """Atomically claim one Alpaca sent order for fill sync."""
-        if int(order_id or 0) <= 0:
-            return None
-        try:
-            with get_db_connection() as db:
-                cur = db.cursor()
-                cur.execute(
-                    """
-                    UPDATE pending_orders
-                    SET status = 'syncing',
-                        dispatch_note = 'alpaca_fill_sync:syncing',
-                        updated_at = NOW()
-                    WHERE id = %s
-                      AND (status = 'sent' OR (status IN ('filled', 'cancelled') AND COALESCE(filled, 0) >
-                          COALESCE((SELECT SUM(t.amount) FROM qd_strategy_trades t
-                                    WHERE t.pending_order_id = pending_orders.id), 0)))
-                      AND LOWER(COALESCE(exchange_id, '')) = 'alpaca'
-                      AND COALESCE(exchange_order_id, '') <> ''
-                    RETURNING *
-                    """,
-                    (int(order_id),),
-                )
-                row = cur.fetchone()
-                db.commit()
-                cur.close()
-            return row if isinstance(row, dict) else None
-        except Exception as e:
-            logger.warning("claim_alpaca_sent_order failed: pending_id=%s err=%s", order_id, e)
-            return None
-
     def _sync_one_alpaca_sent_order(self, row: Dict[str, Any]) -> None:
         order_id = int(row.get("id") or 0)
         if order_id <= 0:
@@ -521,13 +444,14 @@ class PendingOrderWorker(
 
         sc = load_strategy_configs(strategy_id)
         exchange_config = resolve_exchange_config(sc.get("exchange_config") or {}, user_id=int(sc.get("user_id") or 1))
-        if str(exchange_config.get("exchange_id") or "").strip().lower() != "alpaca":
+        exchange_id = str(exchange_config.get("exchange_id") or row.get("exchange_id") or "").strip().lower()
+        if exchange_id not in {"alpaca", "tiger", "webull"}:
             return
 
         try:
             client = create_client(exchange_config)
         except Exception as e:
-            logger.warning("Alpaca fill sync create_client failed: pending_id=%s err=%s", order_id, e)
+            logger.warning("Broker fill sync create_client failed: exchange=%s pending_id=%s err=%s", exchange_id, order_id, e)
             return
 
         global AlpacaClient
@@ -537,7 +461,9 @@ class PendingOrderWorker(
                 AlpacaClient = _AlpacaClient
             except Exception:
                 AlpacaClient = None
-        if AlpacaClient is None or not isinstance(client, AlpacaClient):
+        from app.services.openapi_brokers import TigerClient, WebullClient
+        supported = (TigerClient, WebullClient)
+        if not isinstance(client, supported) and (AlpacaClient is None or not isinstance(client, AlpacaClient)):
             return
 
         dispatch_requested_cancel(client, row, payload, exchange_config)
@@ -550,7 +476,7 @@ class PendingOrderWorker(
             exchange_order_id = str(result.order_id)
             self._bind_reconciled_exchange_order_id(
                 order_id=order_id,
-                exchange_id="alpaca",
+                exchange_id=exchange_id,
                 market_type=str(row.get("market_type") or "USStock"),
                 client_order_id=client_order_id,
                 exchange_order_id=exchange_order_id,
@@ -562,8 +488,28 @@ class PendingOrderWorker(
         previous_filled = float(row.get("filled") or 0.0)
         previous_avg = float(row.get("avg_price") or 0.0)
         raw_json = json.dumps(result.raw or {}, ensure_ascii=False)
+        fee_status = str((result.raw or {}).get("fee_status") or "pending").strip().lower()
+        if fee_status not in {"actual", "actual_zero"}:
+            fee_status = "pending"
+        cumulative_fees = _fee_breakdown_snapshot(result.raw or {})
         cumulative_commission, commission_ccy = _commission_snapshot(result.raw)
         commission_delta = max(0.0, cumulative_commission - _previous_commission(row))
+        cumulative_commission_quote = (result.raw or {}).get("commission_quote")
+        try:
+            cumulative_commission_quote = (
+                float(cumulative_commission_quote)
+                if cumulative_commission_quote is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            cumulative_commission_quote = None
+        if cumulative_commission_quote is None and cumulative_fees:
+            cumulative_commission_quote = fee_breakdown_to_quote(
+                client,
+                symbol=str(payload.get("symbol") or row.get("symbol") or ""),
+                fees=cumulative_fees,
+                fill_price=cumulative_avg,
+            )
 
         delta = cumulative_filled - previous_filled
         if cumulative_filled > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
@@ -580,7 +526,7 @@ class PendingOrderWorker(
                 or (sc.get("trading_config") or {}).get("market_category")
                 or "USStock"
             )
-            market_type_for_client = "crypto" if market_category.lower() in ("crypto", "cryptocurrency") else "USStock"
+            market_type_for_client = "crypto" if market_category.lower() in ("crypto", "cryptocurrency") else market_category
             from app.services.live_trading.fee_quote import fee_to_quote
             commission_quote = fee_to_quote(
                 client,
@@ -596,20 +542,22 @@ class PendingOrderWorker(
                 filled=float(delta),
                 cumulative_filled=cumulative_filled,
                 cumulative_average_price=cumulative_avg,
-                cumulative_fees={commission_ccy: cumulative_commission} if commission_ccy else {},
-                cumulative_commission_quote=fee_to_quote(client, symbol=str(symbol or ""), fee=cumulative_commission, fee_ccy=commission_ccy, fill_price=cumulative_avg),
+                cumulative_fees=cumulative_fees,
+                cumulative_commission_quote=cumulative_commission_quote,
                 avg_price=float(delta_avg),
                 exchange_config=exchange_config,
                 market_type=market_type_for_client,
                 order_id=order_id,
-                fill_source="worker_alpaca_fill_sync",
+                fill_source=f"worker_{exchange_id}_fill_sync",
                 commission=commission_delta,
                 commission_ccy=commission_ccy,
                 commission_quote=commission_quote,
+                fee_status=fee_status,
+                fee_source="rest" if fee_status in {"actual", "actual_zero"} else "",
                 close_reason=trade_close_reason_from_payload(payload, str(signal_type or "")),
                 strategy_run_id=int(payload.get("strategy_run_id") or row.get("strategy_run_id") or 0),
                 order_intent_id=int(payload.get("order_intent_id") or row.get("order_intent_id") or 0),
-                exchange_id="alpaca",
+                exchange_id=exchange_id,
                 exchange_order_id=str(exchange_order_id or ""),
                 raw_fill=result.raw or {},
             )
@@ -617,7 +565,7 @@ class PendingOrderWorker(
             append_strategy_log(
                 strategy_id,
                 "trade",
-                f"Alpaca fill synced: {signal_type} {symbol} filled={delta:.6f} @ {delta_avg:.6f}{_pstr}",
+                f"Broker fill synced: {signal_type} {symbol} filled={delta:.6f} @ {delta_avg:.6f}{_pstr} (exchange={exchange_id})",
             )
 
         final_statuses = {"filled", "canceled", "cancelled", "rejected", "expired"}
@@ -637,72 +585,9 @@ class PendingOrderWorker(
             avg_price=cumulative_avg,
             exchange_response_json=raw_json,
             final=status in final_statuses,
+            fee_status=fee_status,
+            fee_source="rest" if fee_status in {"actual", "actual_zero"} else "",
         )
-
-    def _update_alpaca_sent_order_snapshot(
-        self,
-        *,
-        order_id: int,
-        status: str,
-        exchange_status: str,
-        filled: float,
-        avg_price: float,
-        exchange_response_json: str,
-        final: bool,
-    ) -> None:
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                UPDATE pending_orders
-                SET status = %s,
-                    last_error = CASE WHEN %s = 'failed' THEN %s ELSE '' END,
-                    dispatch_note = %s,
-                    filled = %s,
-                    avg_price = %s,
-                    exchange_response_json = %s,
-                    executed_at = CASE WHEN %s THEN NOW() ELSE executed_at END,
-                    updated_at = NOW()
-                WHERE id = %s
-                """,
-                (
-                    str(status or "sent"),
-                    str(status or "sent"),
-                    str(exchange_status or ""),
-                    f"alpaca_fill_sync:{exchange_status or 'unknown'}",
-                    float(filled or 0.0),
-                    float(avg_price or 0.0),
-                    str(exchange_response_json or ""),
-                    bool(final and float(filled or 0.0) > 0),
-                    int(order_id),
-                ),
-            )
-            cur.execute(
-                """
-                UPDATE strategy_order_intents soi
-                SET status = CASE
-                        WHEN %s = 'filled' THEN 'filled'
-                        WHEN %s = 'failed' THEN 'rejected'
-                        WHEN %s = 'cancelled' THEN 'cancelled'
-                        WHEN %s > 0 THEN 'partially_filled'
-                        ELSE 'submitted'
-                    END,
-                    exchange_order_id = COALESCE(NULLIF(po.exchange_order_id, ''), soi.exchange_order_id),
-                    updated_at = NOW()
-                FROM pending_orders po
-                WHERE po.id = %s
-                  AND po.order_intent_id = soi.id
-                """,
-                (
-                    str(status or "sent"),
-                    str(status or "sent"),
-                    str(status or "sent"),
-                    float(filled or 0.0),
-                    int(order_id),
-                ),
-            )
-            db.commit()
-            cur.close()
 
     def _sync_live_sent_orders(self, limit: int = 50) -> None:
         """Reconcile submitted crypto orders, including durable resting limits."""
@@ -1062,7 +947,13 @@ class PendingOrderWorker(
                     entry_price=delta_avg,
                     exchange_config=exchange_config,
                     market_type=market_type,
-                    client_order_id=f"qdprot{order_id}",
+                    client_order_id=self._protection_client_order_id(order_id, aggregate_filled),
+                )
+                self._register_native_protection_bindings(
+                    order_id=order_id,
+                    responses=protection_result,
+                    exchange_id=exchange_id,
+                    market_type=market_type,
                 )
             except Exception as exc:
                 append_strategy_log(
@@ -1170,6 +1061,12 @@ class PendingOrderWorker(
                 "info",
                 f"Exchange fee reconciled: {symbol} rows={fee_backfilled}",
             )
+
+    @staticmethod
+    def _protection_client_order_id(order_id: int, cumulative_filled: float) -> str:
+        scope = f"{int(order_id)}:{max(0.0, float(cumulative_filled or 0.0)):.12f}"
+        digest = hashlib.blake2s(scope.encode("utf-8"), digest_size=5).hexdigest()
+        return f"qdprot{int(order_id)}-{digest}"
 
     @staticmethod
     def _attach_native_protection(
@@ -1674,6 +1571,43 @@ class PendingOrderWorker(
         except Exception:
             return ""
 
+    def _execute_stock_broker_order(
+        self,
+        *,
+        order_id: int,
+        order_row: Dict[str, Any],
+        payload: Dict[str, Any],
+        client: Any,
+        ctx: Any,
+        exchange_id: str,
+        notify,
+        console,
+    ) -> None:
+        client_order_id = make_client_order_id(
+            exchange_id=exchange_id,
+            strategy_id=ctx.strategy_id,
+            order_id=order_id,
+        )
+        self._execute_alpaca_order(
+            order_id=order_id,
+            order_row=order_row,
+            payload=payload,
+            client=client,
+            strategy_id=ctx.strategy_id,
+            exchange_config=ctx.exchange_config,
+            market_category=ctx.market_category,
+            exchange_id=exchange_id,
+            client_order_id=client_order_id,
+            prepare_submission=self._broker_submission_preparer(
+                order_id=order_id,
+                exchange_id=exchange_id,
+                market_type=ctx.market_type,
+                client_order_id=client_order_id,
+            ),
+            _notify_live_best_effort=notify,
+            _console_print=console,
+        )
+
     def _execute_live_order(self, *, order_id: int, order_row: Dict[str, Any], payload: Dict[str, Any]) -> None:
         """
         Execute a pending order using direct exchange REST clients.
@@ -1781,25 +1715,22 @@ class PendingOrderWorker(
             except ImportError:
                 pass
 
+        from app.services.openapi_brokers import TigerClient, WebullClient
+        stock_broker_id = ""
         if AlpacaClient is not None and isinstance(client, AlpacaClient):
-            broker_client_oid = make_client_order_id(
-                exchange_id="alpaca", strategy_id=strategy_id, order_id=order_id,
-            )
-            self._execute_alpaca_order(
+            stock_broker_id = "alpaca"
+        elif isinstance(client, (TigerClient, WebullClient)):
+            stock_broker_id = exchange_id
+        if stock_broker_id:
+            self._execute_stock_broker_order(
                 order_id=order_id,
                 order_row=order_row,
                 payload=payload,
                 client=client,
-                strategy_id=strategy_id,
-                exchange_config=exchange_config,
-                market_category=market_category,
-                client_order_id=broker_client_oid,
-                prepare_submission=self._broker_submission_preparer(
-                    order_id=order_id, exchange_id="alpaca", market_type=market_type,
-                    client_order_id=broker_client_oid,
-                ),
-                _notify_live_best_effort=_notify_live_best_effort,
-                _console_print=_console_print,
+                ctx=ctx,
+                exchange_id=stock_broker_id,
+                notify=_notify_live_best_effort,
+                console=_console_print,
             )
             return
 
@@ -2343,9 +2274,15 @@ class PendingOrderWorker(
                     entry_price=avg_final,
                     exchange_config=exchange_config,
                     market_type=str(market_type),
-                    client_order_id=f"qdprot{order_id}",
+                    client_order_id=self._protection_client_order_id(order_id, filled_final),
                 )
                 if native_protection:
+                    self._register_native_protection_bindings(
+                        order_id=order_id,
+                        responses=native_protection,
+                        exchange_id=str(exchange_config.get("exchange_id") or ""),
+                        market_type=str(market_type),
+                    )
                     phases["native_protection"] = native_protection
                     append_strategy_log(
                         strategy_id,
@@ -2538,7 +2475,7 @@ class PendingOrderWorker(
             )
             if callable(prepare_submission):
                 prepare_submission()
-            if stop_price > 0 or take_price > 0:
+            if _stock_protection(payload, exchange_config, amount, stop_price, take_price):
                 result = client.place_bracket_order(
                     symbol=symbol,
                     side=action,
@@ -2690,6 +2627,7 @@ class PendingOrderWorker(
         strategy_id: int,
         exchange_config: Dict[str, Any],
         market_category: str,
+        exchange_id: str = "alpaca",
         client_order_id: str = "",
         _notify_live_best_effort,
         _console_print,
@@ -2718,8 +2656,9 @@ class PendingOrderWorker(
 
         # Decide stock vs crypto leg of the Alpaca account based on the
         # strategy's market_category (USStock by default).
+        broker_name = str(exchange_id or "alpaca").strip().lower()
         mc = (market_category or "USStock").strip()
-        market_type_for_client = "crypto" if mc.lower() in ("crypto", "cryptocurrency") else "USStock"
+        market_type_for_client = "crypto" if mc.lower() in ("crypto", "cryptocurrency") else mc
         if market_type_for_client == "crypto" and "short" in sig:
             self._mark_failed(order_id=order_id, error="alpaca_crypto_short_not_supported")
             _notify_live_best_effort(status="failed", error="alpaca_crypto_short_not_supported")
@@ -2735,7 +2674,7 @@ class PendingOrderWorker(
                 entry_price=protection_ref,
             )
             protection_kwargs = {}
-            if market_type_for_client == "USStock" and (stop_price > 0 or take_price > 0):
+            if broker_name == "alpaca" and market_type_for_client == "USStock" and _stock_protection(payload, exchange_config, amount, stop_price, take_price):
                 protection_kwargs = {
                     "stop_loss_price": stop_price,
                     "take_profit_price": take_price,
@@ -2796,8 +2735,8 @@ class PendingOrderWorker(
 
             self._mark_sent(
                 order_id=order_id,
-                note="alpaca_order_sent",
-                exchange_id="alpaca",
+                note=f"{broker_name}_order_sent",
+                exchange_id=broker_name,
                 exchange_order_id=exchange_order_id,
                 exchange_response_json=json.dumps(result.raw or {}, ensure_ascii=False),
                 filled=filled,
@@ -2822,14 +2761,14 @@ class PendingOrderWorker(
                         exchange_config=exchange_config,
                         market_type=str(market_type_for_client or "USStock"),
                         order_id=int(order_id),
-                        fill_source="worker_alpaca",
+                        fill_source=f"worker_{broker_name}",
                         commission=commission,
                         commission_ccy=commission_ccy,
                         commission_quote=commission_quote,
                         close_reason=trade_close_reason_from_payload(payload, str(signal_type)),
                         strategy_run_id=int(payload.get("strategy_run_id") or order_row.get("strategy_run_id") or 0),
                         order_intent_id=int(payload.get("order_intent_id") or order_row.get("order_intent_id") or 0),
-                        exchange_id="alpaca",
+                        exchange_id=broker_name,
                         exchange_order_id=str(exchange_order_id or ""),
                         fee_status="actual" if abs(float(commission or 0.0)) > 1e-18 else "pending",
                         fee_source="rest" if abs(float(commission or 0.0)) > 1e-18 else "",
@@ -2839,7 +2778,7 @@ class PendingOrderWorker(
                     _pstr = f", profit={profit:.4f}" if profit is not None else ""
                     append_strategy_log(
                         strategy_id, "trade",
-                        f"Trade executed: {signal_type} {symbol} filled={filled:.6f} @ {avg_price:.6f}{_pstr} (exchange=alpaca)",
+                        f"Trade executed: {signal_type} {symbol} filled={filled:.6f} @ {avg_price:.6f}{_pstr} (exchange={broker_name})",
                     )
                 else:
                     append_strategy_log(
@@ -2851,7 +2790,7 @@ class PendingOrderWorker(
 
             _notify_live_best_effort(
                 status="sent",
-                exchange_id="alpaca",
+                exchange_id=broker_name,
                 exchange_order_id=exchange_order_id,
                 price_hint=avg_price,
                 amount_hint=filled,
@@ -2961,7 +2900,7 @@ class PendingOrderWorker(
         exchange_id: str = "",
         market_type: str = "",
         observed_filled: float = 0.0,
-    ) -> None:
+    ) -> int:
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
@@ -2969,12 +2908,12 @@ class PendingOrderWorker(
                 row = cur.fetchone()
                 cur.close()
             if not row:
-                return
+                return 0
             row = dict(row)
             payload = json.loads(str(row.get("payload_json") or "{}")) or {}
             from app.services.execution_streams.repository import ExecutionEventRepository
 
-            ExecutionEventRepository().register_binding(
+            return ExecutionEventRepository().register_binding(
                 credential_id=int(row.get("credential_id") or payload.get("credential_id") or 0),
                 exchange_id=str(exchange_id or row.get("exchange_id") or ""),
                 market_type=str(market_type or row.get("market_type") or payload.get("market_type") or "swap"),
@@ -2993,6 +2932,39 @@ class PendingOrderWorker(
             )
         except Exception:
             logger.debug("pending order binding registration failed id=%s", order_id, exc_info=True)
+            return 0
+
+    def _register_native_protection_bindings(
+        self,
+        *,
+        order_id: int,
+        responses: List[Dict[str, Any]],
+        exchange_id: str = "",
+        market_type: str = "swap",
+    ) -> None:
+        if not responses:
+            return
+        binding_id = self._register_pending_order_binding(
+            order_id=int(order_id),
+            client_order_id="",
+            exchange_order_id="",
+            exchange_id=str(exchange_id or ""),
+            market_type=str(market_type or "swap"),
+        )
+        if binding_id <= 0:
+            raise RuntimeError("native_protection_binding_unavailable")
+        from app.services.execution_streams.repository import ExecutionEventRepository
+
+        repository = ExecutionEventRepository()
+        for response in responses:
+            protection = response.get("_qd_protection") if isinstance(response, dict) else None
+            if not isinstance(protection, dict):
+                continue
+            repository.register_identifiers(
+                binding_id,
+                protection.get("identifiers") or [],
+                role=str(protection.get("role") or "protection"),
+            )
 
     def _mark_failed(self, order_id: int, error: str) -> None:
         from app.services.live_trading.partner_attribution import redact_partner_attribution

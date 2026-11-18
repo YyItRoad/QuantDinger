@@ -13,6 +13,9 @@ from app.celery_app import celery_app
 SUPPORTED_KINDS = frozenset(
     {
         "backtest",
+        "factor_benchmark",
+        "factor_benchmark_human",
+        "factor_research",
         "strategy_evolution",
     }
 )
@@ -28,6 +31,18 @@ def _execute(kind: str, payload: dict, on_progress):
         from app.routes.agent_v1.backtests import _run_backtest
 
         return _run_backtest(request_payload, on_progress)
+    if kind == "factor_benchmark":
+        from app.routes.agent_v1.research import _run_factor_benchmark
+
+        return _run_factor_benchmark(request_payload, on_progress)
+    if kind == "factor_research":
+        from app.routes.backtest_center import _run_factor_research_job
+
+        return _run_factor_research_job(request_payload, on_progress)
+    if kind == "factor_benchmark_human":
+        from app.routes.backtest_center import _run_factor_benchmark_job
+
+        return _run_factor_benchmark_job(request_payload, on_progress)
     if kind == "strategy_evolution":
         from app.routes.strategy_evolution import _run_evolution_job
 

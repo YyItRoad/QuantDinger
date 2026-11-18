@@ -183,7 +183,11 @@ def _fetch_position_fuzzy(strategy_id: int, symbol: str, side: str) -> Tuple[Dic
     return {}, canon
 
 
-def strategy_allowed_symbols(strategy_config: Dict[str, Any]) -> Set[str]:
+def strategy_allowed_symbols(
+    strategy_config: Dict[str, Any],
+    *,
+    strategy_id: int = 0,
+) -> Set[str]:
     """
     Symbols a strategy is allowed to own in ``qd_strategy_positions``.
 
@@ -196,9 +200,11 @@ def strategy_allowed_symbols(strategy_config: Dict[str, Any]) -> Set[str]:
     if not isinstance(trading_config, dict):
         trading_config = {}
 
+    dynamic_universe = False
     for raw in (strategy_config.get("symbol"), trading_config.get("symbol")):
         text = str(raw or "").strip()
         if text.lower().startswith(("basket:", "universe:")):
+            dynamic_universe = True
             continue
         norm = normalize_strategy_symbol(text)
         if norm:
@@ -207,6 +213,8 @@ def strategy_allowed_symbols(strategy_config: Dict[str, Any]) -> Set[str]:
     manifest = trading_config.get("strategy_manifest") or trading_config.get("strategyManifest") or {}
     if isinstance(manifest, dict):
         universe = manifest.get("universe") or {}
+        if isinstance(universe, dict) and str(universe.get("reference") or "").strip():
+            dynamic_universe = True
         instruments = universe.get("instruments") or [] if isinstance(universe, dict) else []
         for instrument in instruments:
             if not isinstance(instrument, dict):
@@ -214,6 +222,31 @@ def strategy_allowed_symbols(strategy_config: Dict[str, Any]) -> Set[str]:
             norm = normalize_strategy_symbol(str(instrument.get("symbol") or "").strip())
             if norm:
                 allowed.add(norm.upper())
+
+    # A reference-backed portfolio owns the concrete symbols created by its own
+    # fills. They are not persisted in the static manifest, so include only this
+    # strategy's ledger symbols when reconciling its exchange snapshot.
+    sid = int(strategy_id or strategy_config.get("strategy_id") or strategy_config.get("id") or 0)
+    if dynamic_universe and sid > 0:
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    SELECT symbol FROM qd_strategy_positions WHERE strategy_id = %s
+                    UNION
+                    SELECT symbol FROM qd_strategy_trades WHERE strategy_id = %s
+                    """,
+                    (sid, sid),
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+            for row in rows:
+                norm = normalize_strategy_symbol(str(row.get("symbol") or "").strip())
+                if norm:
+                    allowed.add(norm.upper())
+        except Exception:
+            pass
 
     return allowed
 
@@ -303,7 +336,8 @@ def rebuild_positions_from_trades(strategy_id: int) -> bool:
             return False
         cur.execute(
             """
-            SELECT type, symbol, amount, price, market_type, credential_id, inst_id, fill_source
+            SELECT type, symbol, amount, price, market_type, credential_id, inst_id, fill_source,
+                   strategy_run_id
             FROM qd_strategy_trades
             WHERE strategy_id = %s
             ORDER BY id ASC
@@ -333,6 +367,7 @@ def rebuild_positions_from_trades(strategy_id: int) -> bool:
             filled=float(row.get("amount") or 0.0),
             avg_price=float(row.get("price") or 0.0),
             leg=leg,
+            strategy_run_id=int(row.get("strategy_run_id") or 0),
         )
     return True
 
@@ -408,6 +443,13 @@ def ensure_position_ledger_schema() -> None:
         "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS credential_id INTEGER DEFAULT 0",
         "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS inst_id VARCHAR(80) DEFAULT ''",
         "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS symbol_canonical VARCHAR(50) DEFAULT ''",
+        "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS strategy_run_id INTEGER DEFAULT 0",
+        "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS position_state VARCHAR(24) NOT NULL DEFAULT 'open'",
+        "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS tradable_size DECIMAL(24, 8) NOT NULL DEFAULT 0",
+        "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS residual_reason VARCHAR(64) NOT NULL DEFAULT ''",
+        "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS residual_evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE qd_strategy_positions ADD COLUMN IF NOT EXISTS residual_classified_at TIMESTAMP",
+        "CREATE INDEX IF NOT EXISTS idx_strategy_positions_state ON qd_strategy_positions(strategy_id, position_state) WHERE size > 0",
         "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS credential_id INTEGER DEFAULT 0",
         "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS inst_id VARCHAR(80) DEFAULT ''",
         "ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS strategy_run_id INTEGER DEFAULT 0",
@@ -462,6 +504,7 @@ def ensure_position_ledger_schema() -> None:
         "CREATE INDEX IF NOT EXISTS idx_trades_strategy_symbol_canon ON qd_strategy_trades (strategy_id, market_type, symbol_canonical)",
         "CREATE INDEX IF NOT EXISTS idx_strategy_trades_grid_order ON qd_strategy_trades (grid_order_id) WHERE grid_order_id > 0",
         "CREATE INDEX IF NOT EXISTS idx_positions_strategy_leg ON qd_strategy_positions (strategy_id, market_type, symbol_canonical, side)",
+        "CREATE INDEX IF NOT EXISTS idx_positions_strategy_run ON qd_strategy_positions (strategy_id, strategy_run_id)",
     )
     for sql in statements:
         try:
@@ -779,6 +822,7 @@ def upsert_position(
     market_type: str = "",
     credential_id: int = 0,
     inst_id: str = "",
+    strategy_run_id: int = 0,
 ) -> None:
     if user_id is None:
         user_id = _get_user_id_from_strategy(strategy_id)
@@ -801,9 +845,9 @@ def upsert_position(
             """
             INSERT INTO qd_strategy_positions
             (user_id, strategy_id, symbol, symbol_canonical, side, size, entry_price, current_price,
-             highest_price, lowest_price, market_type, credential_id, inst_id, updated_at)
+             highest_price, lowest_price, market_type, credential_id, inst_id, strategy_run_id, updated_at)
             VALUES
-            (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             ON CONFLICT(strategy_id, symbol, side) DO UPDATE SET
                 symbol_canonical = excluded.symbol_canonical,
                 size = excluded.size,
@@ -814,6 +858,12 @@ def upsert_position(
                 market_type = excluded.market_type,
                 credential_id = CASE WHEN excluded.credential_id > 0 THEN excluded.credential_id ELSE qd_strategy_positions.credential_id END,
                 inst_id = CASE WHEN excluded.inst_id <> '' THEN excluded.inst_id ELSE qd_strategy_positions.inst_id END,
+                strategy_run_id = CASE WHEN excluded.strategy_run_id > 0 THEN excluded.strategy_run_id ELSE qd_strategy_positions.strategy_run_id END,
+                position_state = 'open',
+                tradable_size = 0,
+                residual_reason = '',
+                residual_evidence_json = '{}'::jsonb,
+                residual_classified_at = NULL,
                 updated_at = NOW()
             """,
             (
@@ -830,6 +880,7 @@ def upsert_position(
                 mt,
                 cred,
                 iid,
+                int(strategy_run_id or 0),
             ),
         )
         db.commit()
@@ -845,6 +896,7 @@ def apply_fill_to_local_position(
     filled: float,
     avg_price: float,
     leg: Optional["LegContext"] = None,
+    strategy_run_id: int = 0,
 ) -> Tuple[Optional[float], Optional[Dict[str, Any]], Optional[float]]:
     """
     Apply a fill to the local position snapshot.
@@ -887,7 +939,7 @@ def apply_fill_to_local_position(
     if is_open:
         new_size = cur_size + filled_qty
         if new_size <= 0:
-            return None, None
+            return None, None, None
         # Weighted average entry.
         if cur_size > 0 and cur_entry > 0:
             new_entry = (cur_size * cur_entry + filled_qty * px) / new_size
@@ -905,6 +957,7 @@ def apply_fill_to_local_position(
             highest_price=new_high,
             lowest_price=new_low,
             leg=leg,
+            strategy_run_id=int(strategy_run_id or 0),
         )
         return None, _fetch_position(sid, sym_key, side), None
 
@@ -940,6 +993,7 @@ def apply_fill_to_local_position(
             highest_price=new_high,
             lowest_price=new_low,
             leg=leg,
+            strategy_run_id=int(strategy_run_id or 0),
         )
         return profit, _fetch_position(sid, sym_key, side), matched_entry
 

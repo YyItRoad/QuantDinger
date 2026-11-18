@@ -167,6 +167,43 @@ def test_restore_renews_ownership_around_each_strategy_without_stopping_desired_
     assert len(maintenance_calls) == 4
     assert repository.released == [(10, worker.worker_id), (20, worker.worker_id)]
     assert FakeStrategyService.status_updates == []
+def test_restart_advances_generation_and_stops_runtime_without_changing_desired_state(
+    monkeypatch,
+):
+    from app.services.strategy import StrategyService
+
+    repository = FakeRepository()
+    worker = TradingWorker(FakeExecutor(), repository)
+    calls = []
+    monkeypatch.setattr(
+        StrategyService,
+        "request_strategy_runtime_restart",
+        lambda _self, strategy_id, user_id=None: calls.append(
+            ("request", strategy_id, user_id)
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        worker,
+        "_stop_strategy",
+        lambda strategy_id, **kwargs: calls.append(("stop", strategy_id, kwargs))
+        or {"status": "stopped"},
+    )
+    monkeypatch.setattr(
+        worker,
+        "_start",
+        lambda strategy_id: calls.append(("start", strategy_id))
+        or {"status": "running"},
+    )
+
+    worker._execute(_command("restart"))
+
+    assert calls == [
+        ("request", 55, 1),
+        ("stop", 55, {"persist_status": False}),
+        ("start", 55),
+    ]
+    assert repository.completed[0][1]["status"] == "running"
 
 
 @pytest.mark.parametrize("close_positions", [False, True])
@@ -305,6 +342,21 @@ def test_distributed_restore_does_not_reregister_an_active_strategy(monkeypatch)
 
     assert planner_calls == [55]
     assert executor.registered_streams == [(55, {stream})]
+
+
+def test_running_strategy_restore_cannot_be_disabled_by_legacy_env(monkeypatch):
+    monkeypatch.setenv("DISABLE_RESTORE_RUNNING_STRATEGIES", "true")
+    worker = TradingWorker(FakeExecutor(), FakeRepository())
+    calls = []
+    monkeypatch.setattr(
+        worker,
+        "restore_desired_strategies",
+        lambda: calls.append(True),
+    )
+
+    worker._restore_if_due(force=True)
+
+    assert calls == [True]
 
 
 def test_nonleader_persists_distributed_route_without_duplicate_market_stream(monkeypatch):

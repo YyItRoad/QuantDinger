@@ -3,7 +3,7 @@ Factory for direct exchange clients.
 
 Supports:
 - Crypto exchanges: Binance, OKX, Bitget, Bybit, Gate, HTX
-- Traditional brokers: Interactive Brokers (IBKR) and Alpaca
+- Traditional brokers: Interactive Brokers (IBKR), Alpaca, Tiger Brokers, and Webull
 """
 
 from __future__ import annotations
@@ -18,12 +18,15 @@ from app.services.live_trading.base import BaseRestClient, LiveTradingError
 from app.services.live_trading.binance import BinanceFuturesClient
 from app.services.live_trading.binance_spot import BinanceSpotClient
 from app.services.live_trading.okx import OkxClient
-from app.services.live_trading.bitget import BitgetMixClient
-from app.services.live_trading.bitget_spot import BitgetSpotClient
+from app.services.live_trading.bitget_compat import (
+    BitgetCompatibleMixClient,
+    BitgetCompatibleSpotClient,
+)
 from app.services.live_trading.bitget_reality import BitgetRealityClient
 from app.services.live_trading.bybit import BybitClient
 from app.services.live_trading.gate import GateSpotClient, GateStockClient, GateUsdtFuturesClient
 from app.services.live_trading.htx import HtxClient
+from app.utils.trading_venue_visibility import is_trading_venue_enabled
 
 # Lazy import IBKR to avoid ImportError if ib_insync not installed
 IBKRClient = None
@@ -148,6 +151,8 @@ def validate_exchange_environment(exchange_id: str, environment: str, market_sco
         "gate": {"live", "testnet"},
         "htx": {"live"},
         "alpaca": {"live", "demo"},
+        "tiger": {"live", "demo"},
+        "webull": {"live", "testnet"},
     }
     if env not in allowed.get(ex, {"live"}):
         if ex == "htx" and env != "live":
@@ -219,6 +224,8 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
     if not isinstance(exchange_config, dict):
         raise LiveTradingError("Invalid exchange_config")
     exchange_id = _get(exchange_config, "exchange_id", "exchangeId").lower()
+    if not is_trading_venue_enabled(exchange_id):
+        raise LiveTradingError("TRADING_VENUE_DISABLED")
     api_key = _get(exchange_config, "api_key", "apiKey")
     secret_key = _get(exchange_config, "secret_key", "secret")
     passphrase = _get(exchange_config, "passphrase", "password")
@@ -268,19 +275,21 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
                     simulated_trading=is_demo,
                     instrument_id=_get(exchange_config, "instrument_id", "instrumentId"),
                 )
-            return BitgetSpotClient(
+            return BitgetCompatibleSpotClient(
                 api_key=api_key,
                 secret_key=secret_key,
                 passphrase=passphrase,
                 base_url=base_url,
                 simulated_trading=is_demo,
+                account_mode=_get(exchange_config, "bitget_account_mode", "bitgetAccountMode") or "auto",
             )
-        return BitgetMixClient(
+        return BitgetCompatibleMixClient(
             api_key=api_key,
             secret_key=secret_key,
             passphrase=passphrase,
             base_url=base_url,
             simulated_trading=is_demo,
+            account_mode=_get(exchange_config, "bitget_account_mode", "bitgetAccountMode") or "auto",
         )
 
     if exchange_id == "bybit":
@@ -350,6 +359,12 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
     # Caller is responsible for validating market_category in (USStock, Crypto).
     if exchange_id == "alpaca":
         return create_alpaca_client({**exchange_config, "paper": is_demo})
+
+    if exchange_id == "tiger":
+        return create_tiger_client({**exchange_config, "environment": "paper" if is_demo else "live"})
+
+    if exchange_id == "webull":
+        return create_webull_client({**exchange_config, "environment": "sandbox" if is_demo else "live"})
 
     raise LiveTradingError(f"Unsupported exchange_id: {exchange_id}")
 
@@ -431,8 +446,7 @@ def create_alpaca_client(exchange_config: Dict[str, Any]):
     - base_url:   Optional official Alpaca URL retained for stored-config compatibility
 
     Unlike IBKR, Alpaca is stateless REST — no terminal/gateway needed,
-    so it's the recommended USStock broker on cloud / SaaS deployments where
-    ALLOW_LOCAL_DESKTOP_BROKERS is false.
+    so it's the recommended USStock broker on cloud / SaaS deployments.
     """
     global AlpacaClient, AlpacaConfig
 
@@ -477,6 +491,51 @@ def create_alpaca_client(exchange_config: Dict[str, Any]):
             "HTTP 400 'invalid syntax' on market-data WebSocket is usually a bad "
             "auth/subscribe JSON or symbol (use BTC/USD not BTC/USDT for crypto)."
         )
+    return client
+
+
+def create_tiger_client(exchange_config: Dict[str, Any]):
+    from app.services.openapi_brokers import TigerClient, TigerConfig
+
+    tiger_id = _get(exchange_config, "tiger_id", "tigerId")
+    account_id = _get(exchange_config, "account_id", "accountId")
+    private_key = _get(exchange_config, "private_key", "privateKey")
+    if not tiger_id or not account_id or not private_key:
+        raise LiveTradingError("brokerAccounts.credentialsRequired")
+    environment = str(exchange_config.get("environment") or "live").strip().lower()
+    if environment in ("demo", "testnet"):
+        environment = "paper"
+    client = TigerClient(TigerConfig(
+        tiger_id=tiger_id,
+        account_id=account_id,
+        private_key=private_key,
+        license=str(_get(exchange_config, "license") or ""),
+        environment=environment,
+    ))
+    if not client.connect():
+        raise LiveTradingError("brokerAccounts.connectFailed")
+    return client
+
+
+def create_webull_client(exchange_config: Dict[str, Any]):
+    from app.services.openapi_brokers import WebullClient, WebullConfig
+
+    app_key = _get(exchange_config, "app_key", "appKey")
+    app_secret = _get(exchange_config, "app_secret", "appSecret", "secret_key", "secret")
+    if not app_key or not app_secret:
+        raise LiveTradingError("brokerAccounts.credentialsRequired")
+    environment = str(exchange_config.get("environment") or "live").strip().lower()
+    if environment in ("testnet", "demo", "paper"):
+        environment = "sandbox"
+    client = WebullClient(WebullConfig(
+        app_key=app_key,
+        app_secret=app_secret,
+        access_token=_get(exchange_config, "access_token", "accessToken"),
+        environment=environment,
+        account_id=_get(exchange_config, "account_id", "accountId"),
+    ))
+    if not client.connect():
+        raise LiveTradingError("brokerAccounts.connectFailed")
     return client
 
 

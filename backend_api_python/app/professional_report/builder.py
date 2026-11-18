@@ -8,7 +8,10 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
+from app.services.fast_analysis_formatters import build_crypto_factor_summary_code
+
 from .features.equity import build_equity_features
+from .features.cross_asset import build_forex_features, build_futures_features
 from .narrative import normalize_report_text, validate_evidence_claims
 from .providers import list_providers, provider_configuration_status
 from .risk import build_risk_plan
@@ -28,6 +31,62 @@ def _score(value: Any, default: float = 50.0) -> float:
         return round(max(0.0, min(100.0, float(value))), 2)
     except (TypeError, ValueError):
         return default
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _chart_timestamp(value: Any) -> str:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        seconds = float(value) / 1000.0 if float(value) > 10_000_000_000 else float(value)
+        try:
+            return datetime.fromtimestamp(seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        except (OSError, OverflowError, ValueError):
+            return ""
+    return str(value or "").strip()
+
+
+def _build_price_chart(collector_payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Keep a bounded copy of the real daily candles used by the analysis."""
+    bars: list[dict[str, Any]] = []
+    for item in list(collector_payload.get("kline") or [])[-60:]:
+        if not isinstance(item, Mapping):
+            continue
+        timestamp = _chart_timestamp(item.get("timestamp") or item.get("time") or item.get("date"))
+        open_price = _finite_float(item.get("open"))
+        high = _finite_float(item.get("high"))
+        low = _finite_float(item.get("low"))
+        close = _finite_float(item.get("close"))
+        if not timestamp or any(value is None or value <= 0 for value in (open_price, high, low, close)):
+            continue
+        if high < max(open_price, close) or low > min(open_price, close) or high < low:
+            continue
+        volume = _finite_float(item.get("volume"))
+        bars.append({
+            "timestamp": timestamp,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume if volume is not None and volume >= 0 else None,
+        })
+    if not bars:
+        return None
+    levels = (collector_payload.get("indicators") or {}).get("levels") or {}
+    support = _finite_float(levels.get("support"))
+    resistance = _finite_float(levels.get("resistance"))
+    return {
+        "timeframe": str(collector_payload.get("timeframe") or "1D"),
+        "bars": bars,
+        "moving_average_periods": [5, 10, 20],
+        "support": support if support and support > 0 else None,
+        "resistance": resistance if resistance and resistance > 0 else None,
+    }
 
 
 def _market_bias(analysis_result: Mapping[str, Any]) -> tuple[str, float]:
@@ -212,6 +271,28 @@ def _macro_dimension_narrative(
     if zh:
         return f"可用宏观证据显示：{joined}。这些指标仅代表{market_context[0]}背景；若缺少明确的标的传导机制，不应单独作为买卖依据。"
     return f"Available macro evidence shows {joined}. These observations describe {market_context[1]} and are not a standalone trade signal without an asset-specific transmission mechanism."
+
+
+def _macro_dimension_code(payload: Mapping[str, Any], market: str = "") -> dict[str, Any]:
+    macro = payload.get("macro") or {}
+    facts: list[dict[str, Any]] = []
+    sources = (
+        ("vix", macro.get("VIX") or {}, "price", None),
+        ("dxy", macro.get("DXY") or {}, "price", None),
+        ("us10y", macro.get("TNX") or {}, "price", "%"),
+        ("risk_sentiment", macro.get("FEAR_GREED") or {}, "price", None),
+        ("hibor_1m", macro.get("HKMA") or {}, "one_month_pct", "%"),
+    )
+    for metric, source, field, unit in sources:
+        value = _plain_number(source.get(field), 3 if unit == "%" else 2)
+        if value is not None:
+            facts.append({"metric": metric, "value": value, "unit": unit})
+    context = {
+        "HKStock": "hk_funding",
+        "USStock": "us_risk_assets",
+        "Crypto": "crypto_liquidity",
+    }.get(market, "global_risk_assets")
+    return {"facts": facts, "context": context}
 
 
 def _hk_market_dimension_narrative(
@@ -555,6 +636,7 @@ def build_professional_report(
     effective_data_tier, tier_warnings = _effective_data_tier(data_tier, observations)
     quality = _quality(snapshot)
     market = str(collector_payload.get("market") or analysis_result.get("market") or "")
+    confidence_calibrated = bool(analysis_result.get("confidence_calibrated", False))
     prebuilt_market_features: dict[str, Any] | None = None
     hard_gate_reasons: list[str] = []
     if market in {"USStock", "HKStock"}:
@@ -575,6 +657,10 @@ def build_professional_report(
             )
         ):
             hard_gate_reasons.append("crypto_scope_or_unit_validation_failed")
+    elif market == "Forex":
+        prebuilt_market_features = build_forex_features(collector_payload, observations)
+    elif market == "Futures":
+        prebuilt_market_features = build_futures_features(collector_payload, observations)
     raw_decision = str(analysis_result.get("decision") or "HOLD").upper()
     market_bias, market_bias_score = _market_bias(analysis_result)
     raw_confidence = int(_score(analysis_result.get("confidence"), 50))
@@ -610,17 +696,19 @@ def build_professional_report(
     scores = analysis_result.get("scores") or {}
     objective = analysis_result.get("objective_score") or {}
     report_language = str(analysis_result.get("language") or "en-US")
+    macro_dimension = _dimension(
+        "macro",
+        50.0 + float(objective.get("macro_score") or 0.0) * 0.5,
+        observations,
+        ("macro",),
+        _macro_dimension_narrative(collector_payload, report_language, market),
+    )
+    macro_dimension["narrative_code"] = _macro_dimension_code(collector_payload, market)
     dimensions = [
         _dimension("technical", scores.get("technical"), observations, ("technical", "market"), detailed.get("technical", "")),
         _dimension("fundamental", scores.get("fundamental"), observations, ("fundamental",), detailed.get("fundamental", "")),
         _dimension("news_sentiment", scores.get("sentiment"), observations, ("news",), detailed.get("sentiment", "")),
-        _dimension(
-            "macro",
-            50.0 + float(objective.get("macro_score") or 0.0) * 0.5,
-            observations,
-            ("macro",),
-            _macro_dimension_narrative(collector_payload, report_language, market),
-        ),
+        macro_dimension,
     ]
 
     if market in {"USStock", "HKStock"}:
@@ -636,7 +724,8 @@ def build_professional_report(
             if market == "HKStock" else
             (
                 "filings.sec", "expectations.analyst", "options.snapshot",
-                "short_interest.snapshot", "insider_activity.snapshot",
+                "short_interest.snapshot", "short_volume.snapshot", "insider_activity.snapshot",
+                "ownership.snapshot", "earnings.transcript",
             )
         )
         market_dimension = _dimension(
@@ -668,9 +757,33 @@ def build_professional_report(
                 if isinstance(item, Mapping) and str(item.get("code") or "").startswith("MISSING")
             ],
         )
+        crypto_dimension["narrative_code"] = dict(
+            analysis_result.get("crypto_factor_summary_code")
+            or build_crypto_factor_summary_code(collector_payload.get("crypto_factors") or {})
+        )
         if not crypto_usable:
             crypto_dimension["status"] = "insufficient_data"
         dimensions.append(crypto_dimension)
+    elif market in {"Forex", "Futures"}:
+        market_features = prebuilt_market_features or (
+            build_forex_features(collector_payload, observations)
+            if market == "Forex" else
+            build_futures_features(collector_payload, observations)
+        )
+        missing = market_features.get("missing_capabilities") or []
+        dimension_key = "fx_relative_value" if market == "Forex" else "futures_curve_positioning"
+        dimension = _dimension(
+            dimension_key,
+            0 if missing else 50,
+            observations,
+            ("macro", "positioning", "market"),
+            "",
+            missing=missing,
+            evidence_refs=market_features.get("evidence_refs") or [],
+        )
+        if missing:
+            dimension["status"] = "insufficient_data"
+        dimensions.append(dimension)
     else:
         market_features = {"market": market, "warnings": ["unsupported_professional_report_market"]}
 
@@ -688,6 +801,17 @@ def build_professional_report(
         + claim_errors
     ))
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    from app.research import build_research_intelligence
+
+    scenarios = _build_scenarios(decision, current_price, trading_plan, market_data)
+    research_intelligence = build_research_intelligence(
+        collector_payload,
+        quality=quality,
+        summary=normalize_report_text(analysis_result.get("summary") or ""),
+        claims=claims,
+        scenarios=scenarios,
+        risk_plan=risk_plan,
+    )
     report = {
         "schema_version": "professional_report_v1",
         "report_id": f"{market}:{snapshot['instrument']['canonical_symbol']}:{generated_at}",
@@ -705,7 +829,7 @@ def build_professional_report(
             "confidence": confidence,
             "raw_confidence": raw_confidence,
             "confidence_kind": "calibrated_probability"
-            if os.getenv("ENABLE_CONFIDENCE_CALIBRATION", "false").lower() == "true"
+            if confidence_calibrated
             else "model_strength",
             "quality_gate_reasons": gate_reasons,
             "conclusion_strength": quality.get("max_conclusion_strength") or "none",
@@ -717,18 +841,20 @@ def build_professional_report(
         "executive_summary": normalize_report_text(analysis_result.get("summary") or ""),
         "dimensions": dimensions,
         "claims": claims,
-        "scenarios": _build_scenarios(decision, current_price, trading_plan, market_data),
+        "scenarios": scenarios,
         "risk_plan": risk_plan,
+        "price_chart": _build_price_chart(collector_payload),
         "data_quality": quality,
         "market_features": market_features,
+        "research_intelligence": research_intelligence,
         "evidence_snapshot": snapshot,
-        "provider_options": _provider_payload(market) if market in {"USStock", "HKStock", "Crypto"} else {},
+        "provider_options": _provider_payload(market) if market in {"USStock", "HKStock", "Crypto", "Forex", "Futures"} else {},
         "warnings": warnings,
         "methodology": {
             "scoring_version": analysis_result.get("score_source") or "deterministic_objective_v2",
-            "report_builder_version": "professional_report_builder_v1",
+            "report_builder_version": "professional_report_builder_v1.1",
             "llm_role": "evidence_explanation_only",
-            "probabilities_calibrated": os.getenv("ENABLE_CONFIDENCE_CALIBRATION", "false").lower() == "true",
+            "probabilities_calibrated": confidence_calibrated,
             "requested_data_tier": data_tier,
             "effective_data_tier": effective_data_tier,
         },

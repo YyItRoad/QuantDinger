@@ -5,9 +5,21 @@ from app.services.strategy_runtime import health
 def test_strategy_rows_include_runtime_health(monkeypatch):
     captured = {}
 
-    def load(strategy_ids, *, strategy_statuses=None):
+    def load(
+        strategy_ids,
+        *,
+        strategy_statuses=None,
+        strategy_runtime_epochs=None,
+        strategy_runtime_requested_ats=None,
+        strategy_execution_modes=None,
+    ):
         captured["ids"] = list(strategy_ids)
         captured["statuses"] = dict(strategy_statuses or {})
+        captured["runtime_epochs"] = dict(strategy_runtime_epochs or {})
+        captured["runtime_requested_ats"] = dict(
+            strategy_runtime_requested_ats or {}
+        )
+        captured["execution_modes"] = dict(strategy_execution_modes or {})
         return {
             20: {
                 "health": "healthy",
@@ -19,10 +31,24 @@ def test_strategy_rows_include_runtime_health(monkeypatch):
     monkeypatch.setattr(strategy_routes, "load_runtime_health", load)
 
     rows = strategy_routes._attach_runtime_health([
-        {"id": 20, "status": "running", "strategy_name": "Momentum"}
+        {
+            "id": 20,
+            "status": "running",
+            "strategy_name": "Momentum",
+            "updated_at": "2026-07-19T05:00:00Z",
+            "desired_runtime_epoch": 4,
+            "runtime_requested_at": "2026-07-19T04:14:15Z",
+            "execution_mode": "live",
+        }
     ])
 
-    assert captured == {"ids": [20], "statuses": {20: "running"}}
+    assert captured == {
+        "ids": [20],
+        "statuses": {20: "running"},
+        "runtime_epochs": {20: 4},
+        "runtime_requested_ats": {20: "2026-07-19T04:14:15Z"},
+        "execution_modes": {20: "live"},
+    }
     assert rows[0]["runtime_health"]["health"] == "healthy"
     assert rows[0]["runtime_health"]["loop_latency_ms"] == 37
 
@@ -159,6 +185,34 @@ def test_historical_failed_order_does_not_degrade_current_run(monkeypatch):
     assert snapshots[20]["historical_failed_orders"] == 1
 
 
+def test_runtime_health_state_never_reuses_previous_run_heartbeat(monkeypatch):
+    snapshots = {
+        20: {
+            **health._empty_snapshot(),
+            "run_id": 7,
+        }
+    }
+    monkeypatch.setattr(
+        health,
+        "_query",
+        lambda _sql, _params: [
+            {
+                "strategy_id": 20,
+                "strategy_run_id": 6,
+                "state_json": {
+                    "last_heartbeat_at": 990,
+                    "last_error": "previous run failed",
+                },
+            }
+        ],
+    )
+
+    health._load_health_state(snapshots, "%s", [20])
+
+    assert snapshots[20]["last_heartbeat_at"] == 0
+    assert snapshots[20]["last_error"] == ""
+
+
 def test_recent_failed_order_degrades_until_attention_window_expires():
     snapshot = {
         **health._empty_snapshot(),
@@ -171,6 +225,71 @@ def test_recent_failed_order_degrades_until_attention_window_expires():
 
     snapshot["failed_orders"] = 0
     assert health._health_state(snapshot, strategy_status="running", now=1_010) == "healthy"
+
+
+def test_running_strategy_stays_starting_during_first_heartbeat_grace_window(monkeypatch):
+    monkeypatch.setenv("STRATEGY_STARTUP_HEALTH_GRACE_SEC", "180")
+    snapshot = {
+        **health._empty_snapshot(),
+        "run_id": 7,
+        "started_at": "1970-01-01T00:16:40Z",
+    }
+
+    assert health._health_state(snapshot, strategy_status="running", now=1_060) == "starting"
+    assert snapshot["startup_age_sec"] == 60
+
+
+def test_queued_strategy_stays_starting_before_runtime_record_exists(monkeypatch):
+    monkeypatch.setenv("STRATEGY_STARTUP_HEALTH_GRACE_SEC", "180")
+    snapshot = {
+        **health._empty_snapshot(),
+        "_desired_runtime_epoch": 2,
+        "_runtime_requested_at": "1970-01-01T00:16:40Z",
+    }
+
+    assert health._health_state(snapshot, strategy_status="running", now=1_060) == "starting"
+
+
+def test_missing_first_heartbeat_needs_attention_after_startup_grace(monkeypatch):
+    monkeypatch.setenv("STRATEGY_STARTUP_HEALTH_GRACE_SEC", "180")
+    snapshot = {
+        **health._empty_snapshot(),
+        "run_id": 7,
+        "started_at": "1970-01-01T00:16:40Z",
+    }
+
+    assert health._health_state(snapshot, strategy_status="running", now=1_181) == "unknown"
+
+
+def test_restart_ignores_previous_run_heartbeat_during_new_startup_grace(monkeypatch):
+    monkeypatch.setenv("STRATEGY_STARTUP_HEALTH_GRACE_SEC", "180")
+    snapshot = {
+        **health._empty_snapshot(),
+        "run_id": 7,
+        "runtime_epoch": 1,
+        "started_at": "1970-01-01T00:08:20Z",
+        "last_heartbeat_at": 990,
+        "last_error": "previous run failed",
+        "_desired_runtime_epoch": 2,
+        "_runtime_requested_at": "1970-01-01T00:16:40Z",
+    }
+
+    assert health._health_state(snapshot, strategy_status="running", now=1_060) == "starting"
+
+
+def test_handoff_with_same_runtime_epoch_keeps_existing_run_healthy(monkeypatch):
+    monkeypatch.setenv("STRATEGY_STARTUP_HEALTH_GRACE_SEC", "180")
+    snapshot = {
+        **health._empty_snapshot(),
+        "run_id": 7,
+        "runtime_epoch": 3,
+        "started_at": "1970-01-01T00:08:20Z",
+        "last_heartbeat_at": 1_390,
+        "_desired_runtime_epoch": 3,
+        "_runtime_requested_at": "1970-01-01T00:08:20Z",
+    }
+
+    assert health._health_state(snapshot, strategy_status="running", now=1_400) == "healthy"
 
 
 def test_position_drift_degrades_running_strategy_health():
@@ -214,6 +333,7 @@ def test_position_ownership_loader_attaches_matching_okx_drift(monkeypatch):
     snapshots = {
         20: {
             **health._empty_snapshot(),
+            "_execution_mode": "live",
             "_ownership_context": {
                 "user_id": 7,
                 "exchange_id": "okx",
@@ -224,10 +344,22 @@ def test_position_ownership_loader_attaches_matching_okx_drift(monkeypatch):
         },
         21: {
             **health._empty_snapshot(),
+            "_execution_mode": "live",
             "_ownership_context": {
                 "user_id": 7,
                 "exchange_id": "bitget",
                 "credential_id": 13,
+                "symbol": "BTC/USDT",
+                "market_type": "swap",
+            },
+        },
+        22: {
+            **health._empty_snapshot(),
+            "_execution_mode": "signal",
+            "_ownership_context": {
+                "user_id": 7,
+                "exchange_id": "okx",
+                "credential_id": 0,
                 "symbol": "BTC/USDT",
                 "market_type": "swap",
             },
@@ -261,3 +393,36 @@ def test_position_ownership_loader_attaches_matching_okx_drift(monkeypatch):
     assert snapshots[20]["position_drift_sides"] == ["long"]
     assert snapshots[20]["position_drift_details"][0]["account_qty"] == 0.0145
     assert snapshots[21]["position_drift_blocked"] is False
+    assert snapshots[22]["position_drift_blocked"] is False
+
+
+def test_inactive_strategy_does_not_retain_runtime_attention(monkeypatch):
+    for loader_name in (
+        "_load_latest_runs",
+        "_load_runtime_leases",
+        "_load_latest_events",
+        "_load_pending_orders",
+        "_load_positions",
+        "_load_latest_fills",
+    ):
+        monkeypatch.setattr(health, loader_name, lambda *_args, **_kwargs: None)
+
+    def load_previous_health(snapshots, *_args, **_kwargs):
+        snapshots[20].update({
+            "last_error": "market_data_unavailable",
+            "failed_orders": 1,
+            "last_heartbeat_at": 1,
+        })
+
+    monkeypatch.setattr(health, "_load_health_state", load_previous_health)
+    monkeypatch.setattr(health, "_load_position_ownership", lambda *_args, **_kwargs: None)
+
+    snapshot = health.load_runtime_health(
+        [20],
+        strategy_statuses={20: "stopped"},
+        strategy_execution_modes={20: "live"},
+    )[20]
+
+    assert snapshot["health"] == "inactive"
+    assert snapshot["attention_reasons"] == []
+    assert snapshot["needs_attention"] is False
