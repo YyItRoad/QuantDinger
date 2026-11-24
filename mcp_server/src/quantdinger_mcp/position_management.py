@@ -51,6 +51,9 @@ def register_position_management_tools(server):
         require recovery of the returned instance, not another adoption.
         starting is not proof of a running Worker; inspect returned warnings.
         W authorizes adoption and startup, independent of T quick-order controls.
+        Omit notification_channels and notification_targets to use all enabled
+        profile channels and their saved destinations. An explicit empty channel
+        list uses browser notifications only.
         """
         if confirm_adoption is not True:
             return {"error": True, "status": 400, "body": {

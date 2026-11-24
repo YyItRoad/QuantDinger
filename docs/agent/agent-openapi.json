@@ -133,12 +133,14 @@
           },
           "notification_channels": {
             "type": "array",
+            "description": "When omitted, use the user's enabled profile channels. An explicit empty array uses browser notifications only.",
             "items": {
               "type": "string"
             }
           },
           "notification_targets": {
             "type": "object",
+            "description": "When both notification fields are omitted, use saved destinations for enabled profile channels. Explicit targets replace profile targets.",
             "additionalProperties": true
           },
           "confirm_adoption": {

@@ -66,4 +66,13 @@ def redact_strategy_row(row: dict | None) -> dict | None:
     for field in ("exchange_config", "trading_config", "notification_config"):
         if isinstance(out.get(field), dict):
             out[field] = redact_secrets(out[field])
+    notification = out.get("notification_config")
+    targets = notification.get("targets") if isinstance(notification, dict) else None
+    if isinstance(targets, dict):
+        for key in targets:
+            if targets[key] and key.replace("_", "").lower() in {
+                "webhook", "discord", "webhooktoken", "webhooksigningsecret",
+                "webhookheaders", "telegrambottoken", "telegramtoken",
+            }:
+                targets[key] = "***"
     return out

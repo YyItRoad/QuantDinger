@@ -10,6 +10,7 @@ import pytest
 from flask import Flask
 from app.routes.agent_v1 import register
 from app.routes.agent_v1 import position_management as routes
+from app.routes.agent_v1 import strategies as strategy_routes
 from app.services.live_trading import position_management as management
 from app.utils import agent_auth
 
@@ -57,6 +58,8 @@ def boundary(monkeypatch):
     monkeypatch.setattr(agent_auth, "_complete_idempotency", complete)
     credential = Mock(side_effect=lambda cid: {"id": 2} if cid == 2 else None)
     monkeypatch.setattr(routes, "_credential", credential)
+    preferences = Mock(return_value={"default_channels": ["browser"]})
+    monkeypatch.setattr(routes, "get_notification_settings", preferences)
     listing = Mock(return_value=[])
     monkeypatch.setattr(management, "list_managed_positions_for_account", listing)
     snapshot = Mock(return_value={"swap_positions": [dict(symbol="BTC/USDT", side="long",
@@ -78,7 +81,7 @@ def boundary(monkeypatch):
     monkeypatch.setattr(management, "StrategyCommandRepository", lambda: Mock(enqueue=enqueue))
     monkeypatch.setattr(management, "append_strategy_log", Mock())
     return dict(token=token, audit=audit, service=service, upsert=upsert, enqueue=enqueue,
-                listing=listing, snapshot=snapshot, credential=credential)
+                listing=listing, snapshot=snapshot, credential=credential, preferences=preferences)
 
 
 def adopt(client, body=None, headers=None, base=BASE):
@@ -106,9 +109,64 @@ def test_w_adopts_real_whole_leg_without_t_or_quick_order_flags(client, boundary
     assert payload["accountRisk"] == body["account_risk"]
     assert payload["notificationChannels"] == ["webhook"]
     assert payload["notificationTargets"] == body["notification_targets"]
+    boundary["preferences"].assert_not_called()
     assert boundary["upsert"].call_args.kwargs["size"] == 7
     assert boundary["enqueue"].call_args.kwargs["command_type"] == "start"
     boundary["audit"].assert_called_once()
+
+
+def test_adoption_inherits_enabled_profile_channels_without_exposing_webhook(client, boundary, monkeypatch):
+    webhook = "https://oapi.dingtalk.com/robot/send?access_token=fake-test-token"
+    boundary["preferences"].return_value = {
+        "default_channels": ["browser", "webhook"],
+        "webhook_url": webhook,
+        "webhook_token": "fake-bearer",
+        "webhook_signing_secret": "fake-secret",
+        "email": "unused@example.test",
+    }
+
+    response = adopt(client)
+    assert response.status_code == 201
+    boundary["preferences"].assert_called_once_with(7)
+    payload = boundary["service"].create_strategy.call_args.args[0]
+    assert payload["notificationChannels"] == ["browser", "webhook"]
+    assert payload["notificationTargets"] == {
+        "webhook": webhook,
+        "webhook_token": "fake-bearer",
+        "webhook_signing_secret": "fake-secret",
+    }
+    assert webhook not in response.get_data(as_text=True)
+
+    saved = {"notification_config": {
+        "channels": payload["notificationChannels"], "targets": payload["notificationTargets"],
+    }}
+    boundary["service"].get_strategy.return_value = saved
+    monkeypatch.setattr(strategy_routes, "_strategy_service", boundary["service"])
+    readback = client.get("/api/agent/v1/strategies/44", headers=HEADERS)
+    assert readback.status_code == 200
+    assert readback.json["data"]["notification_config"] == {
+        "channels": ["browser", "webhook"],
+        "targets": dict.fromkeys(payload["notificationTargets"], "***"),
+    }
+    assert saved["notification_config"]["targets"]["webhook"] == webhook
+
+
+def test_adoption_uses_explicit_targets_without_mixing_profile_credentials(client, boundary):
+    boundary["preferences"].return_value = {
+        "default_channels": ["webhook"], "webhook_token": "fake-profile-token",
+    }
+    targets = {"webhook": "https://example.test/new-hook"}
+    assert adopt(client, {**BODY, "notification_targets": targets}).status_code == 201
+    payload = boundary["service"].create_strategy.call_args.args[0]
+    assert payload["notificationChannels"] == ["webhook"]
+    assert payload["notificationTargets"] == targets
+
+
+def test_adoption_explicit_empty_channels_keep_browser_fallback(client, boundary):
+    assert adopt(client, {**BODY, "notification_channels": []}).status_code == 201
+    payload = boundary["service"].create_strategy.call_args.args[0]
+    assert payload["notificationChannels"] == []
+    boundary["preferences"].assert_not_called()
 
 
 @pytest.mark.parametrize("scope", ["R", "T", "N", "B"])

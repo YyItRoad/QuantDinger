@@ -58,6 +58,8 @@
 
 ## HTTP 与结果
 
+- GPT 接管时可以省略 `notification_channels` 和 `notification_targets`。后端在创建策略时读取当前用户的个人通知设置，应用已启用的全部渠道及其保存的目标。例如，个人设置启用了站内和钉钉 Webhook，新策略会使用这两个渠道。
+- 显式传入渠道时以请求为准，空数组沿用仅站内通知的行为。显式传入目标时，策略使用该组目标。
 - `GET /api/agent/v1/trading/accounts/{credential_id}/managed-positions` 返回管理归属 `data.items`，不是交易所实时快照。
 - `POST /api/agent/v1/trading/accounts/{credential_id}/managed-strategies` 使用同组业务参数，但账户在路径、幂等键在 `Idempotency-Key` 请求头，不在 JSON 中重复传入。
 - HTTP 201 与 `code: 0` 表示创建完成。保留现有返回的策略 ID、整仓数量、价格、杠杆、`status` 和可选 `warning`。
