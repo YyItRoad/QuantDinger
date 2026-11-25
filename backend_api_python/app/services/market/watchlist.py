@@ -72,8 +72,8 @@ def add_watchlist_item(
 
     try:
         asset = get_market_asset(asset_id=int(asset_id))
-    except AssetResolutionError as exc:
-        return False, str(exc)
+    except AssetResolutionError:
+        return False, "market.assetNotFound"
     if not asset:
         return False, "market.assetNotFound"
 

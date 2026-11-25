@@ -53,7 +53,7 @@ from app.services.strategy_daily_pnl import load_strategy_daily_metrics
 from app.services.settings.capabilities import is_live_trading_enabled
 from app.services.strategy_runtime.bot_type import resolve_bot_type
 from app.services.strategy_runtime.health import load_runtime_health
-from app.services.strategy_v2 import inspect_strategy_v2
+from app.services.strategy_v2 import StrategyV2ContractError, inspect_strategy_v2
 from app.utils.auth import login_required
 from app.utils.logger import get_logger
 
@@ -210,9 +210,11 @@ def create_strategy():
         payload["user_id"] = int(g.user_id)
         strategy_id = get_strategy_service().create_strategy(payload)
         return _ok({"id": strategy_id}, "strategyV2.created")
-    except Exception as exc:
-        logger.warning("strategy create failed: %s", exc)
+    except (StrategyV2ContractError, StrategyLimitExceeded) as exc:
         return _error(str(exc))
+    except Exception as exc:
+        logger.warning("strategy create failed: %s", type(exc).__name__)
+        return _error("internal_server_error", 500)
 
 
 @strategy_blp.route("/strategies/<int:strategy_id>", methods=["PUT"])
@@ -227,9 +229,11 @@ def update_strategy(strategy_id: int):
         if not changed:
             return _error("strategyV2.strategyNotFound", 404)
         return _ok({"id": strategy_id}, "strategyV2.updated")
-    except Exception as exc:
-        logger.warning("strategy update failed: %s", exc)
+    except (StrategyV2ContractError, StrategyLimitExceeded) as exc:
         return _error(str(exc))
+    except Exception as exc:
+        logger.warning("strategy update failed: %s", type(exc).__name__)
+        return _error("internal_server_error", 500)
 
 
 @strategy_blp.route("/strategies/<int:strategy_id>", methods=["DELETE"])
@@ -244,8 +248,8 @@ def delete_strategy(strategy_id: int):
     try:
         if not get_strategy_service().delete_strategy(strategy_id, user_id=int(g.user_id)):
             return _error("strategyV2.strategyNotFound", 404)
-    except StrategyDeleteBlocked as exc:
-        return _error(str(exc), 409)
+    except StrategyDeleteBlocked:
+        return _error("strategyV2.stopBeforeDelete", 409)
     return _ok({"id": strategy_id}, "strategyV2.deleted")
 
 
@@ -341,8 +345,8 @@ def test_exchange_connection():
         user_id=int(g.user_id),
     )
     if result.get("success"):
-        return _ok(result.get("data"), str(result.get("message") or "strategyV2.connectionOk"))
-    return _error(str(result.get("message") or "strategyV2.connectionFailed"))
+        return _ok(result.get("data"), "strategyV2.connectionOk")
+    return _error("strategyV2.connectionFailed")
 
 
 @strategy_blp.route("/strategies/verify", methods=["POST"])
@@ -359,8 +363,11 @@ def verify_strategy():
             "manifest": program.manifest.metadata(),
             "marketplace_contract": derive_strategy_contract(code, source="draft_verification"),
         })
-    except Exception as exc:
+    except StrategyV2ContractError as exc:
         return _error("strategyV2.contractInvalid", data={"valid": False, "error": str(exc)})
+    except Exception as exc:
+        logger.warning("Strategy verification failed: %s", type(exc).__name__)
+        return _error("internal_server_error", 500, data={"valid": False})
 
 
 @strategy_blp.route("/strategies/generate", methods=["POST"])
@@ -442,7 +449,7 @@ def generate_strategy():
                 edit_plan = {
                     "executor": "model_full_fallback",
                     "operation": "generate_candidate",
-                    "patch_error": str(exc),
+                    "patch_error": "Model patch rejected",
                 }
         else:
             code = _strip_code_fence(str(content or ""))
@@ -479,8 +486,8 @@ def generate_strategy():
             },
         })
     except Exception as exc:
-        logger.warning("strategy generation failed: %s", exc)
-        return _error("strategyV2.generationInvalid", data={"error": str(exc)})
+        logger.warning("strategy generation failed: %s", type(exc).__name__)
+        return _error("strategyV2.generationInvalid")
 
 
 def _strip_code_fence(value: str) -> str:
@@ -836,7 +843,7 @@ def run_strategy_workspace_turn():
                     edit_plan = {
                         "executor": "model_full_fallback",
                         "operation": "generate_candidate",
-                        "patch_error": str(exc),
+                        "patch_error": "Model patch rejected",
                     }
             else:
                 candidate_code = _strip_code_fence(str(generated or ""))
@@ -907,5 +914,5 @@ def run_strategy_workspace_turn():
     except ValueError as exc:
         return _error("strategyV2.generationInvalid", data={"error": str(exc)})
     except Exception as exc:
-        logger.warning("strategy AI workspace turn failed: %s", exc, exc_info=True)
-        return _error("strategyV2.generationInvalid", data={"error": str(exc)})
+        logger.warning("strategy AI workspace turn failed: %s", type(exc).__name__)
+        return _error("strategyV2.generationInvalid")
