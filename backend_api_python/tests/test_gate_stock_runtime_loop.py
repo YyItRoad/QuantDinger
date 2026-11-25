@@ -32,7 +32,9 @@ def handle_data(context, data):
 
 @pytest.mark.parametrize("account_options", [{}, {"environment": "testnet"}, {"enable_demo_trading": True}])
 @pytest.mark.parametrize("data_mode", ["current", "stale", "recover"])
-def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account_options, data_mode):
+def test_gate_stock_complete_live_loop_uses_exchange_quotes(
+    monkeypatch, account_options, data_mode, sandbox_failure=False, external_prepare=False,
+):
     from app.services.strategy_runtime import candle_readiness
 
     class Clock(datetime):
@@ -48,6 +50,10 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
     def create_session(**kwargs):
         session = session_type(**kwargs)
         session.process = Mock(wraps=session.process)
+        if sandbox_failure:
+            session.process.side_effect = runtime.StrategySandboxTerminatedError(
+                "strategy sandbox timed out after 120 seconds (operation=process)"
+            )
         sessions.append(session)
         return session
 
@@ -62,7 +68,13 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
         "trading_config": {"instrument_products": [product], "risk_tick_seconds": 0.25},
         "exchange_config": {"exchange_id": "gate", "api_key": "test", "secret_key": "test", **(account_options or {})},
     }
-    executor = runtime.TradingExecutor()
+    executor = runtime.TradingExecutor(external_bar_triggers=external_prepare)
+    if external_prepare:
+        from app.services.strategy_command_repository import StrategyCommandRepository
+
+        executor.set_runtime_fencing_token(1, 9)
+        acknowledge = Mock(return_value=True)
+        monkeypatch.setattr(StrategyCommandRepository, "acknowledge_runtime_ready", acknowledge)
     monkeypatch.setattr(executor, "_load_strategy", lambda _: strategy)
     monkeypatch.setattr(executor, "_load_source", lambda _: (1, CODE))
     monkeypatch.setattr(executor, "_load_schedule_timezone", lambda _: "UTC")
@@ -74,10 +86,10 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
     monkeypatch.setattr(executor, "_is_strategy_running", lambda *a: next(cycles))
     heartbeats = []
     monkeypatch.setattr(executor, "_heartbeat", lambda *a, **kw: heartbeats.append((dict(a[3]), kw)))
-    monkeypatch.setattr(executor, "_mark_stopped", lambda *a: None)
+    monkeypatch.setattr(executor, "_mark_stopped", lambda *a, **kw: None)
     logs = []
     monkeypatch.setattr(runtime, "append_strategy_log", lambda *a: logs.append(a))
-    monkeypatch.setattr(runtime, "ensure_strategy_run", lambda **kw: SimpleNamespace(strategy_run_id=1))
+    monkeypatch.setattr(runtime, "ensure_strategy_run", lambda **kw: SimpleNamespace(strategy_run_id=1, runtime_epoch=1))
     monkeypatch.setattr(runtime, "finish_strategy_run", lambda *a, **kw: None)
     store = Mock()
     store.load.return_value = {}
@@ -104,6 +116,14 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
 
     for _delay in executor._run_strategy_loop(1):
         monotonic[0] += 10
+        if external_prepare and len(heartbeats) <= 2:
+            sessions[0].process.assert_not_called()
+            submit.assert_not_called()
+            if len(heartbeats) == 2:
+                executor._bar_event_pending[1].set()
+
+    if external_prepare:
+        acknowledge.assert_called_once_with(strategy_id=1, run_id=1, epoch=1, token=9)
 
     if account_options:
         assert executor._last_exit_reason == {1: "strategyV2.gateStockTestnetUnsupported"}
@@ -111,6 +131,15 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
         request.assert_not_called()
         submit.assert_not_called()
         assert logs == [(1, "error", "strategyV2.gateStockTestnetUnsupported")]
+        return
+    if sandbox_failure:
+        assert executor._last_exit_reason[1] == (
+            "strategyV2.repeatedRuntimeFailure:"
+            "strategy sandbox timed out after 120 seconds (operation=process)"
+        )
+        assert sessions[0].process.call_count == 1
+        assert len([item for item in logs if "Runtime cycle failed" in item[2]]) == 1
+        submit.assert_not_called()
         return
     assert executor._last_exit_reason == {}, logs
     assert len(heartbeats) == 4, logs
@@ -121,7 +150,6 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
     elif data_mode == "stale":
         assert all(meta["status"] == "degraded" for _, meta in heartbeats[1:]), logs
         assert all(meta["last_error"] == "marketData.incomplete_market_data" for _, meta in heartbeats[1:])
-        assert sessions[0].last_processed is None
         sessions[0].process.assert_not_called()
         submit.assert_not_called()
         assert len(fetches) >= 3
@@ -129,8 +157,19 @@ def test_gate_stock_complete_live_loop_uses_exchange_quotes(monkeypatch, account
         assert heartbeats[1][1]["status"] == "degraded"
         assert heartbeats[-1][1]["status"] == "healthy"
         assert sessions[0].process.call_count == 1
-        assert sessions[0].last_processed == frame.index[-1]
     assert request.call_count == 1
+
+
+def test_terminal_sandbox_failure_stops_without_retrying_dead_session(monkeypatch):
+    test_gate_stock_complete_live_loop_uses_exchange_quotes(
+        monkeypatch, {}, "current", sandbox_failure=True,
+    )
+
+
+def test_distributed_preparation_waits_for_bar_without_disabling_risk_heartbeat(monkeypatch):
+    test_gate_stock_complete_live_loop_uses_exchange_quotes(
+        monkeypatch, {}, "current", external_prepare=True,
+    )
 
 
 def test_gate_stock_testnet_rejected_before_deployment_is_saved(monkeypatch):

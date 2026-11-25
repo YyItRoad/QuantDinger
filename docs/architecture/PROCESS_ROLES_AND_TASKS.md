@@ -25,6 +25,18 @@ The production deployment uses one backend image with independent process roles.
 - Fencing tokens increase when an expired runtime is taken over by another worker.
 - Ordinary closed-bar Strategy V2 runtimes are dispatched through Kafka and
   owned by evaluator workers when distributed mode is enabled.
+- Evaluator, trading, and backtest workers retain orchestration and account
+  authority, but Strategy API V2 source and callbacks execute in separate
+  credential-free, kernel-confined processes. Backtests use a disposable
+  process; live deployments use one persistent process per strategy. Only
+  validated data snapshots, parameters, state, and order intents cross this
+  boundary.
+- Sandbox children do not acquire runtime leases, read durable state, open
+  broker sessions, or submit orders. They are terminated with their owning
+  operation or worker, and the trusted owner validates all returned intents
+  before persistence or execution. Failure to activate the Linux kernel
+  boundary is fatal to the untrusted-code operation; there is no in-process
+  fallback.
 - Grid, martingale, DCA, tick-driven, and session-driven strategies remain on
   the realtime trading-worker path unless their contract explicitly supports
   distributed closed-bar evaluation.
@@ -45,6 +57,8 @@ Celery owns finite jobs that can be serialized, retried, and observed independen
 - factor research, factor benchmarks, and strategy evolution;
 - reflection and AI calibration;
 - market catalog synchronization;
+- bounded order-level venue P&L backfills (`quantdinger.tasks.reconcile_reported_pnl`,
+  `maintenance` queue; no order placement or strategy state mutations);
 - runtime metadata cleanup.
 
 Celery must not own long-lived strategy loops, exchange polling, broker sessions, or grid runtime state. Those remain in the trading process because they require renewable ownership, reconciliation, and controlled shutdown.

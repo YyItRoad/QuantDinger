@@ -53,6 +53,8 @@ celery_app.conf.update(
         "app.tasks.maintenance",
         "app.tasks.fundamental_sync",
         "app.market_state.tasks",
+
+        "app.tasks.reported_pnl",
     ),
     task_routes={
         "quantdinger.tasks.market_state_tick": {"queue": "maintenance"},
@@ -68,6 +70,8 @@ celery_app.conf.update(
         "quantdinger.tasks.worker_heartbeat": {"queue": "maintenance"},
         "quantdinger.tasks.cleanup_runtime_metadata": {"queue": "maintenance"},
         "quantdinger.tasks.sync_position_management_history": {"queue": "maintenance"},
+
+        "quantdinger.tasks.reconcile_reported_pnl": {"queue": "maintenance"},
     },
     beat_schedule={
         "market-state-scan": {

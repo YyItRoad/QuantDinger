@@ -38,17 +38,45 @@ fencing tokens, idempotency keys, or order reconciliation.
 
 | Strategy class | Current owner | Trigger and recovery path |
 | --- | --- | --- |
-| Ordinary closed-bar Strategy API V2 | `strategy-evaluator-worker` | Kafka shard batch, durable inbox, runtime lease, hot checkpoint |
+| Ordinary closed-bar Strategy API V2 | `strategy-evaluator-worker` | Kafka shard batch, durable inbox, credential-free sandbox callback, runtime lease, hot checkpoint |
 | Grid with resting exchange orders | `trading-worker` | Private fill stream or REST reconciliation, durable grid actor mailbox |
 | Martingale, DCA, tick-driven, and session-driven runtime | `trading-worker` | Realtime local scheduler protected by strategy lease and fencing |
 | Pending live order submission | `trading-worker` | PostgreSQL claim, runtime fencing validation, stable client order ID |
-| AI, backtest, report, and maintenance job | `celery-worker` | Durable Redis jobs queue and task retry policy |
+| AI, report, and maintenance job | `celery-worker` | Durable Redis jobs queue and task retry policy |
+| Backtest, factor research, and finite experiment | `celery-backtest-worker` | Dedicated backtest queue, disposable task child, credential-free strategy sandbox |
 
 Market identity must include venue/provider, market, market type, instrument ID,
 and timeframe. A symbol string such as `BTC/USDT` is not a globally unique price
 stream and must never be used as the only routing key.
 
 ## Safe release procedure
+
+### Runtime start readiness
+
+Registering a bar subscription is a durable start request, not a successful start.
+The dispatcher periodically publishes `strategy.runtime.prepare.v1` for subscribed
+running strategies without a current readiness acknowledgement. Preparation and bar
+evaluation share the evaluation topic and `strategy-shard` key. The evaluator
+prepares the sandbox/history/run independently of the next candle, retires a local
+runtime from an older `desired_runtime_epoch`, and records `runtime_ready` in
+`strategy_runtime_state` with the current lease fencing token. Preparation does not
+invoke a trading callback; existing position protection and risk monitoring continue.
+
+The start command stays pending while readiness is checked, without consuming
+failure attempts or blocking the control worker. It succeeds only after the matching
+run/epoch/lease acknowledges readiness. The wait is bounded by the sandbox timeout
+plus 60 seconds (180 seconds by default); failed startup is logged and follows the
+command failure policy. Restart advances the generation once even if its command
+is retried. A delayed command from an earlier generation cannot stop a later start.
+Lease expiry or ownership transfer invalidates the old readiness acknowledgement.
+
+Deploy `trading-worker`, `strategy-dispatcher-worker`, and
+`strategy-evaluator-worker` from the same release; upgrading only the API or one
+worker is insufficient. This change needs no new database table or Kafka topic.
+Existing running subscriptions with an old/missing run are recovered by dispatcher
+reconciliation; do not manually edit their epochs or replay a candle to make the
+status appear healthy. Verify desired/actual epochs, a live runtime lease, and the
+new run's readiness acknowledgement, not just a historical `healthy` snapshot.
 
 1. Freeze schema-changing deployments and take a verified PostgreSQL backup.
 2. Save the current image tags and environment files for rollback.

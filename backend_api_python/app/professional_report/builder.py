@@ -266,6 +266,7 @@ def _macro_dimension_narrative(
     market_context = {
         "HKStock": ("全球及香港资金环境", "global and Hong Kong funding conditions"),
         "USStock": ("全球及美国风险资产环境", "global and US risk-asset conditions"),
+        "CNStock": ("全球及中国内地风险资产环境", "global and mainland China risk-asset conditions"),
         "Crypto": ("全球流动性及加密风险偏好环境", "global liquidity and crypto risk-sentiment conditions"),
     }.get(market, ("全球风险资产环境", "global risk-asset conditions"))
     if zh:
@@ -290,6 +291,7 @@ def _macro_dimension_code(payload: Mapping[str, Any], market: str = "") -> dict[
     context = {
         "HKStock": "hk_funding",
         "USStock": "us_risk_assets",
+        "CNStock": "cn_risk_assets",
         "Crypto": "crypto_liquidity",
     }.get(market, "global_risk_assets")
     return {"facts": facts, "context": context}
@@ -420,9 +422,52 @@ def _us_market_dimension_narrative(features: Mapping[str, Any], language: str) -
     return (f"当前覆盖{joined}{suffix}" if zh else f"Current coverage includes {joined}{suffix}")
 
 
+def _cn_market_dimension_narrative(features: Mapping[str, Any], language: str) -> str:
+    zh = str(language or "").lower().startswith("zh")
+    market_specific = features.get("market_specific") or {}
+    profile = market_specific.get("company_profile") or {}
+    statements = market_specific.get("financial_statements") or {}
+    facts: list[str] = []
+    company_name = str(profile.get("name") or profile.get("company_name") or "").strip()
+    industry = str(profile.get("industry") or profile.get("sector") or "").strip()
+    if company_name:
+        facts.append(
+            f"公司身份已匹配为{company_name}" if zh else f"company identity matched to {company_name}"
+        )
+    if industry:
+        facts.append(f"所属行业为{industry}" if zh else f"reported industry is {industry}")
+    available_periods = [
+        key for key in ("latest_quarter", "ttm", "latest_report", "latest_annual")
+        if statements.get(key)
+    ]
+    if available_periods:
+        facts.append(
+            f"取得{len(available_periods)}类财务期间数据"
+            if zh else
+            f"{len(available_periods)} financial-period datasets were retrieved"
+        )
+    missing = list(features.get("missing_capabilities") or [])
+    if not facts:
+        return (
+            "本次未取得可验证的A股公司画像或财务期间数据；缺失项已明确列示，不会用默认值代替。"
+            if zh else
+            "No verifiable A-share company profile or financial-period data was retrieved. Gaps are listed explicitly rather than replaced with defaults."
+        )
+    joined = "；".join(facts) if zh else "; ".join(facts)
+    if missing:
+        return (
+            f"已取得的A股特有证据包括：{joined}。仍有{len(missing)}项能力缺失，因此只能作为辅助证据。"
+            if zh else
+            f"Available A-share-specific evidence includes: {joined}. {len(missing)} capabilities remain missing, so this dimension is supporting evidence only."
+        )
+    return f"A股特有证据包括：{joined}。" if zh else f"A-share-specific evidence includes: {joined}."
+
+
 def _market_dimension_narrative(market: str, features: Mapping[str, Any], language: str) -> str:
     if market == "HKStock":
         return _hk_market_dimension_narrative(features, language)
+    if market == "CNStock":
+        return _cn_market_dimension_narrative(features, language)
     return _us_market_dimension_narrative(features, language)
 
 
@@ -497,7 +542,9 @@ def _build_scenarios(
     current_price: float,
     trading_plan: Mapping[str, Any],
     market_data: Mapping[str, Any],
+    language: str = "en-US",
 ) -> list[dict[str, Any]]:
+    zh = str(language).lower().startswith("zh")
     stop = trading_plan.get("stop_loss") or trading_plan.get("stopLoss")
     target = trading_plan.get("take_profit") or trading_plan.get("takeProfit")
     support = market_data.get("support")
@@ -511,26 +558,37 @@ def _build_scenarios(
     else:
         bull_target, bear_target = resistance, support
         base_target = current_price
+
+    # A broken support/resistance remains historical context, not a target
+    # on the opposite side of the current price.
+    bull_target = next((price for value in (bull_target, resistance)
+                        if (price := _finite_float(value)) is not None and price > current_price > 0), None)
+    bear_target = next((price for value in (bear_target, support)
+                        if (price := _finite_float(value)) is not None and 0 < price < current_price), None)
+    if decision == "BUY":
+        base_target = bull_target or current_price
+    elif decision == "SELL":
+        base_target = bear_target or current_price
     return [
         {
             "case": "bull",
             "probability": None,
             "target_price": bull_target,
-            "trigger": "Price and evidence confirm the upside thesis.",
+            "trigger": "价格走势与支持证据共同确认乐观情景。" if zh else "Price and evidence confirm the upside thesis.",
             "invalidation": bear_target,
         },
         {
             "case": "base",
             "probability": None,
             "target_price": base_target,
-            "trigger": "Current evidence remains mixed or follows the central path.",
+            "trigger": "当前证据仍然分化，维持基准路径。" if zh else "Current evidence remains mixed or follows the central path.",
             "invalidation": None,
         },
         {
             "case": "bear",
             "probability": None,
             "target_price": bear_target,
-            "trigger": "Downside catalyst or technical breakdown is confirmed.",
+            "trigger": "下行催化因素出现，或技术形态确认破位。" if zh else "Downside catalyst or technical breakdown is confirmed.",
             "invalidation": bull_target,
         },
     ]
@@ -593,6 +651,7 @@ def _typed_crypto_factors(
     for key in (
         "funding_rate",
         "open_interest",
+        "open_interest_change_24h",
         "basis",
         "liquidations",
         "long_short_ratio",
@@ -639,7 +698,7 @@ def build_professional_report(
     confidence_calibrated = bool(analysis_result.get("confidence_calibrated", False))
     prebuilt_market_features: dict[str, Any] | None = None
     hard_gate_reasons: list[str] = []
-    if market in {"USStock", "HKStock"}:
+    if market in {"USStock", "HKStock", "CNStock"}:
         prebuilt_market_features = build_equity_features(market, collector_payload, observations)
         if (prebuilt_market_features.get("identity") or {}).get("verified") is False:
             hard_gate_reasons.append("instrument_identity_unverified")
@@ -651,7 +710,7 @@ def build_professional_report(
             "crypto_factors": _typed_crypto_factors(legacy_crypto_factors, observations),
             "instrument": snapshot["instrument"],
         })
-        if not bool(
+        if legacy_crypto_factors and not bool(
             (prebuilt_market_features.get("quality_flags") or {}).get(
                 "usable_for_directional_analysis"
             )
@@ -707,11 +766,38 @@ def build_professional_report(
     dimensions = [
         _dimension("technical", scores.get("technical"), observations, ("technical", "market"), detailed.get("technical", "")),
         _dimension("fundamental", scores.get("fundamental"), observations, ("fundamental",), detailed.get("fundamental", "")),
-        _dimension("news_sentiment", scores.get("sentiment"), observations, ("news",), detailed.get("sentiment", "")),
+        _dimension("news_sentiment", scores.get("sentiment"), observations, ("news",), detailed.get("sentiment", ""), evidence_refs=[
+            item["evidence_id"] for item in observations
+            if item.get("category") == "news" and (item.get("value") or {}).get("asset_relevance") != "background"
+        ]),
         macro_dimension,
     ]
 
-    if market in {"USStock", "HKStock"}:
+    news_dimension = dimensions[2]
+    news_observations = [item for item in observations if item["evidence_id"] in news_dimension["evidence_refs"]]
+    sentiment_refs = _metric_refs(
+        observations, "expectations.analyst", "options.", "short_interest.",
+        "southbound_flow.", "crypto.funding_rate", "crypto.open_interest", "crypto.long_short_ratio",
+    )
+    collection_status = ((collector_payload.get("_meta") or {}).get("news_collection") or {}).get("status")
+    has_news_text = any((item.get("value") or {}).get("summary") for item in news_observations)
+    news_dimension["news_status"] = ("available" if has_news_text else "headline_only") if news_observations else collection_status or "not_checked"
+    news_dimension["sentiment_status"] = "available" if sentiment_refs else "not_checked"
+    news_dimension["evidence_refs"] = list(dict.fromkeys(news_dimension["evidence_refs"] + sentiment_refs))
+    news_dimension["score_kind"] = "evidence_coverage"
+    if news_dimension["evidence_refs"]:
+        news_dimension["status"] = "available" if has_news_text else "partial"
+    news_dimension["events"] = []
+    for item in news_observations[:5]:
+        value = item.get("value") or {}
+        news_dimension["events"].append({
+            "title": value.get("title"), "url": item.get("source_url"),
+            "published_at": item.get("as_of") if value.get("publication_time_known") else None,
+            "source": value.get("publisher") or item.get("source"),
+            "evidence_depth": value.get("evidence_depth"), "evidence_id": item["evidence_id"],
+        })
+
+    if market in {"USStock", "HKStock", "CNStock"}:
         market_features = prebuilt_market_features or build_equity_features(
             market, collector_payload, observations
         )
@@ -719,26 +805,34 @@ def build_professional_report(
         market_metric_prefixes = (
             (
                 "filings.hkex", "southbound_flow.snapshot", "short_selling.snapshot",
-                "ccass.snapshot", "ah_premium.snapshot", "expectations.analyst",
+                "ccass.snapshot", "ah_premium.snapshot", "expectations.analyst", "security_profile.hk",
             )
-            if market == "HKStock" else
+            if market == "HKStock" else (
+                "company.name", "financial.", "filings.cn", "northbound_flow.snapshot",
+                "margin_financing.snapshot", "expectations.analyst", "macro.cn",
+            )
+            if market == "CNStock" else
             (
                 "filings.sec", "expectations.analyst", "options.snapshot",
                 "short_interest.snapshot", "short_volume.snapshot", "insider_activity.snapshot",
                 "ownership.snapshot", "earnings.transcript",
             )
         )
+        statuses = market_features.get("capability_status") or {}
+        applicable_statuses = [value for value in statuses.values() if value != "not_applicable"]
+        coverage = sum(value == "available" for value in applicable_statuses) / max(1, len(applicable_statuses))
         market_dimension = _dimension(
             "market_specific",
-            0 if market_missing else 50,
+            100 * coverage,
             observations,
             (),
             _market_dimension_narrative(market, market_features, report_language),
             missing=market_missing,
             evidence_refs=_metric_refs(observations, *market_metric_prefixes),
         )
-        if market_missing:
-            market_dimension["status"] = "insufficient_data"
+        market_dimension["score_kind"] = "capability_coverage"
+        if market_missing and market_dimension["evidence_refs"]:
+            market_dimension["status"] = "partial"
         dimensions.append(market_dimension)
     elif market == "Crypto":
         market_features = prebuilt_market_features or {}
@@ -803,7 +897,7 @@ def build_professional_report(
     generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     from app.research import build_research_intelligence
 
-    scenarios = _build_scenarios(decision, current_price, trading_plan, market_data)
+    scenarios = _build_scenarios(decision, current_price, trading_plan, market_data, report_language)
     research_intelligence = build_research_intelligence(
         collector_payload,
         quality=quality,
@@ -848,7 +942,7 @@ def build_professional_report(
         "market_features": market_features,
         "research_intelligence": research_intelligence,
         "evidence_snapshot": snapshot,
-        "provider_options": _provider_payload(market) if market in {"USStock", "HKStock", "Crypto", "Forex", "Futures"} else {},
+        "provider_options": _provider_payload(market) if market in {"USStock", "HKStock", "CNStock", "Crypto", "Forex", "Futures"} else {},
         "warnings": warnings,
         "methodology": {
             "scoring_version": analysis_result.get("score_source") or "deterministic_objective_v2",

@@ -88,6 +88,7 @@ from app.services.pending_orders.broker_support import (
     broker_order_type as _broker_order_type,
     broker_protection_prices as _broker_protection_prices, native_stock_protection_allowed as _stock_protection,
     redact_exchange_json as _redact_exchange_json,
+    submit_broker_order,
 )
 from app.services.pending_orders.submission_recovery import SubmissionRecoveryMixin
 from app.services.pending_orders.claims import claim_pending_order
@@ -102,7 +103,7 @@ from app.utils.db import get_db_connection
 from app.services.pending_order_loops import PendingOrderLoops
 from app.utils.logger import get_logger
 from app.utils.strategy_runtime_logs import append_strategy_log
-from app.services.strategy_lifecycle import auto_stop_live_strategy, is_fatal_exchange_error
+from app.services.strategy_lifecycle import auto_stop_live_strategy, is_fatal_exchange_error, record_pending_order_outcome
 
 # Lazy import IBKR to avoid ImportError if ib_insync not installed
 IBKRClient = None
@@ -131,6 +132,7 @@ class PendingOrderWorker(
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._sync_thread: Optional[threading.Thread] = None
+        self._batch_thread: Optional[threading.Thread] = None
         self.lease_guard = None
         self._lock = threading.Lock()
         self._notifier = SignalNotifier()
@@ -169,7 +171,7 @@ class PendingOrderWorker(
 
     def start(self) -> bool:
         with self._lock:
-            if self._thread and self._thread.is_alive() and self._sync_thread and self._sync_thread.is_alive():
+            if all(thread and thread.is_alive() for thread in (self._thread, self._sync_thread, self._batch_thread)):
                 return True
             try:
                 ensure_position_ledger_schema()
@@ -182,6 +184,9 @@ class PendingOrderWorker(
             if not self._sync_thread or not self._sync_thread.is_alive():
                 self._sync_thread = threading.Thread(target=self._run_sync_loop, name="PendingOrderReconciliation", daemon=True)
                 self._sync_thread.start()
+            if not self._batch_thread or not self._batch_thread.is_alive():
+                self._batch_thread = threading.Thread(target=self._run_batch_loop, name="PendingOrderBatches", daemon=True)
+                self._batch_thread.start()
             logger.info("PendingOrderWorker started")
             return True
 
@@ -193,6 +198,8 @@ class PendingOrderWorker(
             th.join(timeout=timeout_sec)
         if self._sync_thread and self._sync_thread.is_alive():
             self._sync_thread.join(timeout=timeout_sec)
+        if self._batch_thread and self._batch_thread.is_alive():
+            self._batch_thread.join(timeout=timeout_sec)
         logger.info("PendingOrderWorker stopped")
 
     def _sync_quick_trade_orders(self, limit: int = 50) -> None:
@@ -1155,6 +1162,8 @@ class PendingOrderWorker(
         exchange_response_json = _redact_exchange_json(exchange_response_json)
         with get_db_connection() as db:
             cur = db.cursor()
+            cur.execute("SELECT * FROM pending_orders WHERE id = %s FOR UPDATE", (int(order_id),))
+            previous = cur.fetchone() or {}
             cur.execute(
                 """
                 UPDATE pending_orders
@@ -1213,6 +1222,8 @@ class PendingOrderWorker(
                     int(order_id),
                 ),
             )
+            if filled > 0 or exchange_status in {"new", "open", "live", "accepted", "partial", "filled", "submitted"}:
+                record_pending_order_outcome(cur, previous, accepted=True)
             db.commit()
             cur.close()
 
@@ -1472,7 +1483,9 @@ class PendingOrderWorker(
         sizing = sizing if isinstance(sizing, dict) else {}
         source = str(sizing.get("source") or "unknown")
         entry_pct = sizing.get("entry_pct")
-        capital = sizing.get("initial_capital")
+        capital = sizing.get("current_equity")
+        if capital is None:
+            capital = sizing.get("initial_capital")
         leverage = sizing.get("leverage") or payload.get("leverage")
 
         parts = [
@@ -1535,12 +1548,15 @@ class PendingOrderWorker(
             )
             sizing = payload.get("sizing") if isinstance(payload, dict) else {}
             sizing = sizing if isinstance(sizing, dict) else {}
+            capital = sizing.get("current_equity")
+            if capital is None:
+                capital = sizing.get("initial_capital")
             append_strategy_log(
                 strategy_id,
                 "info",
                 (
                     "Live order sizing: "
-                    f"capital={self._as_float(sizing.get('initial_capital'), 0.0):.4f}, "
+                    f"capital={self._as_float(capital, 0.0):.4f}, "
                     f"entry_pct={self._as_float(sizing.get('entry_pct'), 0.0):.4f}%, "
                     f"leverage={self._as_float(sizing.get('leverage') or leverage, 1.0):.4f}x, "
                     f"price={format_decimal(ref_price, decimal_places=8)}, "
@@ -1661,6 +1677,8 @@ class PendingOrderWorker(
             notifier=self._notifier,
             load_notification_config=self._load_notification_config,
             load_strategy_name=self._load_strategy_name,
+            resolved_exchange_id=exchange_id,
+            resolved_credential_id=int(credential_id_from_exchange_config(exchange_config) or 0),
         )
         _notify_live_best_effort = live_notifier.notify
 
@@ -2475,34 +2493,19 @@ class PendingOrderWorker(
             )
             if callable(prepare_submission):
                 prepare_submission()
-            if _stock_protection(payload, exchange_config, amount, stop_price, take_price):
-                result = client.place_bracket_order(
-                    symbol=symbol,
-                    side=action,
-                    quantity=amount,
-                    take_profit_price=take_price,
-                    stop_loss_price=stop_price,
-                    limit_price=limit_price if order_type == "limit" else 0.0,
-                    market_type=market_type,
-                    client_order_id=client_order_id,
-                )
-            elif order_type == "limit":
-                result = client.place_limit_order(
-                    symbol=symbol,
-                    side=action,
-                    quantity=amount,
-                    price=limit_price,
-                    market_type=market_type,
-                    client_order_id=client_order_id,
-                )
-            else:
-                result = client.place_market_order(
-                    symbol=symbol,
-                    side=action,
-                    quantity=amount,
-                    market_type=market_type,
-                    client_order_id=client_order_id,
-                )
+
+            bracket = _stock_protection(payload, exchange_config, amount, stop_price, take_price)
+            result = submit_broker_order(
+                client, symbol=symbol, side=action, quantity=amount,
+                market_type=market_type, client_order_id=client_order_id,
+                order_type=order_type, limit_price=limit_price, bracket=bracket,
+                protection={"take_profit_price": take_price, "stop_loss_price": stop_price} if bracket else None,
+                on_retry=lambda attempt, delay, category: append_strategy_log(
+                    strategy_id,
+                    "warning",
+                    f"IBKR order retry {attempt}: {category}; waiting {delay:.2f}s",
+                ),
+            )
 
             if not result.success:
                 if self._is_ambiguous_submit_error(result.message):
@@ -2679,25 +2682,16 @@ class PendingOrderWorker(
                     "stop_loss_price": stop_price,
                     "take_profit_price": take_price,
                 }
-            if order_type == "limit":
-                result = client.place_limit_order(
-                    symbol=symbol,
-                    side=action,
-                    quantity=amount,
-                    price=limit_price,
-                    market_type=market_type_for_client,
-                    client_order_id=client_order_id,
-                    **protection_kwargs,
-                )
-            else:
-                result = client.place_market_order(
-                    symbol=symbol,
-                    side=action,
-                    quantity=amount,
-                    market_type=market_type_for_client,
-                    client_order_id=client_order_id,
-                    **protection_kwargs,
-                )
+            result = submit_broker_order(
+                client, symbol=symbol, side=action, quantity=amount,
+                market_type=market_type_for_client, client_order_id=client_order_id,
+                order_type=order_type, limit_price=limit_price, protection=protection_kwargs,
+                on_retry=lambda attempt, delay, category: append_strategy_log(
+                    strategy_id,
+                    "warning",
+                    f"{broker_name} order retry {attempt}: {category}; waiting {delay:.2f}s",
+                ),
+            )
 
             if not result.success:
                 if self._is_ambiguous_submit_error(result.message):
@@ -2823,6 +2817,8 @@ class PendingOrderWorker(
         exchange_response_json = _redact_exchange_json(exchange_response_json)
         with get_db_connection() as db:
             cur = db.cursor()
+            cur.execute("SELECT * FROM pending_orders WHERE id = %s FOR UPDATE", (int(order_id),))
+            previous = cur.fetchone() or {}
             # Use NOW() for timestamp fields; executed_at is set to NOW() if provided, else NULL
             cur.execute(
                 """
@@ -2881,6 +2877,8 @@ class PendingOrderWorker(
                     int(order_id),
                 ),
             )
+            if (exchange_order_id or filled > 0) and previous.get("status") != "failed":
+                record_pending_order_outcome(cur, previous, accepted=True)
             db.commit()
             cur.close()
         self._register_pending_order_binding(
@@ -2972,6 +2970,11 @@ class PendingOrderWorker(
         error = str(redact_partner_attribution(str(error or "failed")))
         with get_db_connection() as db:
             cur = db.cursor()
+            cur.execute("SELECT * FROM pending_orders WHERE id = %s FOR UPDATE", (int(order_id),))
+            previous = cur.fetchone() or {}
+            if previous.get("status") in {"failed", "filled", "cancelled"}:
+                cur.close()
+                return
             cur.execute(
                 """
                 UPDATE pending_orders
@@ -2993,6 +2996,7 @@ class PendingOrderWorker(
                 """,
                 (int(order_id),),
             )
+            record_pending_order_outcome(cur, previous, accepted=False, reason=error)
             db.commit()
             cur.close()
 

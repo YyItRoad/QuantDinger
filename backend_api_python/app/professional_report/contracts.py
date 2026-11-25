@@ -15,7 +15,7 @@ from typing import Any, Literal
 from pydantic import AliasChoices, AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-Market = Literal["USStock", "HKStock", "Crypto", "Forex", "Futures"]
+Market = Literal["USStock", "HKStock", "CNStock", "Crypto", "Forex", "Futures"]
 Decision = Literal["BUY", "SELL", "HOLD"]
 MarketBias = Literal["BULLISH", "BEARISH", "NEUTRAL"]
 ConclusionStrength = Literal["none", "low", "medium", "high"]
@@ -54,6 +54,9 @@ class InstrumentIdentity(_ContractModel):
         aliases = {
             "us_equity": "USStock",
             "hk_equity": "HKStock",
+            "cn_equity": "CNStock",
+            "a_share": "CNStock",
+            "astock": "CNStock",
             "crypto": "Crypto",
             "forex": "Forex",
             "fx": "Forex",
@@ -188,6 +191,8 @@ class DataQualitySummary(_ContractModel):
     warnings: list[str] = Field(default_factory=list)
     max_conclusion_strength: ConclusionStrength
     directional_conclusion_allowed: bool
+    core_quality_score: float | None = Field(default=None, ge=0, le=100)
+    news_status: str = "not_checked"
 
     @model_validator(mode="after")
     def validate_gate_consistency(self) -> "DataQualitySummary":
@@ -304,11 +309,14 @@ class _AnalysisDimension(_ContractModel):
     key: str = Field(min_length=1)
     score: float = Field(ge=0, le=100)
     score_kind: str
-    status: Literal["available", "insufficient_data"]
+    status: Literal["available", "partial", "insufficient_data"]
     narrative: str = ""
     narrative_code: dict[str, Any] = Field(default_factory=dict)
     evidence_refs: list[str] = Field(default_factory=list)
     missing_data: list[str] = Field(default_factory=list)
+    news_status: str | None = None
+    sentiment_status: str | None = None
+    events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PriceBar(_ContractModel):

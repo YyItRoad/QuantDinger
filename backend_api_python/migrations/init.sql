@@ -2731,6 +2731,7 @@ CREATE TABLE IF NOT EXISTS strategy_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_strategy_runs_strategy ON strategy_runs(strategy_id, runtime_status);
 CREATE INDEX IF NOT EXISTS idx_strategy_runs_started ON strategy_runs(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_runs_strategy_latest ON strategy_runs(strategy_id, id DESC);
 
 CREATE TABLE IF NOT EXISTS strategy_runtime_state (
     id SERIAL PRIMARY KEY,
@@ -2743,6 +2744,8 @@ CREATE TABLE IF NOT EXISTS strategy_runtime_state (
     UNIQUE(strategy_run_id, strategy_id, state_key)
 );
 CREATE INDEX IF NOT EXISTS idx_strategy_runtime_state_strategy ON strategy_runtime_state(strategy_id);
+CREATE INDEX IF NOT EXISTS idx_strategy_runtime_state_health_latest
+ON strategy_runtime_state(strategy_id, strategy_run_id DESC, updated_at DESC) WHERE state_key = 'health';
 
 CREATE TABLE IF NOT EXISTS qd_strategy_event_subscriptions (
     strategy_id INTEGER NOT NULL REFERENCES qd_strategies_trading(id) ON DELETE CASCADE,
@@ -2792,6 +2795,29 @@ CREATE TABLE IF NOT EXISTS strategy_order_intents (
 CREATE INDEX IF NOT EXISTS idx_strategy_order_intents_strategy ON strategy_order_intents(strategy_id, status);
 ALTER TABLE strategy_order_intents
     ADD COLUMN IF NOT EXISTS runtime_fencing_token BIGINT NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS qd_strategy_order_batches (
+    id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    strategy_id INTEGER NOT NULL,
+    strategy_run_id INTEGER NOT NULL,
+    group_id VARCHAR(128) NOT NULL,
+    execution_mode VARCHAR(16) NOT NULL,
+    runtime_fencing_token BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    sealed_at TIMESTAMP,
+    evaluated_at TIMESTAMP,
+    notice_claimed_at TIMESTAMP,
+    next_check_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(strategy_run_id, strategy_id, group_id)
+);
+CREATE INDEX IF NOT EXISTS idx_strategy_order_batches_unfinished
+    ON qd_strategy_order_batches(next_check_at, id)
+    WHERE evaluated_at IS NULL OR notice_claimed_at IS NULL;
+ALTER TABLE pending_orders ADD COLUMN IF NOT EXISTS rebalance_group_id VARCHAR(128) NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_pending_orders_rebalance_batch
+    ON pending_orders(strategy_run_id, strategy_id, rebalance_group_id)
+    WHERE rebalance_group_id <> '';
 
 CREATE TABLE IF NOT EXISTS strategy_order_fills (
     id SERIAL PRIMARY KEY,
@@ -3006,6 +3032,8 @@ CREATE TABLE IF NOT EXISTS strategy_runtime_events (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_strategy_runtime_events_run ON strategy_runtime_events(strategy_run_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_strategy_runtime_events_strategy_latest
+ON strategy_runtime_events(strategy_id, created_at DESC, id DESC);
 
 CREATE TABLE IF NOT EXISTS strategy_runtime_locks (
     lock_key VARCHAR(180) PRIMARY KEY,
