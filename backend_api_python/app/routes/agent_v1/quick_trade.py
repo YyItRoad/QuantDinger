@@ -375,7 +375,8 @@ def _place_live_order(*, body: dict, user_id: int) -> dict:
             client_order_id=f"{client_order_id}p",
         )
     except Exception as protection_exc:
-        protection_error = str(protection_exc)
+        logger.warning("Live quick trade protection failed: %s", type(protection_exc).__name__)
+        protection_error = "Unable to attach exchange protection"
 
     status = quick_order_status(
         requested_qty=qty,
@@ -529,8 +530,8 @@ def place_order():
             return error(400, str(exc), http=400)
         except Exception as exc:
             _finish_live_notional("failed")
-            logger.error(f"agent_v1 live quick_trade failed: {exc}", exc_info=True)
-            return error(500, "live quick_trade failed", details=str(exc), http=500)
+            logger.error("Agent live quick trade failed: %s", type(exc).__name__)
+            return error(500, "live quick_trade failed", http=500)
         _finish_live_notional("executed")
         result["notional_policy"] = limit_state
         record_completed_job(

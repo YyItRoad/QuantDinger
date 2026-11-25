@@ -10,7 +10,7 @@ from typing import Any
 
 from app.services.backtest_jobs import parse_backtest_date, run_backtest_job
 from app.services.billing_service import BillingError
-from app.services.strategy_v2 import StrategyV2BacktestService
+from app.services.strategy_v2 import StrategyV2BacktestService, StrategyV2ContractError
 from app.utils.agent_auth import (
     SCOPE_B, agent_required, current_token, current_user_id,
     instrument_allowed, market_allowed, with_idempotency,
@@ -74,8 +74,11 @@ def _validate_request(body: dict) -> tuple[Any, Any]:
         program = inspect_strategy_v2(code)
         manifest = program.manifest
         metadata = manifest.metadata()
-    except Exception as exc:
+    except StrategyV2ContractError as exc:
         return None, error(400, str(exc), http=400)
+    except Exception as exc:
+        logger.warning("Unable to inspect backtest strategy: %s", type(exc).__name__)
+        return None, error(500, "Unable to inspect backtest strategy", http=500)
 
     for market in manifest.markets:
         if not market_allowed(market):

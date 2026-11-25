@@ -1010,7 +1010,7 @@ class IndicatorSignalAlertService:
         title, message_plain, email_html, telegram_html, payload = self._build_indicator_notification(task, signal)
         result: Dict[str, Any] = {}
         if "browser" in channels:
-            ok, msg = self.notifier._notify_browser(
+            ok, _ = self.notifier._notify_browser(
                 strategy_id=None,
                 symbol=str(task.get("symbol") or ""),
                 signal_type="indicator_signal",
@@ -1020,32 +1020,32 @@ class IndicatorSignalAlertService:
                 payload=payload,
                 user_id=int(task.get("user_id") or 1),
             )
-            result["browser"] = {"ok": ok, "message": msg}
+            result["browser"] = {"ok": ok, "message": "Sent" if ok else "Delivery failed"}
         if "email" in channels:
-            ok, msg = self.notifier._notify_email(
+            ok, _ = self.notifier._notify_email(
                 to_email=str(targets.get("email") or ""),
                 subject=title,
                 body_text=message_plain,
                 body_html=email_html,
             )
-            result["email"] = {"ok": ok, "message": msg}
+            result["email"] = {"ok": ok, "message": "Sent" if ok else "Delivery failed"}
         if "telegram" in channels:
-            ok, msg = self.notifier._notify_telegram(
+            ok, _ = self.notifier._notify_telegram(
                 chat_id=str(targets.get("telegram_chat_id") or targets.get("telegram") or ""),
                 text=telegram_html,
                 token_override=str(targets.get("telegram_bot_token") or targets.get("telegram_token") or ""),
                 parse_mode="HTML",
             )
-            result["telegram"] = {"ok": ok, "message": msg}
+            result["telegram"] = {"ok": ok, "message": "Sent" if ok else "Delivery failed"}
         if "webhook" in channels:
-            ok, msg = self.notifier._notify_webhook(
+            ok, _ = self.notifier._notify_webhook(
                 url=str(targets.get("webhook_url") or targets.get("webhook") or ""),
                 payload=payload,
                 headers_override=targets.get("webhook_headers") or targets.get("webhookHeaders") or None,
                 token_override=targets.get("webhook_token") or targets.get("webhookToken") or None,
                 signing_secret_override=targets.get("webhook_signing_secret") or targets.get("webhookSigningSecret") or None,
             )
-            result["webhook"] = {"ok": ok, "message": msg}
+            result["webhook"] = {"ok": ok, "message": "Sent" if ok else "Delivery failed"}
         return result
 
     def _mark_checked(self, task_id: int, *, next_check: datetime, last_error: str) -> None:
