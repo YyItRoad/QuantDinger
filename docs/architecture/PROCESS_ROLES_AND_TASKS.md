@@ -12,7 +12,8 @@ The production deployment uses one backend image with independent process roles.
 | Strategy Evaluator | `python -m app.commands.strategy_evaluator_worker` | Hot distributed bar runtimes, event inboxes, fenced evaluation, checkpoints, order intents |
 | Kafka Audit | `python -m app.commands.kafka_audit_worker` | Independent event-contract and delivery audit |
 | Scheduler | `python -m app.commands.scheduler` | Portfolio monitoring, deployment schedules, payment scans, signal alerts |
-| Celery Worker | `celery -A app.celery_app:celery_app worker` | AI, backtests, reports, and maintenance jobs |
+| Celery Worker | `celery -A app.celery_app:celery_app worker -Q ai,maintenance` | AI, reports, and maintenance jobs |
+| Backtest Worker | `celery -A app.celery_app:celery_app worker -Q backtest` | Backtests, factor research, and finite experiment jobs; each child exits after one task |
 | Celery Beat | `celery -A app.celery_app:celery_app beat` | Periodic maintenance dispatch |
 
 ## Ownership rules
@@ -24,6 +25,18 @@ The production deployment uses one backend image with independent process roles.
 - Fencing tokens increase when an expired runtime is taken over by another worker.
 - Ordinary closed-bar Strategy V2 runtimes are dispatched through Kafka and
   owned by evaluator workers when distributed mode is enabled.
+- Evaluator, trading, and backtest workers retain orchestration and account
+  authority, but Strategy API V2 source and callbacks execute in separate
+  credential-free, kernel-confined processes. Backtests use a disposable
+  process; live deployments use one persistent process per strategy. Only
+  validated data snapshots, parameters, state, and order intents cross this
+  boundary.
+- Sandbox children do not acquire runtime leases, read durable state, open
+  broker sessions, or submit orders. They are terminated with their owning
+  operation or worker, and the trusted owner validates all returned intents
+  before persistence or execution. Failure to activate the Linux kernel
+  boundary is fatal to the untrusted-code operation; there is no in-process
+  fallback.
 - Grid, martingale, DCA, tick-driven, and session-driven strategies remain on
   the realtime trading-worker path unless their contract explicitly supports
   distributed closed-bar evaluation.
@@ -40,12 +53,20 @@ The production deployment uses one backend image with independent process roles.
 Celery owns finite jobs that can be serialized, retried, and observed independently:
 
 - fast AI analysis;
-- agent backtests;
+- human and agent backtests;
+- factor research, factor benchmarks, and strategy evolution;
 - reflection and AI calibration;
 - market catalog synchronization;
+- bounded order-level venue P&L backfills (`quantdinger.tasks.reconcile_reported_pnl`,
+  `maintenance` queue; no order placement or strategy state mutations);
 - runtime metadata cleanup.
 
 Celery must not own long-lived strategy loops, exchange polling, broker sessions, or grid runtime state. Those remain in the trading process because they require renewable ownership, reconciliation, and controlled shutdown.
+
+Memory-intensive jobs use the dedicated `backtest` queue. Its worker defaults
+to one child, `max-tasks-per-child=1`, and a 1.5 GiB child memory threshold.
+Process-local K-line and shared-frame caches are also bounded by byte budgets.
+The general Celery worker does not consume this queue.
 
 ## Redis separation
 
@@ -57,7 +78,7 @@ Docker Compose enforces this order:
 
 1. PostgreSQL, both Redis instances, and Kafka become healthy.
 2. Database migration and Kafka topic initialization exit successfully.
-3. API, trading, dispatcher, evaluator, audit, scheduler, Celery Worker, and Celery Beat start.
+3. API, trading, dispatcher, evaluator, audit, scheduler, both Celery workers, and Celery Beat start.
 4. Health checks require fresh worker heartbeats and the runtime consumers expose their role-specific health state.
 
 For a single host, replica counts are controlled through

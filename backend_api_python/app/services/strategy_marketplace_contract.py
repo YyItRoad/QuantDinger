@@ -13,8 +13,8 @@ import ast
 import hashlib
 from typing import Any, Optional
 
-from app.services.strategy_v2 import compile_strategy_v2
-from app.services.strategy_v2.instruments import parse_instrument
+from app.services.strategy_v2 import inspect_strategy_v2
+from app.services.strategy_v2.instruments import instrument_key_from_metadata, parse_instrument
 
 
 CONTRACT_VERSION = 2
@@ -23,18 +23,7 @@ _SCHEDULE_CALLS = {"run_daily", "run_weekly", "run_monthly"}
 
 
 def _instrument_key(item: dict[str, Any]) -> str:
-    market = str(item.get("market") or "").strip()
-    symbol = str(item.get("symbol") or "").strip()
-    exchange = str(item.get("exchange_id") or "").strip().lower()
-    market_type = str(item.get("market_type") or "").strip().lower()
-    if not market or not symbol:
-        return str(item.get("instrument_id") or "").strip()
-    suffix = ""
-    if exchange:
-        suffix = f"@{exchange}" + (f":{market_type}" if market_type else "")
-    elif market_type:
-        suffix = f"@{market_type}"
-    return f"{market}:{symbol}{suffix}"
+    return instrument_key_from_metadata(item)
 
 
 def _reference_key(node: ast.AST) -> str:
@@ -150,7 +139,7 @@ def derive_strategy_contract(
     *,
     source: str = "published_code",
 ) -> dict[str, Any]:
-    program = compile_strategy_v2(str(code or ""))
+    program = inspect_strategy_v2(str(code or ""))
     manifest = program.manifest.metadata()
     universe = manifest.get("universe") if isinstance(manifest.get("universe"), dict) else {}
     instruments = [dict(item) for item in (universe.get("instruments") or []) if isinstance(item, dict)]

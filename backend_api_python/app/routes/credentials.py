@@ -28,6 +28,7 @@ from app.services.live_trading.factory import (
     validate_exchange_environment,
 )
 from app.services.live_trading.capabilities import supported_crypto_exchange_ids
+from app.utils.trading_venue_visibility import is_trading_venue_enabled
 
 logger = get_logger(__name__)
 
@@ -89,7 +90,10 @@ def list_credentials():
         items = []
         for row in rows:
             item = dict(row or {})
-            if str(item.get('exchange_id') or '').strip().lower() not in {*CRYPTO_EXCHANGES, 'ibkr', 'alpaca'}:
+            exchange_id = str(item.get('exchange_id') or '').strip().lower()
+            if exchange_id not in {*CRYPTO_EXCHANGES, 'ibkr', 'alpaca', 'tiger', 'webull'}:
+                continue
+            if not is_trading_venue_enabled(exchange_id):
                 continue
             item['enable_demo_trading'] = False
             item['environment'] = 'live'
@@ -123,7 +127,7 @@ def _crypto_credential_config(data: dict, exchange_id: str) -> dict:
     environment = exchange_trading_environment(data, exchange_id)
     market_scope = exchange_market_scope(data)
     validate_exchange_environment(exchange_id, environment, market_scope)
-    return {
+    config = {
         'exchange_id': exchange_id,
         'api_key': api_key,
         'secret_key': secret_key,
@@ -132,6 +136,14 @@ def _crypto_credential_config(data: dict, exchange_id: str) -> dict:
         'market_scope': market_scope,
         'enable_demo_trading': environment != 'live',
     }
+    if exchange_id == 'bitget':
+        requested_mode = str(
+            data.get('bitget_account_mode') or data.get('bitgetAccountMode') or 'auto'
+        ).strip().lower()
+        if requested_mode not in {'auto', 'classic', 'uta'}:
+            raise ValueError('INVALID_BITGET_ACCOUNT_MODE')
+        config['bitget_account_mode'] = requested_mode
+    return config
 
 
 def _probe_crypto_credential(config: dict) -> list[str]:

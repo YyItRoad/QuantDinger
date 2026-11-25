@@ -14,7 +14,7 @@ from app.services.live_trading.records import (
 )
 from app.services.pending_orders.position_sync_cache import invalidate_position_sync_snapshot_for_exchange
 from app.utils.logger import get_logger
-from app.utils.trade_close_reason import is_exit_trade_type
+from app.utils.trade_close_reason import INDICATOR_SIGNAL, is_exit_trade_type
 
 logger = get_logger(__name__)
 
@@ -186,6 +186,7 @@ def _persist_strategy_fill(
         filled=position_qty,
         avg_price=avg_px,
         leg=leg,
+        strategy_run_id=int(strategy_run_id or 0),
     )
     if profit is None:
         profit = profit_out
@@ -333,5 +334,5 @@ def _record_runtime_fill(
 def trade_close_reason_from_payload(payload: Dict[str, Any], signal_type: str) -> str:
     """Return the close reason only for exit-like trade types."""
     if is_exit_trade_type(str(signal_type or "")):
-        return str((payload or {}).get("reason") or "").strip()
+        return str((payload or {}).get("reason") or INDICATOR_SIGNAL).strip()
     return ""

@@ -13,12 +13,13 @@ import json
 
 from flask import g, jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
-from app.utils.auth import login_required
+from app.utils.auth import login_required, trading_required
 from app.utils.logger import get_logger
 from app.utils.broker_session import BrokerSessionRegistry
 from app.utils.credential_crypto import decrypt_credential_blob, encrypt_credential_blob
 from app.utils.db import get_db_connection
 from app.services.alpaca_trading import AlpacaClient, AlpacaConfig
+from app.utils.trading_venue_visibility import is_trading_venue_enabled
 
 logger = get_logger(__name__)
 
@@ -26,6 +27,12 @@ alpaca_blp = Blueprint('alpaca', __name__)
 
 # Clients are isolated by authenticated user and saved credential id.
 _sessions = BrokerSessionRegistry('alpaca')
+
+
+@alpaca_blp.before_request
+def _require_alpaca_enabled():
+    if not is_trading_venue_enabled('alpaca'):
+        return jsonify({"success": False, "error": "brokerAccounts.tradingVenueDisabled"}), 403
 
 
 def _placeholder_status():
@@ -275,6 +282,7 @@ def get_status():
 
 @alpaca_blp.route('/connect', methods=['POST'])
 @login_required
+@trading_required
 def connect():
     """
     Connect to Alpaca.
@@ -320,6 +328,7 @@ def connect():
 
 @alpaca_blp.route('/disconnect', methods=['POST'])
 @login_required
+@trading_required
 def disconnect():
     """Disconnect from Alpaca."""
     try:
@@ -410,10 +419,31 @@ def get_orders():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@alpaca_blp.route('/fills', methods=['GET'])
+@login_required
+def get_fills():
+    """Get authoritative Alpaca fill activities for the selected account."""
+    try:
+        client, err = _require_connected_client()
+        if err is not None:
+            return err
+        symbol = str(request.args.get("symbol") or "").strip()
+        limit = int(request.args.get("limit") or 100)
+        return jsonify({
+            "success": True,
+            "data": client.get_fill_history(symbol=symbol, limit=limit),
+            "source": "exchange",
+        })
+    except Exception as e:
+        logger.error(f"Get Alpaca fills failed: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # ==================== Trading ====================
 
 @alpaca_blp.route('/order', methods=['POST'])
 @login_required
+@trading_required
 def place_order():
     """
     Place an Alpaca order.
@@ -501,6 +531,7 @@ def place_order():
 
 @alpaca_blp.route('/order/<order_id>', methods=['DELETE'])
 @login_required
+@trading_required
 def cancel_order(order_id):
     """Cancel an Alpaca order by ID."""
     try:

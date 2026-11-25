@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional
 
 from app.services.grid.config import GridBotConfig
 from app.services.grid.engine import GridEngine
+from app.services.grid.resting_orders_repo import GridOrderLedgerUnavailable
 from app.services.grid.validator import validate_grid_config
 from app.services.bot_scripts.grid_runtime import prepare_bot_market_guards
 from app.utils.logger import get_logger
@@ -120,6 +121,7 @@ class GridRestingRunner:
             self.trading_config,
             self.exchange_config,
             user_id=self.user_id,
+            strategy_run_id=self.strategy_run_id,
             create_client_fn=create_client_fn,
             enqueue_market=enqueue_market_fn,
         )
@@ -160,6 +162,7 @@ class GridRestingRunner:
         return self._engine.stop_reason
 
     def startup(self, current_price: float, *, bars_df: Any = None) -> tuple[bool, str]:
+        self._engine.prepare_runtime_state()
         cfg = GridBotConfig.from_trading_config(self.trading_config)
         try:
             fee_rate = float(self.trading_config.get("commission") or 0.0) / 100.0
@@ -182,7 +185,6 @@ class GridRestingRunner:
         ok2, msg2 = self._engine.bootstrap(current_price)
         if not ok2:
             return False, msg2
-        self._engine.reconcile_grid_ladder_orders()
         try:
             client = self._engine._create_client()
         except Exception as e:
@@ -203,6 +205,13 @@ class GridRestingRunner:
         if not ok_mode:
             append_strategy_log(self.strategy_id, "error", mode_msg)
             return False, mode_msg
+        sizes_ok, size_detail = self._engine.validate_startup_order_sizes(client)
+        if not sizes_ok:
+            diagnostic = f"grid.startupPreflightRejected {size_detail}"
+            logger.warning("strategy=%s %s", self.strategy_id, diagnostic)
+            append_strategy_log(self.strategy_id, "error", diagnostic)
+            return False, "strategyRuntime.gridStartupCoverageFailed"
+        self._engine.reconcile_grid_ladder_orders()
         try:
             snap = fetch_exchange_dual_leg_snapshot(
                 client,
@@ -245,11 +254,15 @@ class GridRestingRunner:
         startup_snapshot = self.operational_snapshot(force=True)
         has_new_initial_fills = self._engine.has_new_startup_initial_fills
         startup_coverage_failed = bool(
-            has_new_initial_fills
-            and not startup_snapshot.get("healthy")
+            not startup_snapshot.get("healthy")
+            and (
+                has_new_initial_fills
+                or not startup_snapshot.get("open_orders")
+                or startup_snapshot.get("unverified_orders")
+            )
         )
         if self._engine.stop_requested or startup_coverage_failed:
-            if has_new_initial_fills or startup_coverage_failed:
+            if has_new_initial_fills:
                 self._engine.cancel_all_orders_on_exchange()
             else:
                 self._engine.cancel_entry_orders_on_exchange()
@@ -354,7 +367,11 @@ class GridRestingRunner:
             and now - self._last_operational_check_ts < 5.0
         ):
             return dict(self._last_operational_snapshot)
-        orders = list(self._engine._orders.list_open(self.strategy_id) or [])
+        try:
+            orders = list(self._engine._orders.list_open(self.strategy_id) or [])
+        except GridOrderLedgerUnavailable:
+            return {**self._last_operational_snapshot, "healthy": False,
+                    "error": "grid_order_ledger_unavailable"}
         entries = [order for order in orders if str(order.purpose or "") in {"long_entry", "short_entry"}]
         unverified = [order for order in orders if not str(order.exchange_order_id or "").strip()]
         expected = bool(
@@ -381,6 +398,24 @@ class GridRestingRunner:
         return dict(snapshot)
 
     def tick(
+        self,
+        current_price: float,
+        *,
+        high: Optional[float] = None,
+        low: Optional[float] = None,
+        bars_df: Any = None,
+        is_closed_bar: bool = False,
+    ) -> None:
+        try:
+            self._tick(current_price, high=high, low=low, bars_df=bars_df, is_closed_bar=is_closed_bar)
+            self._ledger_outage_logged = False
+        except GridOrderLedgerUnavailable:
+            self._last_operational_check_ts = 0.0
+            if not getattr(self, "_ledger_outage_logged", False):
+                logger.warning("Grid ledger unavailable sid=%s; retaining exchange orders", self.strategy_id)
+                self._ledger_outage_logged = True
+
+    def _tick(
         self,
         current_price: float,
         *,
@@ -420,9 +455,10 @@ class GridRestingRunner:
                         if st:
                             queued_any = True
                             exit_reasons.append(str(ex.get("reason") or "grid_risk"))
-                            all_queued = bool(self._engine._enqueue_market(
-                                st, 0, current_price, str(ex.get("reason") or "grid_risk")
-                            )) and all_queued
+                            if st != "stop":
+                                all_queued = bool(self._engine._enqueue_market(
+                                    st, 0, current_price, str(ex.get("reason") or "grid_risk")
+                                )) and all_queued
                     if queued_any and all_queued:
                         self._engine._stop_requested = True
                         self._engine._stop_reason = (

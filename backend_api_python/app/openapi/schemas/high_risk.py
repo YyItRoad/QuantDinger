@@ -11,6 +11,7 @@ class LoginRequestSchema(Schema):
     password = fields.String(required=True, validate=validate.Length(min=1, max=1024))
     turnstile_token = fields.String(allow_none=True, validate=validate.Length(max=4096))
     turnstile_clearance = fields.String(allow_none=True, validate=validate.Length(max=4096))
+    client_type = fields.String(load_default="pc", validate=validate.OneOf(["pc", "mobile"]))
 
     @validates_schema
     def validate_identity(self, data, **kwargs):
@@ -24,6 +25,7 @@ class RegisterRequestSchema(Schema):
     username = fields.String(required=True, validate=validate.Length(min=3, max=30))
     password = fields.String(required=True, validate=validate.Length(min=1, max=1024))
     referral_code = fields.String(load_default="", validate=validate.Length(max=64))
+    client_type = fields.String(load_default="pc", validate=validate.OneOf(["pc", "mobile"]))
 
 
 class ResetPasswordRequestSchema(Schema):
@@ -59,6 +61,11 @@ class CredentialCreateRequestSchema(Schema):
     network = fields.String(load_default="", validate=validate.Length(max=32))
     market_scope = fields.String(load_default="", validate=validate.OneOf(["", "spot", "swap", "both"]))
     marketScope = fields.String(load_default="", validate=validate.Length(max=32))
+    bitget_account_mode = fields.String(
+        load_default="",
+        validate=validate.OneOf(["", "auto", "classic", "uta"]),
+    )
+    bitgetAccountMode = fields.String(load_default="", validate=validate.Length(max=32))
     ibkr_host = fields.String(load_default="127.0.0.1", validate=validate.Length(max=255))
     ibkr_port = fields.Integer(load_default=7497, validate=validate.Range(min=1, max=65535))
     ibkr_client_id = fields.Integer(load_default=7, validate=validate.Range(min=0, max=2147483647))
@@ -111,6 +118,7 @@ class QuickTradeOrderRequestSchema(Schema):
     entry_reason = fields.String(load_default="", validate=validate.Length(max=500), metadata={
         "description": "Market state and opening idea in one text field. Required for spot buys and swap entries; spot sells are exits."
     })
+    asset_id = fields.Integer(load_default=0, validate=validate.Range(min=0))
     credential_id = fields.Integer(required=True, validate=validate.Range(min=1))
     symbol = fields.String(required=True, validate=validate.Length(min=1, max=64))
     side = fields.String(required=True, validate=validate.OneOf(("buy", "sell")))
@@ -121,6 +129,8 @@ class QuickTradeOrderRequestSchema(Schema):
     amount = fields.Float(load_default=0, validate=validate.Range(min=0))
     quantity = fields.Float(load_default=0, validate=validate.Range(min=0))
     price = fields.Float(load_default=0, validate=validate.Range(min=0))
+    reference_price = fields.Float(load_default=0, validate=validate.Range(min=0))
+    reference_price_at_ms = fields.Integer(load_default=0, validate=validate.Range(min=0))
     leverage = fields.Integer(load_default=1, validate=validate.Range(min=1, max=125))
     market_type = fields.String(
         load_default="",
@@ -160,6 +170,7 @@ class QuickTradeOrderRequestSchema(Schema):
 
 
 class QuickTradeCloseRequestSchema(Schema):
+    asset_id = fields.Integer(load_default=0, validate=validate.Range(min=0))
     order_type = fields.String(load_default="market", validate=validate.OneOf(("market", "limit")))
     price = fields.Float(load_default=0, validate=validate.Range(min=0))
     credential_id = fields.Integer(required=True, validate=validate.Range(min=1))

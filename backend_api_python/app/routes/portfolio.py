@@ -413,6 +413,14 @@ def add_monitor():
         config = data.get('config') or {}
         notification_config = data.get('notification_config') or {}
         is_active = bool(data.get('is_active', True))
+
+        if not config.get('language'):
+            request_language = (
+                request.headers.get('X-App-Lang')
+                or request.headers.get('Accept-Language')
+                or 'en-US'
+            )
+            config['language'] = request_language.split(',', 1)[0].strip() or 'en-US'
         
         if not name:
             return jsonify({'code': 0, 'msg': 'Monitor name is required', 'data': None}), 400
@@ -640,7 +648,8 @@ def get_alerts():
                        a.trigger_count, a.repeat_interval, a.notes, a.created_at, a.updated_at,
                        p.name as position_name, p.side as position_side
                 FROM qd_position_alerts a
-                LEFT JOIN qd_manual_positions p ON a.position_id = p.id
+                LEFT JOIN qd_manual_positions p
+                  ON a.position_id = p.id AND a.user_id = p.user_id
                 WHERE a.user_id = ?
                 ORDER BY a.id DESC
                 """,
@@ -710,9 +719,10 @@ def add_alert():
                 )
                 pos = cur.fetchone()
                 cur.close()
-                if pos:
-                    market = pos.get('market') or market
-                    symbol = pos.get('symbol') or symbol
+                if not pos:
+                    return jsonify({'code': 0, 'msg': 'position_not_found', 'data': None}), 404
+                market = pos.get('market') or market
+                symbol = pos.get('symbol') or symbol
         
         if not market or not symbol:
             return jsonify({'code': 0, 'msg': 'Market and symbol are required', 'data': None}), 400

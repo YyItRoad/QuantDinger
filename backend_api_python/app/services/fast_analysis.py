@@ -8,7 +8,11 @@ from typing import Dict, Any, Optional, List
 from app.utils.logger import get_logger
 from app.services.llm import LLMService
 from app.services.market_data_collector import get_market_data_collector
-from app.services.fast_analysis_formatters import build_trend_outlook_summary, safe_float_price
+from app.services.fast_analysis_formatters import (
+    build_crypto_factor_summary_code,
+    build_trend_outlook_summary,
+    safe_float_price,
+)
 from app.services.fast_analysis_fundamentals import (
     build_score_payload,
     format_financial_statements,
@@ -22,6 +26,7 @@ from app.professional_report import build_professional_report
 from app.professional_report.llm_contract import validate_llm_analysis
 from app.professional_report.snapshot import build_evidence_snapshot
 from app.professional_report.prompt import build_professional_analysis_prompt
+from app.data_sources.factory import DataSourceFactory
 
 logger = get_logger(__name__)
 
@@ -40,6 +45,11 @@ class FastAnalysisService(FastAnalysisScoringMixin):
         self.llm_service = LLMService()
         self.data_collector = get_market_data_collector()
         self._memory_db = None  # Lazy init
+
+    @staticmethod
+    def _normalize_analysis_market(market: str) -> str:
+        """Return the canonical market value required by report contracts."""
+        return DataSourceFactory.normalize_market(market or "")
     
     # ==================== Data Collection Layer ====================
     
@@ -295,8 +305,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
                 f"- 稳定币净流: {_fmt_num(crypto_factors.get('stablecoin_netflow'), ' USD')}\n"
                 f"- 衍生品偏向: {signals.get('derivatives_bias', 'neutral')}\n"
                 f"- 资金流偏向: {signals.get('flow_bias', 'neutral')}\n"
-                f"- 挤仓风险: {signals.get('squeeze_risk', 'low')}\n"
-                f"- 因子摘要: {crypto_factors.get('summary') or '暂无'}"
+                f"- 挤仓风险: {signals.get('squeeze_risk', 'low')}"
             )
 
         return (
@@ -310,8 +319,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
             f"- Stablecoin netflow: {_fmt_num(crypto_factors.get('stablecoin_netflow'), ' USD')}\n"
             f"- Derivatives bias: {signals.get('derivatives_bias', 'neutral')}\n"
             f"- Flow bias: {signals.get('flow_bias', 'neutral')}\n"
-            f"- Squeeze risk: {signals.get('squeeze_risk', 'low')}\n"
-            f"- Factor summary: {crypto_factors.get('summary') or 'N/A'}"
+            f"- Squeeze risk: {signals.get('squeeze_risk', 'low')}"
         )
     
     # ==================== Memory Layer ====================
@@ -490,11 +498,12 @@ class FastAnalysisService(FastAnalysisScoringMixin):
         }
         ensemble_models = []
         if os.getenv("ENABLE_AI_ENSEMBLE", "false").lower() == "true":
-            ensemble_models = [
-                item.strip()
-                for item in (os.getenv("AI_ENSEMBLE_MODELS") or "").split(",")
-                if item.strip()
-            ][:3]
+            for item in (os.getenv("AI_ENSEMBLE_MODELS") or "").split(","):
+                normalized = item.strip()
+                if normalized and normalized not in ensemble_models:
+                    ensemble_models.append(normalized)
+                if len(ensemble_models) == 3:
+                    break
         if len(ensemble_models) < 2:
             raw = self.llm_service.safe_call_llm(
                 system_prompt, user_prompt, default_structure=default_struct, model=model
@@ -516,14 +525,49 @@ class FastAnalysisService(FastAnalysisScoringMixin):
             for item in ensemble_models
         ]
         decisions = [str(item.get("decision") or "HOLD").upper() for item in analyses]
-        vote = Counter(decisions).most_common(1)[0][0]
-        selected = analyses[decisions.index(vote)].copy()
+        vote_counts = Counter(decisions)
+        vote, vote_count = vote_counts.most_common(1)[0]
+        has_majority = vote_count > len(decisions) / 2
+        if not has_majority:
+            vote = "HOLD"
+        selected = analyses[decisions.index(vote)].copy() if vote in decisions else analyses[0].copy()
         selected.update({
             "decision": vote,
-            "_ensemble_vote": dict(Counter(decisions)),
+            "_ensemble_vote": dict(vote_counts),
             "_ensemble_models": ensemble_models,
+            "_ensemble_consensus": has_majority,
         })
         return selected
+
+    @staticmethod
+    def _replace_failed_llm_narrative(
+        analysis: Dict[str, Any],
+        trend_outlook_summary: str,
+        market_factor_summary: str = "",
+    ) -> bool:
+        """Replace provider-error copy with deterministic analysis already computed locally."""
+        summary = str(analysis.get("summary") or "").strip()
+        report = str(analysis.get("report") or "").strip()
+        failure_markers = ("analysis failed", "failed to parse")
+        if not any(
+            value.lower().startswith(failure_markers)
+            for value in (summary, report)
+            if value
+        ):
+            return False
+
+        deterministic_summary = str(
+            trend_outlook_summary or market_factor_summary or ""
+        ).strip()
+        analysis["summary"] = deterministic_summary
+        analysis["key_reasons"] = [
+            value
+            for value in (trend_outlook_summary, market_factor_summary)
+            if str(value or "").strip()
+        ]
+        analysis["risks"] = []
+        analysis["_llm_fallback_used"] = True
+        return True
 
     @staticmethod
     def _attach_professional_report(
@@ -537,7 +581,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
             report = build_professional_report(
                 data,
                 result,
-                data_tier=os.getenv("PROFESSIONAL_REPORT_DATA_TIER", "community").strip().lower(),
+                data_tier="community",
                 account_risk_budget_pct=float(
                     os.getenv("PROFESSIONAL_REPORT_RISK_BUDGET_PCT", "1.0") or 1.0
                 ),
@@ -577,8 +621,19 @@ class FastAnalysisService(FastAnalysisScoringMixin):
             )
             result["professional_report_error"] = str(exc)
 
-    def analyze(self, market: str, symbol: str, language: str = 'en-US', 
-                model: str = None, timeframe: str = "1D", user_id: int = None) -> Dict[str, Any]:
+    @staticmethod
+    def _analysis_prompt_data(primary_data: Dict[str, Any], market: str) -> Dict[str, Any]:
+        if market != "Crypto" or not primary_data.get("crypto_factors"):
+            return primary_data
+        data = dict(primary_data)
+        crypto_factors = dict(primary_data.get("crypto_factors") or {})
+        crypto_factors.pop("summary", None)
+        data["crypto_factors"] = crypto_factors
+        return data
+
+    def analyze(self, market: str, symbol: str, language: str = 'en-US',
+                model: str = None, timeframe: str = "1D", user_id: int = None,
+                research_mode: str = "research") -> Dict[str, Any]:
         """
         Run fast single-call analysis.
         
@@ -593,6 +648,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
         Returns:
             Complete analysis result with actionable recommendations.
         """
+        market = self._normalize_analysis_market(market)
         start_time = time.time()
         # Get default model if not specified
         if not model:
@@ -605,6 +661,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
             "language": language,
             "model": model,  # Include model in result from the start
             "timeframe": timeframe,
+            "research_mode": research_mode,
             "analysis_time_ms": 0,
             "error": None,
         }
@@ -652,6 +709,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
                 include_macro=True,
                 include_news=True,
             )
+            primary_data["research_mode"] = research_mode
 
             # Collect extra timeframes for objective consensus (technical-only for cost)
             objective_by_tf: Dict[str, Dict[str, Any]] = {}
@@ -805,7 +863,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
                 f"agreement_ratio={agreement_ratio:.2f}, quality_multiplier={quality_multiplier:.2f}"
             )
 
-            data = primary_data  # keep original variable usage for prompt/LLM input
+            data = self._analysis_prompt_data(primary_data, market)
             
             # Validate we have essential data - with fallback to indicators
             current_price = None
@@ -886,7 +944,6 @@ class FastAnalysisService(FastAnalysisScoringMixin):
                 f"Sentiment: {objective_score['sentiment_score']:.1f}, Macro: {objective_score['macro_score']:.1f})"
             )
             crypto_factor_score = objective_score.get("crypto_factor_score")
-            crypto_factor_summary = objective_score.get("crypto_factor_summary") or (data.get("crypto_factors") or {}).get("summary", "")
 
             score_based_decision = self._score_to_decision(objective_score["overall_score"], market=market)
             llm_decision = str(analysis.get("decision", "HOLD") or "HOLD").upper()
@@ -945,6 +1002,11 @@ class FastAnalysisService(FastAnalysisScoringMixin):
                 },
             }
             trend_outlook_summary = build_trend_outlook_summary(trend_outlook, language)
+            self._replace_failed_llm_narrative(
+                analysis,
+                trend_outlook_summary,
+                "",
+            )
 
             # Consensus confidence:
             consensus_conf = int(max(40, min(98, 50 + consensus_abs * 0.35)))
@@ -1059,9 +1121,13 @@ class FastAnalysisService(FastAnalysisScoringMixin):
                 try:
                     from app.services.analysis_memory import get_analysis_memory
                     raw_conf = int(analysis.get("confidence", 50) or 50)
-                    analysis["confidence"] = get_analysis_memory().get_adjusted_confidence(
-                        raw_conf, market=market, symbol=symbol
+                    adjusted_conf = get_analysis_memory().get_adjusted_confidence(
+                        raw_conf,
+                        user_id=int(user_id),
+                        market=market,
+                        symbol=symbol,
                     )
+                    analysis.update(confidence=adjusted_conf, _confidence_calibrated=adjusted_conf != raw_conf)
                 except Exception as e:
                     logger.debug(f"Confidence calibration skipped: {e}")
             
@@ -1074,7 +1140,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
                 # If AI returned a string instead of dict, use it as technical analysis
                 detailed_analysis = {"technical": detailed_analysis, "fundamental": "", "sentiment": ""}
             if market == "Crypto" and not detailed_analysis.get("fundamental"):
-                detailed_analysis["fundamental"] = crypto_factor_summary or (data.get("crypto_factors") or {}).get("summary", "")
+                detailed_analysis["fundamental"] = ""
 
             score_payload = build_score_payload(objective_score, analysis, self._calculate_overall_score(analysis))
             provenance_payload = fundamental_provenance(data.get("fundamental") or {})
@@ -1082,6 +1148,7 @@ class FastAnalysisService(FastAnalysisScoringMixin):
             result.update({
                 "decision": analysis.get("decision", "HOLD"),
                 "confidence": analysis.get("confidence", 50),
+                "confidence_calibrated": bool(analysis.get("_confidence_calibrated", False)),
                 "summary": analysis.get("summary", ""),
                 "model": model,  # Model is already set in result initialization
                 "language": language,  # Ensure language is included for task record
@@ -1114,7 +1181,8 @@ class FastAnalysisService(FastAnalysisScoringMixin):
                 "crypto_factors": data.get("crypto_factors", {}),
                 "crypto_factor_score": crypto_factor_score,
                 "crypto_factor_breakdown": objective_score.get("crypto_factor_breakdown", []),
-                "crypto_factor_summary": crypto_factor_summary,
+                "crypto_factor_summary": "",
+                "crypto_factor_summary_code": build_crypto_factor_summary_code(data.get("crypto_factors") or {}),
                 "score_based_decision": analysis.get("score_based_decision", "HOLD"),
                 "market_data": {
                     "current_price": current_price,

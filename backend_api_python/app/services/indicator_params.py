@@ -255,9 +255,6 @@ class IndicatorCaller:
         Returns:
             DataFrame after the called indicator runs.
         """
-        import pandas as pd
-        import numpy as np
-        
         if _depth >= self.MAX_CALL_DEPTH:
             logger.error(f"Indicator call depth exceeded {self.MAX_CALL_DEPTH}")
             return df.copy()
@@ -278,35 +275,20 @@ class IndicatorCaller:
             merged_params = IndicatorParamsParser.merge_params(declared_params, params or {})
             
             df_copy = df.copy()
-            local_vars = {
-                'df': df_copy,
-                'open': df_copy['open'].astype('float64') if 'open' in df_copy.columns else pd.Series(dtype='float64'),
-                'high': df_copy['high'].astype('float64') if 'high' in df_copy.columns else pd.Series(dtype='float64'),
-                'low': df_copy['low'].astype('float64') if 'low' in df_copy.columns else pd.Series(dtype='float64'),
-                'close': df_copy['close'].astype('float64') if 'close' in df_copy.columns else pd.Series(dtype='float64'),
-                'volume': df_copy['volume'].astype('float64') if 'volume' in df_copy.columns else pd.Series(dtype='float64'),
-                'signals': pd.Series(0, index=df_copy.index, dtype='float64'),
-                'np': np,
-                'pd': pd,
-                'params': merged_params,
-                'call_indicator': lambda ref, d, p=None: self.call_indicator(ref, d, p, _depth + 1)
-            }
-            
-            from app.utils.safe_exec import build_safe_builtins, safe_exec_with_validation
+            from app.utils.safe_exec import safe_exec_indicator_isolated
 
-            exec_env = local_vars.copy()
-            exec_env['__builtins__'] = build_safe_builtins()
-
-            exec_result = safe_exec_with_validation(
+            exec_result = safe_exec_indicator_isolated(
                 code=indicator_code,
-                exec_globals=exec_env,
+                df=df_copy,
+                params=merged_params,
                 timeout=30,
             )
             if not exec_result['success']:
                 logger.error(f"Indicator {indicator_ref} rejected: {exec_result['error']}")
                 return df.copy()
-            
-            return exec_env.get('df', df_copy)
+
+            result = exec_result.get('result') or {}
+            return result.get('df', df_copy)
             
         except Exception as e:
             logger.error(f"Error calling indicator {indicator_ref}: {e}")
@@ -347,26 +329,42 @@ class IndicatorCaller:
             return None, None
 
 
-def get_indicator_params(indicator_id: int) -> List[Dict[str, Any]]:
+def get_indicator_params(indicator_id: int, user_id: int) -> Optional[List[Dict[str, Any]]]:
     """
     Return indicator parameter declarations for API consumers.
     
     Args:
         indicator_id: Indicator ID.
+        user_id: Current authenticated user ID.
         
     Returns:
-        Parameter declaration list.
+        Parameter declaration list, or ``None`` when the indicator is not
+        visible to the current user.
     """
     try:
         with get_db_connection() as db:
             cursor = db.cursor()
-            cursor.execute("SELECT code FROM qd_indicator_codes WHERE id = %s", (indicator_id,))
+            cursor.execute(
+                """
+                SELECT code
+                FROM qd_indicator_codes
+                WHERE id = %s
+                  AND (
+                    user_id = %s
+                    OR (
+                      publish_to_community = 1
+                      AND (review_status = 'approved' OR review_status IS NULL)
+                    )
+                  )
+                """,
+                (int(indicator_id), int(user_id)),
+            )
             row = cursor.fetchone()
             cursor.close()
             
             if row and row['code']:
                 return IndicatorParamsParser.parse_params(row['code'])
-            return []
+            return None
     except Exception as e:
         logger.error(f"Error getting indicator params: {e}")
-        return []
+        raise

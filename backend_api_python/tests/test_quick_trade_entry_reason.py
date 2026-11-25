@@ -15,7 +15,7 @@ def opening(full_app, monkeypatch):
     client, admin, password, _ = full_app
     headers = login(client, 'plan-test', password)
     from app.services.live_trading import account_configuration, execution, spot_sizing
-    from app.services.quick_trade import credentials, orders
+    from app.services.quick_trade import account_warmup, credentials, orders
     from app.services.execution_streams.repository import ExecutionEventRepository
     from app.services.live_trading import fee_quote
     config = {'exchange_id': 'binance'}
@@ -31,7 +31,7 @@ def opening(full_app, monkeypatch):
         assert before['status'] == 'pending'
         assert parse_quick_trade_metadata(before['raw_result'])['entry_reason'] == reason
         calls.append(before['id'])
-        return SimpleNamespace(exchange_order_id='fake-order', filled=2, avg_price=100, raw={})
+        return SimpleNamespace(exchange_order_id='fake-order', filled=2, avg_price=100, raw={'status': 'FILLED'})
 
     fake = SimpleNamespace(place_limit_order=execute_order)
     monkeypatch.setattr(quick_trade, '_build_product_aware_config', lambda *a, **k: (config, None))
@@ -43,6 +43,7 @@ def opening(full_app, monkeypatch):
     monkeypatch.setattr(spot_sizing, 'normalize_spot_base_quantity', lambda *a, quantity, **k: quantity)
     monkeypatch.setattr(spot_sizing, 'normalize_spot_quote_amount', lambda *a, quote_amount, **k: quote_amount)
     monkeypatch.setattr(account_configuration, 'configure_derivatives_account', lambda *a, **k: None)
+    monkeypatch.setattr(account_warmup, 'configure_derivatives_account', lambda *a, **k: None)
     monkeypatch.setattr(execution, 'place_order_from_signal', execute_order)
     monkeypatch.setattr(ExecutionEventRepository, 'register_binding', lambda *a, **k: None)
     monkeypatch.setattr(fee_quote, 'fee_to_quote', lambda *a, **k: 0)
