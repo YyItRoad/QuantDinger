@@ -2360,6 +2360,26 @@ paths:
       - Indicator
       operationId: getApiIndicatorKline
       x-visibility: public
+  /api/indicator/multi-kline:
+    post:
+      responses:
+        '400':
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanErrorEnvelope'
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HumanSuccessEnvelope'
+      summary: Return bounded same-symbol timeframe data for an indicator runtime.
+      tags:
+      - Indicator
+      operationId: postApiIndicatorMultiKline
+      x-visibility: public
   /api/backtest/jobs:
     post:
       responses:
