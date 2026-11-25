@@ -566,7 +566,7 @@ class SignalNotifier:
             if not ok and c in ("webhook", "discord"):
                 # Keep logs high-signal and avoid leaking full URLs (webhook URLs contain secrets).
                 logger.info(
-                    f"notify failed: channel={c} strategy_id={strategy_id} symbol={symbol} signal={signal_type} err={err}"
+                    "Notification delivery failed: channel=%s strategy_id=%s", c, strategy_id,
                 )
 
         return results
@@ -824,8 +824,8 @@ class SignalNotifier:
         if isinstance(wh, dict):
             if dialect != 'generic':
                 logger.info(
-                    "webhook.headers_override.ignored_by_vendor dialect=%s keys=%s",
-                    dialect, list(wh.keys()),
+                    "webhook.headers_override.ignored_by_vendor dialect=%s",
+                    dialect,
                 )
             for k, v in wh.items():
                 kk = str(k or "").strip()
