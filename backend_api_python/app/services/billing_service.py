@@ -716,8 +716,8 @@ class BillingService:
             return True, 'consumed'
             
         except Exception as e:
-            logger.error(f"check_and_consume failed: {e}")
-            return False, f'error:{str(e)}'
+            logger.error("check_and_consume failed: %s", type(e).__name__)
+            return False, 'error:billing unavailable'
     
     def add_credits(self, user_id: int, amount: int, action: str = 'recharge', 
                     remark: str = '', operator_id: int = None, reference_id: str = '') -> Tuple[bool, str]:

@@ -32,7 +32,7 @@ set -euo pipefail
 # GHCR requires lowercase repo names. We lowercase in bash instead of using
 # the GitHub Actions `| lower` filter — that filter triggered a schema
 # fallback that hid the workflow name and the Run workflow button.
-REPO_OWNER="${REPO_OWNER,,}"
+REPO_OWNER="$(printf '%s' "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')"
 : "${REF:=main}"
 
 log() { printf '[deploy-remote] %s\n' "$*"; }
@@ -42,10 +42,7 @@ die() { printf '[deploy-remote] ERROR: %s\n' "$*" >&2; exit 1; }
 # 1. Preflight                                                               ##
 ###############################################################################
 command -v docker > /dev/null 2>&1 || die "docker is not installed (run ops/deploy/server-prep.md first)."
-docker info > /dev/null 2>&1     || die "docker daemon is not reachable (is the service running?).
-
-Try: sudo systemctl status docker
-     sudo systemctl start docker"
+docker info > /dev/null 2>&1     || die "docker daemon is not reachable (is the service running?)."
 
 mkdir -p "$DEPLOY_DIR"
 cd "$DEPLOY_DIR"
@@ -66,6 +63,15 @@ if [ ! -f "$DEPLOY_DIR/$COMPOSE_FILE" ]; then
   log "Saved to $DEPLOY_DIR/$COMPOSE_FILE"
 fi
 
+compose=(docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE")
+backend_services=(backend trading-worker scheduler-worker celery-worker celery-backtest-worker celery-beat)
+configured_services=$("${compose[@]}" config --services) || die "Unable to resolve Compose services."
+for service in migration "${backend_services[@]}"; do
+  if ! grep -Fxq -- "$service" <<< "$configured_services"; then
+    die "Compose service missing: $service. Update the server Compose file before deploying."
+  fi
+done
+
 ###############################################################################
 # 3. backend.env must be a FILE (never a directory) — see                   ##
 #    docker-compose.ghcr.yml header for the bind-mount landmine.            ##
@@ -82,7 +88,7 @@ fi
 [ -f "$DEPLOY_DIR/backend.env" ] || die "backend.env must be a regular file."
 
 ###############################################################################
-# 4. Update project-root .env orchestration knobs (IMAGE_TAG, BACKEND_TAG)  ##
+# 4. Pin the backend independently of the shared image tag  ##
 #    Pattern borrowed from install.sh:env_set (in-place replace or append). ##
 #    Never touches backend.env or any secrets.                              ##
 ###############################################################################
@@ -90,7 +96,7 @@ env_set() {
   local file="$1" key="$2" value="$3"
   touch "$file"
   local tmp="${file}.tmp.$$"
-  : > "$tmp"
+  (umask 077; : > "$tmp")
   local replaced="false"
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -112,40 +118,29 @@ env_set() {
 }
 
 ENV_FILE="$DEPLOY_DIR/.env"
-env_set "$ENV_FILE" "IMAGE_TAG"   "$IMAGE_TAG"
 env_set "$ENV_FILE" "BACKEND_TAG" "$IMAGE_TAG"
-log "Pinned IMAGE_TAG=$IMAGE_TAG and BACKEND_TAG=$IMAGE_TAG in $ENV_FILE."
+log "Pinned BACKEND_TAG=$IMAGE_TAG in $ENV_FILE."
 
 ###############################################################################
 # 5. Static compose validation                                              ##
 ###############################################################################
 log "Validating compose file (catches .env typos before pulling images)..."
-docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE" config -q
+"${compose[@]}" config -q
 
 ###############################################################################
-# 6. Pull new backend image (5 services share the same image)              ##
+# 6. Pull new images for the migration and backend services              ##
 ###############################################################################
 log "Pulling backend image for services that share quantdinger-backend:$IMAGE_TAG..."
-docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE" pull \
-  backend \
-  trading-worker \
-  scheduler-worker \
-  celery-worker \
-  celery-beat
+"${compose[@]}" pull migration "${backend_services[@]}"
 
 ###############################################################################
-# 7. Run database migration (idempotent) and restart the 5 backend services ##
+# 7. Run database migration (idempotent) and restart backend services ##
 ###############################################################################
 log "Running database migration (idempotent — re-running is safe)..."
-docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE" run --rm migration
+"${compose[@]}" run --rm migration
 
 log "Restarting backend services..."
-docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE" up -d \
-  backend \
-  trading-worker \
-  scheduler-worker \
-  celery-worker \
-  celery-beat
+"${compose[@]}" up -d "${backend_services[@]}"
 
 ###############################################################################
 # 8. Wait for backend /api/health to come up                                ##
@@ -161,16 +156,14 @@ for i in $(seq 1 30); do
   sleep 2
 done
 if [ "$healthy" != "true" ]; then
-  log "WARN: backend did not become healthy within 60s. Inspect: docker compose -f $DEPLOY_DIR/$COMPOSE_FILE logs backend"
+  die "Backend did not become healthy within 60s. Inspect: docker compose -f $DEPLOY_DIR/$COMPOSE_FILE logs backend"
 fi
 
 ###############################################################################
 # 9. Pretty-print container status for the run log                          ##
 ###############################################################################
 log "Service status:"
-docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE" ps \
-  backend trading-worker scheduler-worker celery-worker celery-beat \
-  || true
+"${compose[@]}" ps "${backend_services[@]}" || true
 
 ###############################################################################
 # 10. Optional cleanup                                                      ##

@@ -511,7 +511,8 @@ class StrategyService:
                 return {"success": False, "message": "strategyV2.connectionFailed", "data": data}
             return {"success": True, "message": "strategyV2.connectionOk", "data": data}
         except Exception as exc:
-            return {"success": False, "message": str(exc), "data": None}
+            logger.warning("Exchange connection test failed: %s", type(exc).__name__)
+            return {"success": False, "message": "strategyV2.connectionFailed", "data": None}
 
     def _batch_status(self, strategy_ids: List[int], status: str, user_id: int | None) -> Dict[str, Any]:
         success_ids: list[int] = []
