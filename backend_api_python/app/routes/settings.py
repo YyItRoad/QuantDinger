@@ -2338,11 +2338,11 @@ def save_settings():
                         overwrite_existing=True,
                     )
                 except Exception as sync_error:
-                    logger.warning(f"Failed to sync admin email after settings save: {sync_error}")
+                    logger.warning("Failed to sync admin email after settings save: %s", type(sync_error).__name__)
                     admin_email_sync = {
                         'synced': False,
                         'reason': 'error',
-                        'message': str(sync_error),
+                        'message': 'Unable to sync administrator email',
                     }
 
             response_data = {

@@ -560,10 +560,10 @@ class IndicatorSignalAlertService:
             self._mark_triggered(task_id, signal, fingerprint, next_check, delivery)
             return {"triggered": True, "signal": signal, "delivery": delivery}
         except Exception as exc:
-            logger.warning("Indicator signal alert evaluation failed for %s: %s", task_id, exc)
-            logger.debug(traceback.format_exc())
-            self._mark_checked(task_id, next_check=next_check, last_error=str(exc)[:1000])
-            return {"triggered": False, "reason": "error", "error": str(exc)}
+            logger.warning("Indicator signal alert evaluation failed for %s: %s", task_id, type(exc).__name__)
+            error_message = "Indicator signal alert evaluation failed"
+            self._mark_checked(task_id, next_check=next_check, last_error=error_message)
+            return {"triggered": False, "reason": "error", "error": error_message}
 
     def _sanitize_payload(
         self,

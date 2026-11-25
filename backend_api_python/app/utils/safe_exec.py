@@ -823,10 +823,10 @@ def safe_exec_isolated(
             "timeout": int(timeout),
             "max_memory_mb": int(max_memory_mb),
         }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError):
         return {
             'success': False,
-            'error': f"Sandbox input serialization failed: {exc}",
+            'error': "Sandbox input serialization failed",
             'result': None,
         }
 
@@ -854,7 +854,7 @@ def safe_exec_isolated(
                 start_new_session=True,
             )
             try:
-                stdout, stderr = proc.communicate(payload, timeout=max(1, timeout + 2))
+                stdout, _ = proc.communicate(payload, timeout=max(1, timeout + 2))
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.communicate()
@@ -865,10 +865,10 @@ def safe_exec_isolated(
             'error': f"Code execution timed out after {timeout} seconds; subprocess terminated",
             'result': None,
         }
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError):
         return {
             'success': False,
-            'error': f"Failed to start sandbox worker: {exc}",
+            'error': "Failed to start sandbox worker",
             'result': None,
         }
 
@@ -880,11 +880,10 @@ def safe_exec_isolated(
         }
     try:
         response = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        detail = _redact_sensitive_text(stderr.decode("utf-8", errors="replace"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return {
             'success': False,
-            'error': f"Sandbox worker returned an invalid response: {exc}; {detail[:500]}",
+            'error': "Sandbox worker returned an invalid response",
             'result': None,
         }
     if isinstance(response.get("result"), dict):

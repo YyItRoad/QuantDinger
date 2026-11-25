@@ -347,7 +347,8 @@ class LLMService:
         try:
             resp = requests.get(url, headers=headers, timeout=15)
         except Exception as exc:
-            return False, f"{p.value}: {redact_secrets(exc)}"
+            logger.warning("Provider connection failed: %s", type(exc).__name__)
+            return False, f"{p.value}: connection failed"
         if resp.status_code == 200:
             if p == LLMProvider.OPENROUTER:
                 # A provisioning/management key passes /auth/key but is rejected
@@ -362,8 +363,7 @@ class LLMService:
                         "which cannot run inference. Create a normal API key instead."
                     )
             return True, f"{p.value} reachable · model={model}"
-        body = redact_secrets(resp.text[:200]) if resp.text else ""
-        return False, f"{p.value}: HTTP {resp.status_code} {body}".strip()
+        return False, f"{p.value}: HTTP {resp.status_code}"
 
     # Legacy properties for backward compatibility
     @property
@@ -1560,7 +1560,7 @@ class LLMService:
             return default_structure
         except Exception as e:
             logger.error(f"LLM call failed: {redact_secrets(e)}")
-            default_structure['report'] = f"Analysis failed: {redact_secrets(e)}"
+            default_structure['report'] = "Analysis failed"
             return default_structure
 
     @classmethod
