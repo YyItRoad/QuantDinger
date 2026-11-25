@@ -39,10 +39,7 @@ def _user_facing_exchange_error(exc: Exception, *, context: str) -> str:
         return f"{context}：交易所鉴权失败，请更新 API Key / Secret / Passphrase"
     if "418" in msg or "rate limit" in low or "too many requests" in low:
         return f"{context}：请求过于频繁，请稍后再试"
-    short = msg.replace("\n", " ").strip()
-    if len(short) > 160:
-        short = short[:160] + "…"
-    return f"{context}：{short}" if short else f"{context}：拉取失败"
+    return f"{context}：拉取失败"
 
 
 def _error_fingerprint(line: str) -> str:
@@ -65,7 +62,7 @@ def _append_snapshot_error(errors: List[str], exc: Exception, *, context: str) -
     line = _user_facing_exchange_error(exc, context=context)
     if line not in errors:
         errors.append(line)
-    logger.warning("%s: %s", context, exc)
+    logger.warning("%s: %s", context, type(exc).__name__)
 
 
 def _parse_okx_positions(

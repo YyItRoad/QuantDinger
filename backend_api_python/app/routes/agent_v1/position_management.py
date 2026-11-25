@@ -6,6 +6,9 @@ import math
 
 from app.services.live_trading import position_management as management
 from app.services.live_trading.records import normalize_strategy_symbol
+from app.services.user_preferences import (
+    VALID_NOTIFICATION_CHANNELS, get_notification_settings, notification_targets_from_settings,
+)
 from app.utils.agent_auth import (
     SCOPE_R, SCOPE_W, agent_required, current_user_id, instrument_allowed, market_allowed,
 )
@@ -140,8 +143,22 @@ def adopt_position_management(credential_id: int):
         if not _credential(credential_id):
             return error(404, "Trading account not found", http=404)
         _authorize_position(position)
+        user_id = current_user_id()
+        if "notification_channels" not in body:
+            settings = get_notification_settings(user_id) or {}
+            defaults = settings.get("default_channels")
+            channels = list(dict.fromkeys(
+                channel for channel in defaults
+                if isinstance(channel, str) and channel in VALID_NOTIFICATION_CHANNELS
+            )) if isinstance(defaults, list) else []
+            strategy["notificationChannels"] = channels or ["browser"]
+            if "notification_targets" not in body:
+                strategy["notificationTargets"] = {
+                    key: value for key, value in notification_targets_from_settings(settings).items()
+                    if value and key.split("_", 1)[0] in channels
+                }
         result = management.create_managed_strategy(
-            user_id=current_user_id(), position_ref=position, strategy_payload=strategy,
+            user_id=user_id, position_ref=position, strategy_payload=strategy,
             authorize_position=authorize_target,
         )
         return envelope(result, message="position-management-created", status=201)

@@ -425,8 +425,8 @@ class UserService:
             logger.info("Synchronized admin email from ADMIN_EMAIL")
             return {'synced': True, 'user_id': admin_id, 'email': email}
         except Exception as e:
-            logger.warning(f"sync_admin_email_from_config failed: {e}")
-            return {'synced': False, 'reason': 'error', 'message': str(e)}
+            logger.warning("sync_admin_email_from_config failed: %s", type(e).__name__)
+            return {'synced': False, 'reason': 'error', 'message': 'Unable to sync administrator email'}
 
     def get_first_user_id(self) -> Optional[int]:
         """Return the lowest user id (bootstrap / first account created on install)."""

@@ -87,6 +87,6 @@ def test_intent_timeout_uses_existing_fallback_and_keeps_context(monkeypatch):
     actual = ai_chat._classify_agent_intent("Analyze BTC trend", [], context, "en-US")
     assert actual["intent"] == expected["intent"]
     assert actual["workflow"] == expected["workflow"]
-    assert "intent request timed out" in actual["error"]
+    assert actual["error"] == "Analysis failed: request timed out"
     assert captured[0][1]["timeout_seconds"] == 20
     assert captured[0][0]["selected_context"]["symbol"] == "BTC/USDT"

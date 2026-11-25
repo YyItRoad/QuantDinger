@@ -64,6 +64,19 @@ def update_notification_settings(user_id: int, data: dict[str, Any]) -> dict:
     return settings
 
 
+def notification_targets_from_settings(settings: dict) -> dict:
+    return {
+        "telegram": (settings.get("telegram_chat_id") or "").strip(),
+        "telegram_bot_token": (settings.get("telegram_bot_token") or "").strip(),
+        "email": (settings.get("email") or "").strip(),
+        "phone": (settings.get("phone") or "").strip(),
+        "discord": (settings.get("discord_webhook") or "").strip(),
+        "webhook": (settings.get("webhook_url") or "").strip(),
+        "webhook_token": (settings.get("webhook_token") or "").strip(),
+        "webhook_signing_secret": (settings.get("webhook_signing_secret") or "").strip(),
+    }
+
+
 def send_test_notification(user_id: int, accept_language: str = "") -> tuple[bool, str, dict]:
     """Send a test notification using saved profile settings."""
     row = _fetch_user_settings_row(user_id)
@@ -75,17 +88,8 @@ def send_test_notification(user_id: int, accept_language: str = "") -> tuple[boo
     if not isinstance(channels, list) or not channels:
         channels = ["browser"]
 
-    notify_email = (settings.get("email") or "").strip() or (row.get("email") or "").strip()
-    targets = {
-        "telegram": (settings.get("telegram_chat_id") or "").strip(),
-        "telegram_bot_token": (settings.get("telegram_bot_token") or "").strip(),
-        "email": notify_email,
-        "phone": (settings.get("phone") or "").strip(),
-        "discord": (settings.get("discord_webhook") or "").strip(),
-        "webhook": (settings.get("webhook_url") or "").strip(),
-        "webhook_token": (settings.get("webhook_token") or "").strip(),
-        "webhook_signing_secret": (settings.get("webhook_signing_secret") or "").strip(),
-    }
+    targets = notification_targets_from_settings(settings)
+    targets["email"] = targets["email"] or (row.get("email") or "").strip()
     language = normalize_language(accept_language or settings.get("language"))
     results = SignalNotifier().send_profile_test_notifications(
         user_id=int(user_id),

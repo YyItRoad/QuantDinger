@@ -1558,9 +1558,12 @@ class LLMService:
             
             default_structure['report'] = f"Failed to parse analysis result JSON. Raw output (partial): {response_text[:500] if response_text else 'N/A'}"
             return default_structure
+        except requests.Timeout:
+            default_structure['report'] = "Analysis failed: request timed out"
+            return default_structure
         except Exception as e:
-            logger.error(f"LLM call failed: {redact_secrets(e)}")
-            default_structure['report'] = "Analysis failed"
+            logger.error("LLM call failed: %s", type(e).__name__)
+            default_structure['report'] = "Analysis failed: provider request failed"
             return default_structure
 
     @classmethod
