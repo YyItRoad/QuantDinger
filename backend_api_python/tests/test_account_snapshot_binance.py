@@ -110,7 +110,7 @@ def test_target_snapshot_preserves_exchange_failure(monkeypatch):
     monkeypatch.setattr(
         account_snapshot,
         "create_client",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("request timeout")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("request timeout: private upstream diagnostic")),
     )
 
     snapshot = account_snapshot.fetch_target_position_snapshot(
@@ -121,6 +121,7 @@ def test_target_snapshot_preserves_exchange_failure(monkeypatch):
 
     assert snapshot["swap_positions"] == []
     assert "request timeout" in snapshot["error"]
+    assert "private upstream diagnostic" not in snapshot["error"]
     assert snapshot["warnings"] == [snapshot["error"]]
 
 

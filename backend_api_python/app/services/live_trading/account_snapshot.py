@@ -39,6 +39,8 @@ def _user_facing_exchange_error(exc: Exception, *, context: str) -> str:
         return f"{context}：交易所鉴权失败，请更新 API Key / Secret / Passphrase"
     if "418" in msg or "rate limit" in low or "too many requests" in low:
         return f"{context}：请求过于频繁，请稍后再试"
+    if isinstance(exc, TimeoutError) or "timeout" in low or "timed out" in low:
+        return f"{context}：请求超时 (request timeout)"
     return f"{context}：拉取失败"
 
 
