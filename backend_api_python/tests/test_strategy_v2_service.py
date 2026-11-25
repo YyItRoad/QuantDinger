@@ -19,6 +19,7 @@ from app.services.strategy_v2.service import (
     _review_frequency_for_window,
     _universe_matches,
     _warmup_calendar_days,
+    strategy_universe_symbol_limit,
 )
 from app.services.strategy_v2.snapshot import MarketDataSnapshotStore
 
@@ -34,6 +35,23 @@ def test_warmup_days_follow_strategy_frequency():
     assert _warmup_calendar_days("4h", 120) == 30
     assert _warmup_calendar_days("1d", 10) == 19
     assert _warmup_calendar_days("1w", 10) == 80
+
+
+def test_universe_symbol_limit_is_larger_for_daily_data(monkeypatch):
+    monkeypatch.delenv("STRATEGY_V2_MAX_SYMBOLS", raising=False)
+    monkeypatch.delenv("STRATEGY_V2_MAX_DAILY_SYMBOLS", raising=False)
+
+    assert strategy_universe_symbol_limit("30m") == 600
+    assert strategy_universe_symbol_limit("1d") == 1200
+    assert strategy_universe_symbol_limit("1w") == 1200
+
+
+def test_universe_symbol_limit_honors_capacity_overrides(monkeypatch):
+    monkeypatch.setenv("STRATEGY_V2_MAX_SYMBOLS", "700")
+    monkeypatch.setenv("STRATEGY_V2_MAX_DAILY_SYMBOLS", "1000")
+
+    assert strategy_universe_symbol_limit("1h") == 700
+    assert strategy_universe_symbol_limit("1d") == 1000
 
 
 def test_instrument_rules_use_last_common_market_timestamp():
@@ -111,6 +129,21 @@ def test_portfolio_benchmark_inference_is_market_aware():
     assert mixed is None
 
 
+@pytest.mark.parametrize(
+    ("instrument", "expected"),
+    [
+        (InstrumentSpec(market="USStock", symbol="DXCM", exchange_id="NASDAQ", market_type="spot"), "USStock:DXCM"),
+        (InstrumentSpec(market="HKStock", symbol="00700.HK", exchange_id="HKEX", market_type="spot"), "HKStock:00700.HK"),
+        (InstrumentSpec(market="CNStock", symbol="600519.SH", exchange_id="SSE", market_type="spot"), "CNStock:600519.SH"),
+        (InstrumentSpec(market="Forex", symbol="EUR/USD", exchange_id="broker", market_type="spot"), "Forex:EUR/USD"),
+        (InstrumentSpec(market="Futures", symbol="ES", exchange_id="CME", market_type="future"), "Futures:ES"),
+        (InstrumentSpec(market="Crypto", symbol="BTC/USDT", exchange_id="okx", market_type="swap"), "Crypto:BTC/USDT@okx:swap"),
+    ],
+)
+def test_instrument_key_keeps_venue_only_for_exchange_routed_crypto(instrument, expected):
+    assert instrument.key == expected
+
+
 def test_explicit_portfolio_benchmark_is_never_overridden():
     explicit = InstrumentSpec(market="USStock", symbol="QQQ", market_type="spot")
     manifest = _portfolio_manifest(
@@ -144,9 +177,9 @@ def test_benchmark_alignment_covers_the_full_final_intraday_bar():
     assert result["benchmarkCoverageEnd"] == "2026-08-29T23:59:59.999999Z"
 
 
-def test_trade_review_snapshot_uses_the_finest_bounded_timeframe_and_keeps_only_ohlcv():
-    index = pd.date_range("2026-07-31", periods=30 * 24 * 60, freq="min")
-    frame = pd.DataFrame({
+def _review_frame(start: str, periods: int, freq: str) -> pd.DataFrame:
+    index = pd.date_range(start, periods=periods, freq=freq)
+    return pd.DataFrame({
         "open": range(len(index)),
         "high": [value + 2 for value in range(len(index))],
         "low": [value - 2 for value in range(len(index))],
@@ -154,6 +187,14 @@ def test_trade_review_snapshot_uses_the_finest_bounded_timeframe_and_keeps_only_
         "volume": [3] * len(index),
         "private_rule": ["must-not-leak"] * len(index),
     }, index=index)
+
+
+def _candle_time(snapshot: dict, position: int) -> pd.Timestamp:
+    return pd.to_datetime(snapshot["candles"][position]["time"], unit="s", utc=True)
+
+
+def test_trade_review_snapshot_keeps_the_strategy_timeframe_and_only_ohlcv():
+    frame = _review_frame("2026-07-31", 30 * 24 * 60, "min")
     symbol = "Crypto:ETH/USDT@swap"
 
     snapshots = _build_review_candle_snapshots(
@@ -169,12 +210,76 @@ def test_trade_review_snapshot_uses_the_finest_bounded_timeframe_and_keeps_only_
     )
 
     snapshot = snapshots[symbol]
-    assert snapshot["timeframe"] == "15m"
-    assert 2000 < len(snapshot["candles"]) <= 3000
+    assert snapshot["timeframe"] == "1m"
+    assert len(snapshot["candles"]) == 3000
     assert set(snapshot["candles"][0]) == {"time", "open", "high", "low", "close", "volume"}
-    assert max(item["volume"] for item in snapshot["candles"]) > 3
-    first_time = pd.to_datetime(snapshot["candles"][0]["time"], unit="s", utc=True)
-    assert first_time < pd.Timestamp("2026-08-01T00:00:00Z")
+    assert {item["volume"] for item in snapshot["candles"]} == {3}
+    # The trade span is longer than the bar budget, so the most recent
+    # candles around the latest exit are kept at the strategy timeframe.
+    assert _candle_time(snapshot, -1) >= pd.Timestamp("2026-08-29T23:40:00Z")
+
+
+def test_fifteen_minute_strategy_review_is_not_compressed_to_thirty_minutes():
+    # Regression for #328: a two-month 15m backtest used to be reviewed on
+    # 30m candles because the whole requested range exceeded 3000 bars.
+    frame = _review_frame("2026-06-01", 61 * 24 * 4, "15min")
+    symbol = "Crypto:BTC/USDT@swap"
+
+    snapshots = _build_review_candle_snapshots(
+        {symbol: frame},
+        [
+            {"symbol": symbol, "entry_time": "2026-07-10T01:15:00Z", "exit_time": "2026-07-12T09:45:00Z"},
+            {"symbol": symbol, "entry_time": "2026-07-20T03:00:00Z", "exit_time": "2026-07-28T18:30:00Z"},
+        ],
+        source_frequency="15m",
+        start_date=datetime(2026, 6, 1),
+        end_date=datetime(2026, 7, 31, 23, 59),
+    )
+
+    snapshot = snapshots[symbol]
+    assert snapshot["timeframe"] == "15m"
+    times = [item["time"] for item in snapshot["candles"]]
+    assert {right - left for left, right in zip(times, times[1:])} == {900}
+    # The window is focused on the trades, so every entry and exit is covered.
+    assert _candle_time(snapshot, 0) <= pd.Timestamp("2026-07-10T01:15:00Z")
+    assert _candle_time(snapshot, -1) >= pd.Timestamp("2026-07-28T18:30:00Z")
+    assert len(times) <= 3000
+
+
+def test_trade_review_snapshot_keeps_the_full_requested_range_when_it_fits():
+    frame = _review_frame("2026-06-01", 20 * 24 * 4, "15min")
+    symbol = "Crypto:BTC/USDT@swap"
+
+    snapshots = _build_review_candle_snapshots(
+        {symbol: frame},
+        [{"symbol": symbol, "entry_time": "2026-06-10T01:15:00Z", "exit_time": "2026-06-11T09:45:00Z"}],
+        source_frequency="15m",
+        start_date=datetime(2026, 6, 1),
+        end_date=datetime(2026, 6, 20, 23, 59),
+    )
+
+    snapshot = snapshots[symbol]
+    assert snapshot["timeframe"] == "15m"
+    assert _candle_time(snapshot, 0) <= pd.Timestamp("2026-06-01T00:15:00Z")
+    assert _candle_time(snapshot, -1) >= pd.Timestamp("2026-06-20T23:30:00Z")
+
+
+def test_three_minute_strategy_review_uses_three_minute_candles():
+    frame = _review_frame("2026-06-01", 2 * 24 * 20, "3min")
+    symbol = "Crypto:BTC/USDT@swap"
+
+    snapshots = _build_review_candle_snapshots(
+        {symbol: frame},
+        [{"symbol": symbol, "entry_time": "2026-06-01T03:00:00Z", "exit_time": "2026-06-02T09:00:00Z"}],
+        source_frequency="3m",
+        start_date=datetime(2026, 6, 1),
+        end_date=datetime(2026, 6, 2, 23, 59),
+    )
+
+    snapshot = snapshots[symbol]
+    assert snapshot["timeframe"] == "3m"
+    times = [item["time"] for item in snapshot["candles"]]
+    assert {right - left for left, right in zip(times, times[1:])} == {180}
 
 
 def test_trade_review_snapshot_maps_hedged_position_leg_to_market_data_symbol():
@@ -491,6 +596,146 @@ def rebalance(context, data):
     ]
 
 
+def test_dynamic_universe_excludes_members_without_required_warmup(tmp_path):
+    class DynamicUniverse:
+        @staticmethod
+        def list_universes(_user_id):
+            return [{"id": 7, "code": "nasdaq100", "source_ref": "NDX"}]
+
+        @staticmethod
+        def candidate_members(_user_id, _universe_id, *, start, end):
+            del start, end
+            return [
+                {"market": "USStock", "symbol": "AAPL"},
+                {"market": "USStock", "symbol": "EA"},
+            ]
+
+        @staticmethod
+        def resolve_members(_user_id, _universe_id, *, as_of):
+            del as_of
+            return [
+                {"market": "USStock", "symbol": "AAPL"},
+                {"market": "USStock", "symbol": "EA"},
+            ]
+
+    start_date = datetime(2026, 1, 5)
+
+    def frame_fetcher(_market, symbol, *_args, **_kwargs):
+        index = (
+            pd.bdate_range(end="2026-01-09", periods=275)
+            if symbol == "AAPL"
+            else pd.DatetimeIndex(["2026-01-02"])
+        )
+        return pd.DataFrame(
+            {
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+                "volume": 1000.0,
+            },
+            index=index,
+        )
+
+    code = """
+def initialize(context):
+    context.set_universe(index="INDEX:NASDAQ100")
+    context.subscribe(frequency="1d")
+    context.set_warmup(260)
+
+def on_rebalance(context, data):
+    pass
+"""
+    service = StrategyV2BacktestService(
+        repository=_Repository(),
+        universe_service=DynamicUniverse(),
+        frame_fetcher=frame_fetcher,
+        snapshot_store=MarketDataSnapshotStore(tmp_path),
+    )
+
+    _, result = service.run(
+        user_id=1,
+        code=code,
+        start_date=start_date,
+        end_date=datetime(2026, 1, 9, 23, 59),
+        initial_capital=10000,
+        persist=False,
+    )
+
+    assert result["diagnostics"]["symbolsUsed"] == 1
+    assert result["diagnostics"]["symbolsSkipped"] == [{
+        "symbol": "USStock:EA",
+        "frequency": "1d",
+        "reason": "strategyV2.insufficientWarmupData",
+        "availableBars": 1,
+        "requiredBars": 260,
+    }]
+
+
+def test_dynamic_universe_excludes_members_without_required_fundamentals(tmp_path):
+    class DynamicUniverse:
+        @staticmethod
+        def list_universes(_user_id):
+            return [{"id": 7, "code": "sp500", "source_ref": "SP500"}]
+
+        @staticmethod
+        def candidate_members(_user_id, _universe_id, *, start, end):
+            del start, end
+            return [
+                {"market": "USStock", "symbol": "AAPL"},
+                {"market": "USStock", "symbol": "BE"},
+            ]
+
+        @staticmethod
+        def resolve_members(_user_id, _universe_id, *, as_of):
+            del as_of
+            return [
+                {"market": "USStock", "symbol": "AAPL"},
+                {"market": "USStock", "symbol": "BE"},
+            ]
+
+    def enrich(frames, _members):
+        return {
+            symbol: frame.assign(
+                market_cap=1_000_000_000.0 if symbol == "USStock:AAPL" else None
+            )
+            for symbol, frame in frames.items()
+        }
+
+    code = """
+def initialize(context):
+    context.set_universe(pool="sp500")
+    context.subscribe(frequency="1d")
+
+def on_rebalance(context, data):
+    members = list(get_universe_stocks())
+    get_fundamentals(["market_cap"], members)
+"""
+    service = StrategyV2BacktestService(
+        repository=_Repository(),
+        universe_service=DynamicUniverse(),
+        frame_fetcher=_frame,
+        fundamental_enricher=enrich,
+        snapshot_store=MarketDataSnapshotStore(tmp_path),
+    )
+
+    _, result = service.run(
+        user_id=1,
+        code=code,
+        start_date=datetime(2026, 1, 1),
+        end_date=datetime(2026, 1, 5, 23, 59),
+        initial_capital=10000,
+        persist=False,
+    )
+
+    assert result["diagnostics"]["symbolsUsed"] == 1
+    assert result["diagnostics"]["symbolsSkipped"] == [{
+        "symbol": "USStock:BE",
+        "reason": "strategyV2.fundamentalDataMissing",
+        "missingFields": ["market_cap"],
+    }]
+
+
 def test_v2_service_accepts_a_controlled_fundamental_enricher():
     code = """
 def initialize(context):
@@ -549,6 +794,120 @@ def handle_data(context, data):
             factor_id="momentum_20",
             groups=3,
         )
+
+
+def test_universe_factor_research_does_not_compile_or_execute_strategy_code():
+    symbols = ["A", "B", "C", "D", "E", "F"]
+
+    class ResearchUniverse:
+        @staticmethod
+        def get_universe(_user_id, universe_id):
+            assert universe_id == 17
+            return {
+                "id": 17,
+                "code": "research-pool",
+                "name": "Research Pool",
+                "market": "USStock",
+                "member_count": len(symbols),
+                "history_from": "2020-01-01",
+            }
+
+        @staticmethod
+        def candidate_members(_user_id, universe_id, *, start, end):
+            assert universe_id == 17
+            assert start <= end
+            return [{"market": "USStock", "symbol": symbol} for symbol in symbols]
+
+    index = pd.bdate_range("2025-01-01", periods=120)
+
+    def frame_fetcher(_market, symbol, *_args, **_kwargs):
+        offset = symbols.index(symbol)
+        prices = [100 + offset + day * (0.15 + offset * 0.03) for day in range(len(index))]
+        return pd.DataFrame({"open": prices, "close": prices}, index=index)
+
+    service = StrategyV2BacktestService(
+        repository=_Repository(),
+        universe_service=ResearchUniverse(),
+        frame_fetcher=frame_fetcher,
+    )
+    result = service.research_universe_factor(
+        user_id=1,
+        universe_id=17,
+        frequency="1d",
+        start_date=datetime(2025, 2, 10),
+        end_date=datetime(2025, 5, 30, 23, 59),
+        factor_id="momentum_20",
+        groups=3,
+        holding_period=5,
+    )
+
+    assert result["researchMode"] == "universe"
+    assert result["universeId"] == 17
+    assert result["frequency"] == "1d"
+    assert result["symbolsRequested"] == len(symbols)
+    assert result["manifest"]["strategyType"] == "factor_research"
+
+
+def test_factor_benchmark_reuses_one_market_panel_for_multiple_factors():
+    symbols = ["A", "B", "C", "D", "E", "F"]
+    fetches = []
+
+    class ResearchUniverse:
+        @staticmethod
+        def get_universe(_user_id, universe_id):
+            return {
+                "id": universe_id,
+                "code": "research-pool",
+                "name": "Research Pool",
+                "market": "USStock",
+                "member_count": len(symbols),
+                "history_from": "2020-01-01",
+            }
+
+        @staticmethod
+        def candidate_members(_user_id, _universe_id, *, start, end):
+            assert start <= end
+            return [{"market": "USStock", "symbol": symbol} for symbol in symbols]
+
+    index = pd.bdate_range("2025-01-01", periods=180)
+
+    def frame_fetcher(_market, symbol, *_args, **_kwargs):
+        fetches.append(symbol)
+        offset = symbols.index(symbol)
+        prices = [
+            100 + offset * 2 + day * (0.08 + offset * 0.025) + (day % 7) * offset * 0.02
+            for day in range(len(index))
+        ]
+        return pd.DataFrame({"open": prices, "close": prices}, index=index)
+
+    service = StrategyV2BacktestService(
+        repository=_Repository(),
+        universe_service=ResearchUniverse(),
+        frame_fetcher=frame_fetcher,
+    )
+    result = service.benchmark_universe_factors(
+        user_id=1,
+        universe_id=17,
+        frequency="1d",
+        start_date=datetime(2025, 3, 1),
+        end_date=datetime(2025, 8, 29, 23, 59),
+        factors=[
+            {"factorId": "momentum_20"},
+            {"factorId": "reversal_5"},
+        ],
+        groups=3,
+        holding_period=5,
+        minimum_oos_observations=3,
+    )
+
+    assert sorted(fetches) == symbols
+    assert result["researchMode"] == "benchmark"
+    assert result["summary"]["factorCount"] == 2
+    assert result["summary"]["requestedFactorCount"] == 2
+    assert result["summary"]["failedFactorCount"] == 0
+    assert len(result["rankings"]) == 2
+    assert result["correlation"]["factors"] == ["momentum_20", "reversal_5"]
+    assert result["errors"] == []
 
 
 def test_factor_research_rejects_portfolios_smaller_than_group_count():

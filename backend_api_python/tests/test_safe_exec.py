@@ -1,12 +1,16 @@
 ﻿"""Sandbox static validation and known escape regression tests."""
 
 import builtins
+from decimal import Decimal
 import math
 import threading
 
+import numpy as np
 import pandas as pd
 
 from app.utils.safe_exec import (
+    _sandbox_transport_decode,
+    _sandbox_transport_encode,
     build_safe_builtins,
     safe_exec_code,
     safe_exec_indicator_isolated,
@@ -14,6 +18,32 @@ from app.utils.safe_exec import (
     timeout_context,
     validate_code_safety,
 )
+from app.utils.safe_exec_worker import (
+    _decode as _worker_transport_decode,
+    _encode as _worker_transport_encode,
+    _format_worker_error,
+)
+
+
+def test_json_sandbox_transport_preserves_finite_decimals_in_both_directions():
+    payload = {
+        "quantity": Decimal("0.000000000000000123"),
+        "nested": [Decimal("123456789.987654321")],
+    }
+
+    worker_value = _worker_transport_decode(
+        _sandbox_transport_encode(payload),
+        pd,
+        np,
+    )
+    assert worker_value == payload
+
+    parent_value = _sandbox_transport_decode(
+        _worker_transport_encode(worker_value, pd, np)
+    )
+    assert parent_value == payload
+    assert _sandbox_transport_encode(Decimal("NaN")) is None
+    assert _worker_transport_encode(Decimal("Infinity"), pd, np) is None
 
 # Classic subclass-chain escape (CVE-class pattern for restricted exec).
 _SUBCLASS_ESCAPE = """
@@ -46,6 +76,24 @@ u = chr(95) + chr(95)
 spec = (chr(123) + "0.DataFrame." + u + "init" + u + "." + u + "globals" + u
         + "[sys].modules[os].environ[SANDBOX_TEST_SECRET]" + chr(125))
 output = spec.format(pd)
+"""
+
+_VARIABLE_DUNDER_ESCAPE = """
+left = "__"
+middle = "class"
+right = "__"
+attribute_name = left + middle + right
+output = attribute_name
+"""
+
+_LAUNDERED_GETATTR_ESCAPE = """
+import numpy as np
+left = "__"
+middle = "class"
+right = "__"
+attribute_name = left + middle + right
+resolver = np.frompyfunc(getattr, 2, 1)
+output = resolver("", attribute_name)
 """
 
 
@@ -86,6 +134,41 @@ def test_runtime_built_format_field_escape_is_rejected():
     )
     assert result["success"] is False
     assert env["output"] is None
+
+
+def test_variable_built_dunder_name_is_rejected():
+    ok, err = validate_code_safety(_VARIABLE_DUNDER_ESCAPE)
+    assert ok is False
+    assert err
+
+
+def test_banned_callable_cannot_be_laundered_as_a_value():
+    ok, err = validate_code_safety(_LAUNDERED_GETATTR_ESCAPE)
+    assert ok is False
+    assert err
+
+    for name in ("getattr", "vars", "globals", "dir", "eval", "exec", "open", "chr", "format"):
+        ok, err = validate_code_safety(f"callback = {name}\noutput = callback")
+        assert ok is False, name
+        assert err
+
+
+def test_reserved_name_matching_does_not_reject_descriptive_identifiers():
+    code = """
+open_long = True
+format_signal = 1
+dir_value = 2
+getattr_value = 3
+
+def open_position():
+    return open_long
+
+output = open_position() and format_signal + dir_value + getattr_value
+"""
+
+    ok, err = validate_code_safety(code)
+    assert ok is True
+    assert err is None
 
 
 def test_format_attribute_alias_is_rejected():
@@ -142,6 +225,60 @@ output = {'plots': [{'name': f\"avg-{len(df)}\", 'data': df['average'].tolist()}
     assert payload["df"]["average"].tolist() == [1.25, 2.25]
     assert isinstance(payload["df"].index, pd.DatetimeIndex)
     assert str(payload["df"].index.tz) == "UTC"
+
+
+def test_indicator_worker_exposes_aligned_series_and_lower_timeframe_arrays():
+    df = pd.DataFrame({
+        "time": [index * 14_400 for index in range(2)],
+        "open": [100.0, 110.0],
+        "high": [112.0, 122.0],
+        "low": [98.0, 108.0],
+        "close": [110.0, 120.0],
+        "volume": [400.0, 800.0],
+    })
+    hourly_rows = [
+        {
+            "time": index * 3_600,
+            "open": 100.0 + index,
+            "high": 101.0 + index,
+            "low": 99.0 + index,
+            "close": 100.5 + index,
+            "volume": 10.0 + index,
+        }
+        for index in range(8)
+    ]
+    daily_rows = [{
+        "time": -86_400,
+        "open": 90.0,
+        "high": 111.0,
+        "low": 88.0,
+        "close": 105.0,
+        "volume": 1000.0,
+    }]
+    result = safe_exec_indicator_isolated(
+        """
+daily = request_series('1D', field='close')
+hourly = request_lower_tf('1H', fields='volume')
+output = {
+    'plots': [{'name': 'Daily', 'data': daily.tolist()}],
+    'signals': [],
+    'calculatedVars': {'hourly_counts': [len(item) for item in hourly]},
+}
+""",
+        df,
+        {},
+        context={
+            "market": "Crypto",
+            "symbol": "BTC/USDT",
+            "timeframe": "4H",
+            "series": {"1D": daily_rows, "1H": hourly_rows},
+        },
+        timeout=10,
+    )
+    assert result["success"] is True, result["error"]
+    output = result["result"]["output"]
+    assert output["plots"][0]["data"] == [105.0, 105.0]
+    assert output["calculatedVars"]["hourly_counts"] == [4, 4]
 
 def test_operator_import_rejected():
     ok, _ = validate_code_safety("import operator\noutput = {}")
@@ -404,6 +541,25 @@ def test_legit_pandas_strategy_passes_validator():
     ok, err = validate_code_safety(_LEGIT_PANDAS_STRATEGY)
     assert ok is True
     assert err is None
+
+
+def test_worker_normalizes_native_loader_memory_failures():
+    error = _format_worker_error(
+        ImportError("/host/path/native.so: failed to map segment from shared object"),
+        memory_limited=True,
+    )
+
+    assert error == "Sandbox worker error: execution exceeded the configured memory limit"
+    assert "/host/path" not in error
+
+
+def test_worker_preserves_non_memory_import_failures():
+    error = _format_worker_error(
+        ImportError("approved module is unavailable"),
+        memory_limited=True,
+    )
+
+    assert error == "Sandbox worker error: ImportError: approved module is unavailable"
 
 
 def test_non_main_thread_timeouts_share_one_watchdog_thread():

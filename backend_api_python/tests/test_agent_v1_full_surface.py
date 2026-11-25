@@ -15,6 +15,7 @@ def _token(scopes: str = "R,W,B,N,T") -> dict:
         "id": 501,
         "user_id": 7,
         "name": "full-surface-agent",
+        "owner_role": "user",
         "scopes": scopes,
         "markets": "*",
         "instruments": "*",
@@ -106,6 +107,22 @@ def test_reused_key_with_different_payload_is_rejected(client, monkeypatch):
         json={"market": "USStock", "symbol": "MSFT"},
     )
     assert response.status_code == 409
+
+
+def test_agent_asset_search_returns_logical_catalog_ids(client, monkeypatch):
+    monkeypatch.setattr(
+        research,
+        "search_market_assets",
+        lambda **kwargs: [{"asset_id": 41, "market": "Crypto", "symbol": "BTC/USDT"}],
+    )
+
+    response = client.get(
+        "/api/agent/v1/research/assets?market=Crypto&keyword=BTC",
+        headers=_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["data"]["items"][0]["asset_id"] == 41
 
 
 def test_factor_registry_is_exposed(client):

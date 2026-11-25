@@ -38,6 +38,7 @@ def ledger(monkeypatch):
         "qd_strategy_positions",
         "qd_strategy_trades",
         "qd_live_order_bindings",
+        "qd_live_order_binding_identifiers",
         "qd_grid_cells",
         "pending_orders",
         "strategy_order_fills",
@@ -384,16 +385,25 @@ def test_grid_api_matches_exchange_orders_instead_of_account_average(ledger, mon
             monkeypatch.setattr(module,name,lambda *a,**k:{})
     monkeypatch.setattr(alpaca,"is_alpaca_strategy",lambda *a,**k:False)
     app=Flask(__name__)
-    def read():
-        with app.test_request_context("/strategies/trades?id=1"):
+    def read(query=""):
+        with app.test_request_context("/strategies/trades?id=1" + query):
             g.user_id=1
             return unwrap(routes.get_trades)().get_json()["data"]
     from app.services.execution_streams import pnl_reconciliation
     from app.services.execution_streams.reported_pnl import fill_report
+    from app.tasks import reported_pnl as backfill
     ledger.query("INSERT INTO qd_exchange_credentials (id,user_id,exchange_id,encrypted_config) VALUES (1,1,'okx','test-only')")
     reported = fill_report([dict(id="venue-close", quantity=1, pnl=-4)], expected=1, source="rest:fills.fillPnl", currency="USDT")
     monkeypatch.setattr(pnl_reconciliation, "_client", lambda *a: (ledger.client, {}))
     monkeypatch.setattr(pnl_reconciliation, "fetch_order_report", lambda *a, **k: reported)
+    queued = MagicMock()
+    monkeypatch.setattr(backfill.reconcile_reported_pnl, 'apply_async', queued)
+    data=read()
+    assert data['trades'][0]['exchange_pnl']['status'] == 'pending'
+    queued.assert_called_once()
+    monkeypatch.setattr(backfill, 'get_strategy_service', routes.get_strategy_service)
+    backfill.reconcile_reported_pnl.run(*queued.call_args.kwargs['args'])
+    monkeypatch.setattr(pnl_reconciliation, '_client', lambda *a: pytest.fail('HTTP must only use saved reports'))
     data=read()
     closed=data["trades"][0]
     assert closed["exchange_pnl"]["amount"] == -4
@@ -406,6 +416,12 @@ def test_grid_api_matches_exchange_orders_instead_of_account_average(ledger, mon
     assert closed["matched_orders"][0]["entry_order_ids"] == ["open-1"]
     assert closed["matched_orders"][0]["exit_order_id"] == "close-2"
     assert data["cost_summary"]["gross_realized_pnl"] == 1
+    page = read('&page=1&page_size=1')
+    assert page['items'] == [closed]
+    assert page['total'] == 3
+    assert page['cost_summary'] == data['cost_summary']
+    assert 'trades' not in page
+    assert read('&page=2&page_size=1')['items'] == data['trades'][1:2]
     ledger.query("UPDATE qd_strategy_trades SET fee_status='pending' WHERE grid_order_id=1")
     pending=read()
     assert pending["trades"][0]["profit"] is None
@@ -446,6 +462,13 @@ def test_reported_pnl_database_claims_limit_accounts_and_reuse_cache(ledger, mon
     rows[0]["amount"] = 2
     pnl.enrich_reported_order_pnl(rows, user_id=1, trading_config={})
     assert rows[0]["exchange_pnl"]["status"] == "pending"
+    rows[0]["amount"] = 1
+    ledger.query("UPDATE qd_exchange_order_pnl SET checked_at=NOW() - INTERVAL '1 day' WHERE credential_id=1 AND exchange_order_id='order1'")
+    monkeypatch.setattr(pnl, "_claim", lambda *a: pytest.fail("Confirmed database report must not expire"))
+    for _ in range(2):
+        pnl.enrich_reported_order_pnl(rows, user_id=1, trading_config={})
+        assert rows[0]["exchange_pnl"]["amount"] == -3
+        assert rows[0]["profit"] == 100
 
 
 def test_reported_pnl_reads_durable_events_without_another_venue_query(ledger, monkeypatch):

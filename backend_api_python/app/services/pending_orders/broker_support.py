@@ -3,9 +3,40 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 
 from app.services.live_trading.base import LiveTradingError
+from app.services.pending_orders.order_retry import submit_with_safe_retry
+
+
+def submit_broker_order(
+    client: Any,
+    *,
+    order_type: str,
+    limit_price: float,
+    bracket: bool = False,
+    protection: Dict[str, Any] | None = None,
+    on_retry: Callable[[int, float, str], None] | None = None,
+    **order: Any,
+) -> Any:
+    """Keep broker order routing and stable-id rejection retries in one place."""
+    protection = dict(protection or {})
+
+    def submit():
+        if bracket:
+            return client.place_bracket_order(
+                **order, **protection,
+                limit_price=limit_price if order_type == "limit" else 0.0,
+            )
+        if order_type == "limit":
+            return client.place_limit_order(**order, **protection, price=limit_price)
+        return client.place_market_order(**order, **protection)
+
+    return submit_with_safe_retry(
+        submit,
+        result_error=lambda value: "" if value.success else value.message,
+        on_retry=on_retry,
+    )
 
 
 def broker_order_type(payload: Dict[str, Any], ref_price: float) -> Tuple[str, float]:
@@ -39,6 +70,31 @@ def broker_protection_prices(
         pos_side="short" if "short" in sig else "long",
     )
     return float(stop or 0.0), float(take or 0.0)
+
+
+def native_stock_protection_allowed(
+    payload: Dict[str, Any],
+    exchange_config: Dict[str, Any],
+    quantity: float,
+    stop_price: float,
+    take_price: float,
+) -> bool:
+    """Keep broker brackets opt-in and limited to whole-share orders."""
+    enabled = payload.get("native_stock_protection")
+    if enabled is None:
+        enabled = exchange_config.get("native_stock_protection")
+    enabled = (
+        enabled
+        if isinstance(enabled, bool)
+        else str(enabled or "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+    value = abs(float(quantity or 0.0))
+    return bool(
+        enabled
+        and (stop_price > 0 or take_price > 0)
+        and value > 0
+        and abs(value - round(value)) <= 1e-9
+    )
 
 
 def redact_exchange_json(value: str) -> str:

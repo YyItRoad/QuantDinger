@@ -49,6 +49,7 @@ from app.services.strategy_lifecycle import (
     is_fatal_exchange_error,
     should_skip_position_sync,
 )
+from app.services.strategy_runtime.exit_residuals import reconcile_spot_exit_residuals
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
@@ -232,12 +233,43 @@ def _purge_flat_strategy_positions_from_exchange(
             "[PositionSync] Strategy %s skips flat-leg purge: snapshot served from cache.", sid
         )
         return 0
-    allowed = strategy_allowed_symbols(strategy_config or {})
+    allowed = strategy_allowed_symbols(strategy_config or {}, strategy_id=sid)
     if not allowed:
         return 0
 
     grace_sec = _purge_flat_grace_sec()
     recent_open = _recent_open_fill_symbols(sid, grace_sec)
+    forced_stop_reason = ""
+
+    def stop_after_forced_close(
+        *,
+        trade_id: int = 0,
+        symbol: str,
+        side: str,
+        strategy_run_id: int = 0,
+    ) -> None:
+        nonlocal forced_stop_reason
+        if forced_stop_reason:
+            return
+        from app.services.live_trading.external_flat_close import forced_close_reason
+
+        close_reason = forced_close_reason(
+            sid,
+            trade_id=int(trade_id or 0),
+            symbol=symbol,
+            side=side,
+            strategy_run_id=int(strategy_run_id or 0),
+        )
+        if not close_reason:
+            return
+        forced_stop_reason = close_reason
+        from app.services.strategy_lifecycle import auto_stop_live_strategy
+
+        auto_stop_live_strategy(
+            sid,
+            close_reason,
+            source="position_sync_forced_close",
+        )
 
     deleted = 0
     for symbol, side in _local_strategy_position_legs(sid, allowed):
@@ -257,7 +289,16 @@ def _purge_flat_strategy_positions_from_exchange(
             trade_side_net_qty,
         )
 
-        if trade_side_net_qty(sid, symbol, side) <= eps:
+        try:
+            local_position = _fetch_position(sid, symbol, side)
+        except Exception:
+            local_position = {}
+        if trade_side_net_qty(
+            sid,
+            symbol,
+            side,
+            strategy_run_id=int(local_position.get("strategy_run_id") or 0),
+        ) <= eps:
             # An earlier tick already recorded this close but did not drop the leg (for
             # example the delete raised). Re-reconciling would write a second close for the
             # same size and double-count the PnL, so only the stale leg is removed here.
@@ -278,6 +319,11 @@ def _purge_flat_strategy_positions_from_exchange(
             except Exception:
                 pass
             _delete_position(sid, symbol, side)
+            stop_after_forced_close(
+                symbol=symbol,
+                side=side,
+                strategy_run_id=int(local_position.get("strategy_run_id") or 0),
+            )
             deleted += 1
             continue
 
@@ -297,6 +343,11 @@ def _purge_flat_strategy_positions_from_exchange(
                     trade_id,
                     symbol,
                     side,
+                )
+                stop_after_forced_close(
+                    trade_id=trade_id,
+                    symbol=symbol,
+                    side=side,
                 )
         except Exception as reconcile_err:
             logger.warning(
@@ -375,6 +426,11 @@ def _purge_flat_strategy_positions_from_exchange(
                         trade_id,
                         sym,
                         side,
+                    )
+                    stop_after_forced_close(
+                        trade_id=trade_id,
+                        symbol=sym,
+                        side=side,
                     )
     except Exception as heal_err:
         logger.warning(
@@ -601,10 +657,10 @@ class PendingOrderPositionSyncMixin:
                     snapshot_started_at = time.time()
                     if is_exchange_sync_backoff(cache_key):
                         logger.warning(
-                            "[PositionSync] Strategy %s skipped: %s sync backoff active (key=%s)",
+                            "[PositionSync] Strategy %s skipped: %s %s sync backoff active",
                             sid,
                             exchange_id,
-                            cache_key,
+                            market_type,
                         )
                         continue
 
@@ -642,8 +698,9 @@ class PendingOrderPositionSyncMixin:
                             if is_exchange_rate_limit_error(msg):
                                 set_exchange_sync_backoff(cache_key)
                                 logger.error(
-                                    "[PositionSync] Binance rate limit for key=%s; backing off %ss. error=%s",
-                                    cache_key,
+                                    "[PositionSync] Binance rate limit for strategy=%s market=%s; backing off %ss. error=%s",
+                                    sid,
+                                    market_type,
                                     int(exchange_sync_backoff_sec()),
                                     msg,
                                 )
@@ -1019,6 +1076,18 @@ class PendingOrderPositionSyncMixin:
                                 set_exchange_sync_backoff(cache_key, seconds=_position_sync_fd_backoff_sec())
                                 _activate_position_sync_fd_backoff(str(e))
                                 return
+                            if is_fatal_exchange_error(str(e)):
+                                logger.error(
+                                    "[PositionSync] Strategy %s fatal spot wallet error; auto-stopping. error=%s",
+                                    sid,
+                                    e,
+                                )
+                                auto_stop_live_strategy(
+                                    int(sid),
+                                    str(e),
+                                    source="position_sync_spot_wallet",
+                                )
+                                continue
                             logger.error(
                                 f"[PositionSync] Strategy {sid} spot wallet sync failed: {e}",
                                 exc_info=True,
@@ -1083,7 +1152,13 @@ class PendingOrderPositionSyncMixin:
                             snapshot_started_at=snapshot_started_at,
                         )
                 except Exception as l1_err:
-                    logger.warning("[PositionSync] L1 account sync failed key=%s: %s", cache_key, l1_err)
+                    logger.warning(
+                        "[PositionSync] L1 account sync failed strategy=%s exchange=%s market=%s: %s",
+                        sid,
+                        exchange_id,
+                        market_type,
+                        l1_err,
+                    )
 
                 if client is None:
                     try:
@@ -1095,6 +1170,27 @@ class PendingOrderPositionSyncMixin:
                             client_err,
                         )
                         client = None
+
+                if market_type == "spot":
+                    try:
+                        residual_changes = reconcile_spot_exit_residuals(
+                            strategy_id=int(sid),
+                            exchange_id=str(exchange_id or ""),
+                            client=client,
+                            snapshot_from_cache=cached_snap is not None,
+                        )
+                        if residual_changes:
+                            logger.info(
+                                "[PositionSync] Strategy %s updated %s spot exit-residual state(s).",
+                                sid,
+                                residual_changes,
+                            )
+                    except Exception as residual_err:
+                        logger.warning(
+                            "[PositionSync] Strategy %s failed exit-residual reconciliation: %s",
+                            sid,
+                            residual_err,
+                        )
 
                 try:
                     purged = _purge_flat_strategy_positions_from_exchange(

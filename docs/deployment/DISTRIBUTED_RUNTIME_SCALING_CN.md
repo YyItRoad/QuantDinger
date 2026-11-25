@@ -36,16 +36,36 @@ Actor 邮箱、租约、fencing token、幂等键或订单对账。
 
 | 策略类型 | 当前所有者 | 触发与恢复路径 |
 | --- | --- | --- |
-| 普通 K 线收盘 Strategy API V2 | `strategy-evaluator-worker` | Kafka 分片批次、持久收件箱、运行时租约、热状态检查点 |
+| 普通 K 线收盘 Strategy API V2 | `strategy-evaluator-worker` | Kafka 分片批次、持久收件箱、无凭证沙箱回调、运行时租约、热状态检查点 |
 | 使用交易所挂单的网格 | `trading-worker` | 私有成交流或 REST 对账、持久化网格 Actor 邮箱 |
 | 马丁、DCA、tick 驱动和交易时段驱动策略 | `trading-worker` | 带策略租约和 fencing 的本地实时调度器 |
 | 实盘待执行订单 | `trading-worker` | PostgreSQL 认领、运行时 fencing 校验、稳定客户端订单 ID |
-| AI、回测、报告与维护任务 | `celery-worker` | 持久 Redis 任务队列与任务重试策略 |
+| AI、报告与维护任务 | `celery-worker` | 持久 Redis 任务队列与任务重试策略 |
+| 回测、因子研究与有限实验 | `celery-backtest-worker` | 专用回测队列、一次性任务子进程、无凭证策略沙箱 |
 
 行情身份必须包含交易所/数据提供方、市场、市场类型、instrument ID 和周期。
 `BTC/USDT` 这样的符号字符串不是全局唯一行情源，绝不能作为唯一的路由键。
 
 ## 安全发布步骤
+
+### 启动就绪确认
+
+登记行情订阅只代表持久化启动请求，不代表启动成功。分发进程会定期为尚未取得当前就绪确认的
+运行中策略发送 `strategy.runtime.prepare.v1`，与 K 线求值共用求值主题和 `strategy-shard` 分区键。
+求值进程无需等待下一根 K 线就能准备沙箱、历史数据和运行实例，并退出旧 `desired_runtime_epoch`
+的本地实例。就绪确认写入 `strategy_runtime_state` 的 `runtime_ready`，绑定当前租约 fencing token。
+准备过程不调用交易信号回调；已有持仓的保护和风控检查仍然保留。
+
+启动命令在就绪前保持等待，不消耗失败重试次数，也不阻塞控制进程。只有对应运行实例、代次、
+租约均匹配才确认成功。等待上限为沙箱超时加 60 秒（默认共 180 秒），超时记录失败并遵循命令
+失败策略。重启命令即使被重试也只增加一次代次；旧代次的延迟命令不能停止后一次启动。
+租约过期或所有者切换后，旧就绪确认不再有效。
+
+发布时必须同步更新 `trading-worker`、`strategy-dispatcher-worker`、`strategy-evaluator-worker`，
+仅更新 API 或单个 Worker 不足以生效。本次变更不需要新增数据库表或 Kafka 主题。
+已存在的运行中订阅若仍指向旧实例或缺失实例，会通过分发进程自动协调恢复；不要手动改代次，
+也不要通过重放 K 线来让状态变绿。验收时检查期望与实际代次、有效租约、新实例就绪确认，
+不能只看历史 `healthy` 快照。
 
 1. 暂停同时发生的数据库结构发布，并制作经过验证的 PostgreSQL 备份。
 2. 保存当前镜像 tag 和环境文件，作为回滚依据。
@@ -57,6 +77,7 @@ Actor 邮箱、租约、fencing token、幂等键或订单对账。
 预构建镜像部署：
 
 ```bash
+python3 scripts/bootstrap_env.py --compose-file docker-compose.ghcr.yml
 docker compose -f docker-compose.ghcr.yml pull
 docker compose -f docker-compose.ghcr.yml run --rm migration
 docker compose -f docker-compose.ghcr.yml run --rm kafka-init
@@ -68,6 +89,7 @@ docker compose -f docker-compose.ghcr.yml ps
 
 ```bash
 git pull --ff-only
+python3 scripts/bootstrap_env.py
 docker compose build backend
 docker compose run --rm migration
 docker compose run --rm kafka-init

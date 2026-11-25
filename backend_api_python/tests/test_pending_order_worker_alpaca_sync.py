@@ -1,6 +1,6 @@
 from contextlib import AbstractContextManager
 
-from app.services import pending_order_worker as worker_module
+from app.services.pending_orders import alpaca_sync_persistence as persistence_module
 
 
 class FakeCursor:
@@ -9,6 +9,9 @@ class FakeCursor:
 
     def execute(self, sql, params=()):
         self.calls.append((sql, params))
+
+    def fetchone(self):
+        return {"id": 42}
 
     def close(self):
         return None
@@ -33,8 +36,8 @@ class FakeConnection(AbstractContextManager):
 
 def test_alpaca_fill_snapshot_updates_intent_without_an_undefined_order_id(monkeypatch):
     calls = []
-    monkeypatch.setattr(worker_module, "get_db_connection", lambda: FakeConnection(calls))
-    worker = object.__new__(worker_module.PendingOrderWorker)
+    monkeypatch.setattr(persistence_module, "get_db_connection", lambda: FakeConnection(calls))
+    worker = object.__new__(persistence_module.AlpacaOrderSyncPersistenceMixin)
 
     worker._update_alpaca_sent_order_snapshot(
         order_id=42,
@@ -46,7 +49,8 @@ def test_alpaca_fill_snapshot_updates_intent_without_an_undefined_order_id(monke
         final=False,
     )
 
-    assert len(calls) == 2
-    intent_sql, intent_params = calls[1]
+    assert len(calls) == 3
+    assert "FOR UPDATE" in calls[0][0]
+    intent_sql, intent_params = calls[2]
     assert "po.exchange_order_id" in intent_sql
     assert intent_params == ("sent", "sent", "sent", 0.25, 42)

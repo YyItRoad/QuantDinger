@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from app.services.live_trading import htx_v5
+from app.services.live_trading.base import LiveTradingError
 from app.services.live_trading.htx import HtxClient
 
 
@@ -263,6 +264,33 @@ def test_htx_swap_market_order_uses_mode_fallback():
     mock_place.assert_called_once()
 
 
+def test_htx_swap_limit_order_snaps_price_to_contract_tick():
+    c = HtxClient(api_key="k", secret_key="s", market_type="swap")
+    result = type("R", (), {"exchange_order_id": "1"})()
+    with (
+        patch.object(
+            c,
+            "get_contract_info",
+            return_value={"price_tick": "0.1", "contract_size": "0.001"},
+        ),
+        patch.object(c, "_base_to_contracts", return_value=2),
+        patch.object(c, "get_swap_hedge_mode", return_value=False),
+        patch.object(
+            c,
+            "_place_swap_order_with_mode_fallback",
+            return_value=result,
+        ) as mock_place,
+    ):
+        c.place_limit_order(
+            symbol="BTC/USDT",
+            side="buy",
+            size=0.01,
+            price=77951.14749999999,
+        )
+
+    assert mock_place.call_args.kwargs["body"]["price"] == 77951.1
+
+
 def test_htx_position_mode_probe_failure_stays_unknown():
     c = HtxClient(api_key="k", secret_key="s", market_type="swap")
     with patch.object(c, "_swap_v5_request", side_effect=RuntimeError("v5 unavailable")):
@@ -273,6 +301,46 @@ def test_htx_position_mode_probe_failure_stays_unknown():
         ):
             assert c.detect_swap_hedge_mode(symbol="DOGE/USDT") is None
             assert c.get_swap_hedge_mode(symbol="DOGE/USDT") is False
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "HTX swap HTTP 503: service unavailable",
+        "HTX swap HTTP 429: too many requests",
+        "HTX swap error: service is restarting",
+    ],
+)
+def test_htx_v1_transient_submit_error_does_not_use_internal_fallback(error):
+    c = HtxClient(api_key="k", secret_key="s", market_type="swap")
+    body = {
+        "contract_code": "BTC-USDT",
+        "volume": 1,
+        "side": "buy",
+        "lever_rate": 1,
+        "order_price_type": "opponent",
+        "client_order_id": 123,
+    }
+    with (
+        patch.object(c, "_fetch_v5_asset_mode", return_value=0),
+        patch.object(c, "get_swap_hedge_mode", return_value=False),
+        patch.object(
+            c,
+            "_place_swap_order_v1",
+            side_effect=LiveTradingError(error),
+        ) as mock_v1,
+        patch.object(c, "_place_swap_order") as mock_v5,
+        pytest.raises(LiveTradingError, match="HTX"),
+    ):
+        c._place_swap_order_with_mode_fallback(
+            symbol="BTC/USDT",
+            contract_code="BTC-USDT",
+            body=body,
+            pos_side="long",
+        )
+
+    mock_v1.assert_called_once()
+    mock_v5.assert_not_called()
 
 
 def test_is_single_asset_mode_unavailable():

@@ -77,6 +77,7 @@ def test_live_capable_token_never_silently_falls_back_to_paper(client, monkeypat
         "id": 9,
         "user_id": 1,
         "name": "live-agent",
+        "owner_role": "user",
         "scopes": "R,T",
         "markets": "*",
         "instruments": "*",
@@ -101,6 +102,15 @@ def test_live_capable_token_never_silently_falls_back_to_paper(client, monkeypat
     )
     assert response.status_code == 501
     assert "AGENT_LIVE_TRADING_ENABLED" in response.get_json()["message"]
+
+
+def test_agent_gateway_switch_rejects_all_agent_routes(client, monkeypatch):
+    monkeypatch.setenv("AGENT_GATEWAY_ENABLED", "false")
+
+    response = client.get("/api/agent/v1/health")
+
+    assert response.status_code == 503
+    assert response.get_json()["message"] == "agentGateway.disabled"
 
 
 def test_paper_limit_order_only_fills_when_marketable():

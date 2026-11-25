@@ -1,10 +1,12 @@
 <div align="center">
   <a href="https://github.com/OpenByteInc/QuantDinger">
-    <img src="docs/screenshots/logo.png" alt="QuantDinger logo" width="420">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/logo-dark.png">
+      <img src="docs/screenshots/logo.png" alt="QuantDinger logo" width="420">
+    </picture>
   </a>
 
-  <h1>QuantDinger</h1>
-  <p><strong>开源 AI 交易操作系统</strong></p>
+  <p><strong>QuantDinger - 开源 AI 量化研究平台</strong></p>
   <p>在一套可自行托管的系统中，将交易想法转化为 Python 策略、回测、模拟交易、实盘执行与监控。</p>
   <p><strong>QuantDinger 是 Open Byte Inc. 旗下产品。</strong></p>
   <p><em>AI 投研 → 策略代码 → 回测 → 模拟/实盘执行 → 监控</em></p>
@@ -14,6 +16,26 @@
     ·
     <a href="README_CN.md"><strong>简体中文</strong></a>
     ·
+    <a href="README_TW.md"><strong>繁體中文</strong></a>
+    ·
+    <a href="README_JA.md"><strong>日本語</strong></a>
+    ·
+    <a href="README_KO.md"><strong>한국어</strong></a>
+    ·
+    <a href="README_DE.md"><strong>Deutsch</strong></a>
+    ·
+    <a href="README_FR.md"><strong>Français</strong></a>
+    ·
+    <a href="README_RU.md"><strong>Русский</strong></a>
+    ·
+    <a href="README_AR.md"><strong>العربية</strong></a>
+    ·
+    <a href="README_TH.md"><strong>ไทย</strong></a>
+    ·
+    <a href="README_VI.md"><strong>Tiếng Việt</strong></a>
+  </p>
+
+  <p>
     <a href="docs/api/README.md"><strong>API 文档</strong></a>
     ·
     <a href="docs/agent/README.md"><strong>AI Agent 与 MCP</strong></a>
@@ -23,6 +45,8 @@
     <a href="https://ai.quantdinger.com"><strong>在线应用</strong></a>
     ·
     <a href="https://www.quantdinger.com"><strong>官方网站</strong></a>
+    ·
+    <a href="https://aws.amazon.com/marketplace/pp/prodview-ywy4zb5wnsari"><strong>AWS Marketplace 一键部署</strong></a>
     ·
     <a href="#观看-quantdinger-实际运行"><strong>视频演示</strong></a>
     ·
@@ -38,10 +62,13 @@
 
   <p>
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square" alt="Apache 2.0"></a>
+    <a href="https://sonarcloud.io/summary/new_code?id=OpenByteInc_QuantDinger"><img src="https://sonarcloud.io/api/project_badges/measure?project=OpenByteInc_QuantDinger&metric=alert_status" alt="SonarQube Cloud Quality Gate"></a>
+    <a href="https://api.reuse.software/info/github.com/OpenByteInc/QuantDinger"><img src="https://api.reuse.software/badge/github.com/OpenByteInc/QuantDinger" alt="REUSE status"></a>
+    <a href="docs/compliance/OPENCHAIN_ISO_5230_SELF_ASSESSMENT.md" title="Open Byte Inc. OpenChain ISO/IEC 5230 符合性项目"><img src="https://img.shields.io/badge/OpenChain_ISO%2FIEC_5230-conformant-0B6B53?style=flat-square" alt="OpenChain ISO/IEC 5230 conformant"></a>
+    <a href="docs/compliance/OPENCHAIN_ISO_18974_SELF_ASSESSMENT.md" title="Open Byte Inc. OpenChain ISO/IEC 18974 符合性项目"><img src="https://img.shields.io/badge/OpenChain_ISO%2FIEC_18974-conformant-0B6B53?style=flat-square" alt="OpenChain ISO/IEC 18974 conformant"></a>
     <img src="docs/badges/python-3.12.svg" alt="Python 3.12">
     <img src="https://img.shields.io/badge/PostgreSQL-18-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 18">
     <img src="https://img.shields.io/badge/Redis-8-DC382D?style=flat-square&logo=redis&logoColor=white" alt="Redis 8">
-    <a href="#jev-驱动的交易前决策"><img src="https://img.shields.io/badge/JEV-Pre--trade%20Decisions-7C3AED?style=flat-square" alt="JEV 交易前决策"></a>
     <img src="docs/badges/docker-compose.svg" alt="Docker Compose">
     <a href="https://github.com/OpenByteInc/QuantDinger/releases/latest"><img src="docs/badges/latest-release.svg" alt="Latest release"></a>
   </p>
@@ -51,19 +78,34 @@
     <a href="https://github.com/orgs/OpenByteInc/projects/1/views/4"><img src="https://img.shields.io/github/issues/OpenByteInc/QuantDinger/ready%20for%20contributors?style=flat-square&label=Ready%20tasks&color=0E8A16" alt="Tasks ready for contributors"></a>
   </p>
 
+  <p><sub>生态计划成员</sub></p>
+  <p>
+    <a href="https://www.nvidia.com/en-us/startups/" title="Open Byte Inc. 已加入 NVIDIA Inception">
+      <img src="docs/badges/nvidia-inception-member.png" alt="NVIDIA Inception 会员徽章" width="210">
+    </a>
+  </p>
+  <p><sub>Open Byte Inc. 已加入 NVIDIA Inception。</sub></p>
+
   <p><sub>赞助支持</sub></p>
   <p>
     <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=quantdinger" title="Atlas Cloud — AI inference sponsor">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="https://www.atlascloud.ai/logo-white.svg">
-        <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="142">
+        <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="134" align="middle">
       </picture>
     </a>
     &nbsp;&nbsp;&nbsp;&nbsp;
-    <a href="https://aws.amazon.com/" title="Amazon Web Services — cloud infrastructure sponsor">
+    <a href="https://aws.amazon.com/marketplace/pp/prodview-ywy4zb5wnsari" title="通过 AWS Marketplace 部署 QuantDinger">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="https://a0.awsstatic.com/libra-css/images/logos/aws_smile-header-desktop-en-white_59x35.png">
-        <img src="https://upload.wikimedia.org/wikipedia/commons/9/93/Amazon_Web_Services_Logo.svg" alt="Amazon Web Services" width="70">
+        <img src="https://upload.wikimedia.org/wikipedia/commons/9/93/Amazon_Web_Services_Logo.svg" alt="Amazon Web Services" width="54" align="middle">
+      </picture>
+    </a>
+    &nbsp;&nbsp;&nbsp;&nbsp;
+    <a href="https://openai.com/" title="OpenAI — 开源开发工具支持">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="docs/badges/openai-wordmark-white.svg">
+        <img src="docs/badges/openai-wordmark-black.svg" alt="OpenAI" width="150" align="middle">
       </picture>
     </a>
   </p>
@@ -78,7 +120,11 @@
 ## 观看 QuantDinger 实际运行
 
 <p align="center">
-  <img src="docs/screenshots/quantdinger-v5-2x.gif" alt="QuantDinger 产品演示，2 倍速" width="800">
+  <a href="https://youtu.be/y9EiCZSaIt0">
+    <img src="docs/screenshots/quantdinger-youtube-overview.png" alt="在 YouTube 观看最新 QuantDinger 介绍视频" width="800">
+  </a>
+  <br>
+  <strong><a href="https://youtu.be/y9EiCZSaIt0">▶ 在 YouTube 观看最新 QuantDinger 产品介绍</a></strong>
 </p>
 
 ## QuantDinger 是什么
@@ -90,6 +136,7 @@ QuantDinger 是面向独立交易者、Python 策略开发者和小型团队的*
 
 - 支持多家提供商的 AI 市场研究与分析；
 - Python 指标和 Strategy API V2 策略开发；
+- 由社区共同维护、可直接复制使用的指标与策略代码库；
 - 服务端回测与实验工作流；
 - 覆盖加密货币交易所和传统券商的模拟及实盘执行；
 - Web、移动 H5、Human API、Agent Gateway 与 MCP 接入；
@@ -97,8 +144,22 @@ QuantDinger 是面向独立交易者、Python 策略开发者和小型团队的*
 
 它不是黑盒信号服务。策略代码、风险设置、凭据和部署始终由运营者掌控。
 
+### 社区指标与策略代码库
+
+QuantDinger 提供基于文件的[社区代码库](library/)，用户不需要安装额外软件包或导入数据库种子，
+即可浏览并复制可用的 [Python 指标](library/indicators/)和
+[Strategy API V2 策略](library/strategies/)，然后粘贴到对应的 QuantDinger 编辑器中。
+
+该代码库通过社区 Pull Request 持续扩充。欢迎指标与策略作者贡献自己的实现、验证证据、修复和改进，
+与社区共同维护这套代码集合。提交前请阅读[代码库贡献要求](library/README.md#contributing)和
+[贡献指南](CONTRIBUTING.md)。
+
 ### 策略进化与仅通知虚拟账户
 
+- **因子实验室**：一次加载同一个时点化标的池面板，批量评估最多 40 个技术、基本面、
+  TA-Lib 或 Qlib 因子；使用按时间切分的样本外验证、IC 保持率、Benjamini-Hochberg
+  错误发现率控制、成本感知评分、因子生命周期分类和跨因子 IC 相关矩阵。Web 界面、
+  Human API、Agent Gateway 与 MCP 均可调用同一套流程。
 - **策略进化**：对策略声明的可调参数执行随机、网格或 TPE 搜索，按实际 K 线数量进行
   walk-forward 验证，并保留最终盲测区间。研究任务异步运行且按策略保存历史，支持自动剪枝、
   综合评分、PBO、Deflated Sharpe、区块自助法蒙特卡洛和交易成本压力测试。结果用于比较参数
@@ -113,7 +174,8 @@ v5 后端按照明确的运行时和运维边界组织：
 
 - HTTP API 不再承载长期运行的交易循环或调度循环；
 - 交易、调度、Celery 任务和迁移分别在独立进程中运行；
-- Celery 处理有限、可重试的工作，长期运行的策略实例则保留在交易工作进程中；
+- 可信工作进程保留策略所有权、账户校验和下单权限；不受信任的 Strategy API V2
+  清单发现、回测和实盘回调在无凭证沙箱子进程中执行；
 - 缓存 Redis 与持久任务 Redis 使用独立实例和不同的淘汰策略；
 - 高风险 API 合同通过 OpenAPI 表达并由测试保护；
 - 可选的可观测性叠加配置提供 JSON 日志、请求 ID、Prometheus 指标、仪表盘和告警规则；
@@ -145,9 +207,10 @@ flowchart TB
     TW["交易工作进程\n控制、实时策略、执行、网格 Actor"]
     DISPATCH["策略分发工作进程"]
     EVAL["策略求值工作进程\n常驻 K 线策略运行时"]
+    SBOX["无凭证策略沙箱\n每个实盘部署一个持久进程\n每次回测一个进程"]
     AUDIT["Kafka 审计工作进程"]
     SW["调度工作进程"]
-    CW["Celery 工作进程"]
+    CW["Celery 工作进程\nAI/维护与回测队列"]
     BEAT["Celery beat"]
     PROM["Prometheus"]
     GRAF["Grafana"]
@@ -162,11 +225,17 @@ flowchart TB
     KAFKA --> DISPATCH --> KAFKA
     KAFKA --> EVAL
     EVAL -->|"事件收件箱、租约、检查点、订单意图"| PG
+    EVAL -->|"K 线与状态快照"| SBOX
+    SBOX -->|"经校验的订单意图与状态"| EVAL
     KAFKA --> AUDIT --> PG
     PG -->|"按所有者认领待执行订单"| TW
+    TW -->|"行情、仓位与订单快照"| SBOX
+    SBOX -->|"经校验的订单意图与状态"| TW
     SW -->|"调度、监控、心跳"| PG
     API -->|"有限异步任务"| JOBS
     BEAT --> JOBS --> CW
+    CW -->|"回测快照"| SBOX
+    SBOX -->|"回测结果"| CW
     CW --> PG
     API -. 指标 .-> PROM
     PG -. Exporter .-> PROM
@@ -186,9 +255,11 @@ flowchart TB
 | `trading-worker` | 管理控制/实时策略、交易所会话、带 fencing 的下单网关、对账和持久化网格 Actor。 |
 | `strategy-dispatcher-worker` | 将 K 线收盘事件转换为稳定策略分片的求值批次。 |
 | `strategy-evaluator-worker` | 管理常驻的分布式 K 线策略运行时，并处理带 fencing 的策略收件箱事件。 |
+| 策略沙箱子进程 | 在干净环境、仅 JSON 传输、资源限制和 Linux 内核隔离下执行不受信任的指标代码及 Strategy API V2 清单发现、回测或实盘回调。它由可信所有者创建，不是独立的 Compose 服务。 |
 | `kafka-audit-worker` | 独立校验和记录版本化事件流，不参与下单决策。 |
 | `scheduler-worker` | 运行投资组合、部署、支付和信号调度。 |
-| `celery-worker` | 执行有限的 AI、回测、实验、报告和维护任务。 |
+| `celery-worker` | 执行有限的 AI、报告和维护任务。 |
+| `celery-backtest-worker` | 执行回测、因子研究和实验；每个任务完成后回收其 Celery 子进程。 |
 | `celery-beat` | 分发周期性 Celery 任务。 |
 
 有关职责归属规则，请参阅[后端进程职责](docs/architecture/PROCESS_ROLES_AND_TASKS.md)、
@@ -197,6 +268,22 @@ flowchart TB
 [分布式运行时部署与扩容指南](docs/deployment/DISTRIBUTED_RUNTIME_SCALING_CN.md)。
 
 ## 快速开始
+
+不确定该选择 Windows、Linux/macOS、云服务器、SaaS 还是移动端？先阅读
+[安装与部署总览](docs/getting-started/INSTALLATION_CN.md)。每条路径都包含安装、验证、升级、
+部署后设置和常见问题。
+
+### 最快的云端部署方式：AWS Marketplace
+
+<p align="center">
+  <a href="https://aws.amazon.com/marketplace/pp/prodview-ywy4zb5wnsari"><img src="https://img.shields.io/badge/AWS%20Marketplace-%E9%83%A8%E7%BD%B2%20QuantDinger-FF9900?style=for-the-badge&logo=amazonaws&logoColor=white" alt="通过 AWS Marketplace 部署 QuantDinger"></a>
+</p>
+
+可从公开的 [AWS Marketplace 产品页](https://aws.amazon.com/marketplace/pp/prodview-ywy4zb5wnsari)
+快速启动免费的 QuantDinger 软件。Marketplace 交付方案通过 CloudFormation 创建单机容器服务栈
+及其所需的 AWS 基础设施。QuantDinger 软件本身不收费，但用户仍需承担正常的 AWS 基础设施费用。
+首次登录、备份、升级、回滚和费用说明请参阅
+[AWS Marketplace 一键部署指南](docs/deployment/AWS_MARKETPLACE_DEPLOYMENT_CN.md)。
 
 ### 方案 A：预构建镜像
 
@@ -258,18 +345,32 @@ docker compose exec -u 10001:10001 -T backend \
 ```bash
 git clone https://github.com/OpenByteInc/QuantDinger.git
 cd QuantDinger
-cp .env.example .env
+python scripts/bootstrap_env.py
 ```
 
-首次启动前，请替换统一环境文件中的示例值：
+首次启动前，请检查统一环境文件。初始化命令已经自动生成 PostgreSQL、会话签名和凭据加密密钥；
+你只需设置管理员凭据，并检查生产环境专用的集成配置：
 
 | 文件 | 生产环境必填项 |
 | --- | --- |
-| `.env` | `SECRET_KEY`、`CREDENTIAL_ENCRYPTION_KEY`、管理员、PostgreSQL、Redis 和 Grafana 凭据 |
+| `.env` | 管理员凭据；可选的 Redis、Grafana 凭据；部署域名及外部集成 |
 
-更新代码后，`docker compose up` 会先执行一次性的 `env-sync` 服务，再启动数据库迁移与
-Kafka 初始化。它会补充新字段，从旧后端环境文件导入根 `.env` 中缺少的值，保留已有值和
-注释，并且只在文件确有变化时创建带时间戳的备份。下面的命令仍可用于手动预检或维护：
+拉取更新后，必须先初始化统一环境文件，再执行任何 Compose 命令。从曾经依赖内置
+PostgreSQL 默认密码的旧版本升级时，这是一项必要的一次性迁移：
+
+```bash
+git pull --ff-only
+python3 scripts/bootstrap_env.py
+docker compose up -d --build
+```
+
+初始化脚本会保留已有凭据，并可从旧 `DATABASE_URL` 或现有数据库容器恢复原 PostgreSQL
+密码。如果检测到已有数据卷但无法恢复密码，它会停止而不是让数据库失联。不要随意填写
+替代密码，也不要删除数据卷。
+
+初始化完成后，Compose 会先执行一次性的 `env-sync` 服务，再启动数据库迁移与 Kafka
+初始化。它会补充新字段，从旧后端环境文件导入根 `.env` 中缺少的值，保留已有值和注释，
+并且只在文件确有变化时创建带时间戳的备份。下面的命令仍可用于手动预检或维护：
 
 ```bash
 python scripts/sync_env.py --env-file .env --template .env.example --backup
@@ -278,7 +379,8 @@ python scripts/sync_env.py --env-file .env --template .env.example --backup
 手动执行旧版本首次迁移时，再增加 `--legacy backend_api_python/.env`（源码部署）或
 `--legacy backend.env`（旧 GHCR 部署）。旧文件不会被删除。
 
-使用以下命令生成相互独立的密钥：
+初始化命令会创建 `.env`，在升级时保留已有配置，并分别生成 PostgreSQL、会话签名和凭据加密密钥。
+如需手动生成额外的独立密钥，可使用：
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -293,9 +395,22 @@ docker compose ps
 
 基础服务栈不会启动 Prometheus、Grafana 或 Alertmanager，从而保持默认开源安装的轻量化。
 
-有关详细安装路径、Windows 注意事项、中国镜像设置和 PostgreSQL 迁移指导，请参阅
-[安装故障排查](docs/deployment/INSTALL_TROUBLESHOOTING.md)和
-[云部署指南](docs/deployment/CLOUD_DEPLOYMENT_EN.md)。
+有关完整平台步骤，请参阅 [Windows 安装](docs/deployment/WINDOWS_INSTALLATION_CN.md)、
+[Linux 与 macOS 安装](docs/deployment/LINUX_MACOS_INSTALLATION_CN.md)、
+[云部署指南](docs/deployment/CLOUD_DEPLOYMENT_CN.md)、
+[SaaS 部署](docs/deployment/SAAS_DEPLOYMENT_CN.md)和
+[移动端部署](docs/deployment/MOBILE_CLIENT_DEPLOYMENT_CN.md)。安装成功后继续完成
+[部署后首次设置](docs/getting-started/POST_INSTALL_SETUP_CN.md)；异常处理见
+[安装 FAQ](docs/deployment/INSTALLATION_FAQ_CN.md)和
+[安装故障排查](docs/deployment/INSTALL_TROUBLESHOOTING_CN.md)。
+
+首次登录后可直接按[30 分钟上手](docs/getting-started/QUICKSTART_30_MINUTES_CN.md)完成基础配置、AI
+接入、首份研究和回测。生产管理员还应阅读[配置参考](docs/deployment/CONFIGURATION_REFERENCE_CN.md)、
+[备份、恢复与迁移](docs/deployment/BACKUP_RESTORE_MIGRATION_CN.md)以及
+[升级与回滚](docs/deployment/UPGRADE_ROLLBACK_CN.md)。
+
+如需使用免费的 AWS Marketplace 单机交付方案，以及查看首次部署、升级、备份、回滚和费用说明，
+请参阅 [AWS Marketplace 一键部署指南](docs/deployment/AWS_MARKETPLACE_DEPLOYMENT_CN.md)。
 
 ## 生产环境部署
 
@@ -370,6 +485,9 @@ docker compose \
 - Agent Token 经过哈希处理，并应用权限范围、速率限制和审计日志。
 - Agent 交易默认仅允许模拟盘；实盘访问同时需要 Token 授权和服务端授权。
 - 长期运行策略的所有权通过租约、心跳和隔离令牌管理。
+- 指标代码以及 Strategy API V2 的清单发现、回测和实盘回调都在无凭证子进程中执行；
+  数据库、凭证、对账和交易所下单权限仍由可信工作进程持有。
+- 不受信任代码只有在 Linux seccomp 与 Landlock 隔离可启用时才会运行；系统不会降级为进程内执行。
 - 生产容器不使用 root 权限或 Linux 系统能力运行。
 - 宿主机端口默认仅绑定回环地址；公网访问应在 TLS 反向代理处终止。
 
@@ -390,87 +508,12 @@ docker compose \
 [策略开发指南](docs/trading/STRATEGY_DEV_GUIDE.md)和
 [扩展指南](docs/architecture/EXTENSION_GUIDE.md)开始。
 
-## JEV 驱动的交易前决策
+## 可选的交易前决策过滤
 
-QuantDinger 可以在实盘开仓订单之前设置结构化 AI 决策门。创建普通实盘策略时可启用
-**AI 决策过滤**。策略开仓指令到达交易所前，QuantDinger 会将订单、
-策略上下文、资金敞口、持仓和预算状态发送给
-[TypeSafe Jev](https://docs.typesafe.ai/introduction)。Jev 返回类型化 Choice 结果、概率和
-置信度，无需从自然语言中解析决策。应用会在可审计的决策时间线中展示提供商、检查项、结果、
-置信度、延迟和理由。
-
-| 过去仅使用 LLM 的决策门 | JEV 决策门 |
-| --- | --- |
-| 生成自然语言或 JSON，再通过解析恢复决策 | 直接接收带有选中结果、完整概率和置信度的类型化 Choice |
-| 单一黑盒答案在执行后难以检查 | 独立的开仓与风险检查连同订单上下文和延迟一起保存 |
-| 提供商故障可能意外阻断仓位管理 | 提供商故障会被审计并故障放行，所有退出操作始终绕过 AI |
-
-执行策略始终由 QuantDinger 代码控制：被拒绝的开仓不会到达交易所；退出、止损、止盈和紧急操作
-绕过过滤器。首个版本不包含网格、DCA 和马丁运行时。未配置 Jev 时，QuantDinger 会尝试使用
-系统中已配置的 LLM。如果没有可用的 AI 提供商，订单会被放行并记录故障放行结果，避免 AI 服务
-中断导致现有仓位无法退出。
-
-### 决策流程
-
-```mermaid
-flowchart TD
-    A["策略开仓信号"] --> B["确定性风控与订单预算检查"]
-    B -->|"基础检查不通过"| R["拒绝下单"]
-    B -->|"基础检查通过"| C["构造 Decision Context V2"]
-
-    C --> C1["策略参数与信号原因"]
-    C --> C2["多周期行情与指标"]
-    C --> C3["持仓、敞口、净值与回撤"]
-    C --> C4["最近盈亏与连续亏损"]
-    C --> C5["止盈、止损与执行条件"]
-
-    C1 --> D
-    C2 --> D
-    C3 --> D
-    C4 --> D
-    C5 --> D
-
-    D{"已配置 JEV？"}
-
-    D -->|"是"| E["JEV System One"]
-    E --> E1["证据质量"]
-    E --> E2["信号一致性"]
-    E --> E3["市场状态"]
-    E --> E4["账户风险"]
-    E --> E5["执行质量"]
-    E --> E6["开仓判断：pass/reject"]
-
-    E1 --> F["校验结构、概率与置信度"]
-    E2 --> F
-    E3 --> F
-    E4 --> F
-    E5 --> F
-    E6 --> F
-
-    F -->|"结果有效且达到置信度阈值"| G["确定性决策收敛器"]
-    F -->|"超时、异常、格式错误或低置信度"| H
-
-    D -->|"否"| H{"已配置 LLM？"}
-    H -->|"是"| I["LLM 读取同一份上下文"]
-    I --> J["强制输出严格 JSON"]
-    J --> K{"decision"}
-
-    H -->|"否"| O["故障放行并记录原因"]
-
-    G -->|"PASS"| P["进入待处理订单队列"]
-    G -->|"REJECT"| R
-    K -->|"pass"| P
-    K -->|"reject"| R
-    K -->|"非法输出或提供商失败"| O
-
-    P --> Q["异步提交交易所"]
-    R --> S["记录 ai_rejected 与决策过程"]
-    O --> T["正常下单并记录提供商不可用"]
-```
-
-请在**系统设置 → AI / LLM** 中配置 `JEV_API_KEY`、`JEV_BASE_URL`、`JEV_MODEL`
-和 `JEV_TIMEOUT_SECONDS`。TypeSafe 在
-[`POST /v1/systemone`](https://docs.typesafe.ai/introduction/quickstart) 中说明了 HTTP 合同。
+普通实盘策略可选使用 AI 决策过滤器评估新的开仓指令。过滤器可使用 JEV 或已配置的
+LLM，并保留决策结果供审计。确定性风控仍是最终权威；平仓、止损、止盈和紧急操作不经过 AI 过滤，
+避免提供商异常阻断减仓。相关提供商在**系统设置 → AI / LLM** 中配置，具体范围见
+[实盘交易安全指南](docs/trading/LIVE_TRADING_SAFETY_CN.md)。
 
 ## AI Agent 与 MCP
 
@@ -514,8 +557,8 @@ API 变更应遵循 [API 约定](docs/architecture/API_CONVENTIONS.md)，在需�
 
 ## 仓库结构
 
-本仓库包含后端、工作进程、部署定义、运维配置、文档和 MCP Server。桌面端与移动端客户端源码
-位于独立仓库；本仓库在 Compose 服务栈中使用它们发布的镜像。
+本仓库包含后端、工作进程、部署定义、运维配置、文档、社区指标与策略代码库以及 MCP Server。
+桌面端与移动端客户端源码位于独立仓库；本仓库在 Compose 服务栈中使用它们发布的镜像。
 
 ```text
 QuantDinger/
@@ -540,6 +583,7 @@ QuantDinger/
 |   |   |   |-- ibkr_trading/          Interactive Brokers 集成
 |   |   |   |-- strategy_runtime/      策略信号、交易意图、执行与状态
 |   |   |   |-- strategy_v2/           版本化策略合同与运行时服务
+|   |   |   |   `-- sandbox.py         回调沙箱的可信宿主与 JSON 传输边界
 |   |   |   `-- virtual_trading.py     隔离的仅通知模拟账户、持仓与成交
 |   |   |-- data_sources/              原始行情数据源适配器
 |   |   |-- data_providers/            聚合行情、宏观、新闻和情绪提供商
@@ -548,7 +592,10 @@ QuantDinger/
 |   |   |-- workers/                   长期运行的工作进程外壳
 |   |   |-- runtime/                   进程角色与所有权辅助模块
 |   |   |-- observability/             请求上下文、指标与 HTTP 检测
-|   |   `-- utils/                     共享的底层数据库、缓存、认证和日志辅助模块
+|   |   `-- utils/                     共享底层基础设施与沙箱工作进程
+|   |       |-- safe_exec.py           AST 安全策略、受限命名空间与沙箱启动器
+|   |       |-- safe_exec_worker.py    一次性指标与策略合同发现沙箱
+|   |       `-- strategy_runtime_worker.py  无凭证回测/实盘回调沙箱
 |   |-- migrations/                    PostgreSQL 结构与种子迁移
 |   |-- scripts/                       后端维护与校验命令
 |   |-- tests/                         单元、合同、集成和发布门禁测试
@@ -565,6 +612,9 @@ QuantDinger/
 |   |-- getting-started/               入门与首次运行指南
 |   |-- product/                       产品流程与功能文档
 |   `-- security/                      安全模型与运维指南
+|-- library/                           社区共同维护的 Python 指标与策略代码库
+|   |-- indicators/                    可直接复制的指标源码
+|   `-- strategies/                    可直接复制的 Strategy API V2 源码与验收表
 |-- mcp_server/                        独立 QuantDinger MCP Server 包
 |   |-- src/quantdinger_mcp/           MCP Server 与安全实现
 |   `-- tests/                         MCP 合同与安全测试
@@ -587,7 +637,8 @@ QuantDinger/
 | --- | --- |
 | 同步 API 请求 | `app/routes` -> `app/services` -> 数据库、缓存、行情数据或交易适配器 |
 | 持久策略命令 | API 路由 -> PostgreSQL 命令记录 -> `trading-worker` -> 策略运行时与券商适配器 |
-| 有限后台任务 | API 或 Celery beat -> 任务 Redis -> `celery-worker` 中的 `app/tasks` -> PostgreSQL 结果 |
+| Strategy API V2 回调 | 可信求值、交易或回测工作进程 -> 沙箱子进程 -> 已校验交易意图与状态 -> 可信所有者 |
+| 有限后台任务 | API 或 Celery beat -> 任务 Redis -> 队列专属 Celery Worker 中的 `app/tasks` -> PostgreSQL 结果 |
 | 计划领域任务 | `app/commands/scheduler.py` -> 调度服务 -> 持久状态与通知 |
 | 监控 | API 与工作进程 -> `app/observability` 指标 -> Prometheus -> Grafana 与 Alertmanager |
 | Agent 或 MCP 调用 | MCP 客户端 -> `mcp_server` -> `/api/agent/v1` -> 与 Human API 共用的服务层 |
@@ -607,6 +658,7 @@ QuantDinger/
 | 新增有限异步任务 | `app/tasks/` | `celery_app.py`、队列路由、任务测试 |
 | 新增长期运行进程行为 | `app/workers/`、`app/commands/` 或 `app/runtime/` | Compose 命令、健康检查、所有权测试 |
 | 修改数据库结构 | `backend_api_python/migrations/` | 迁移/发布门禁测试与文档 |
+| 贡献指标或策略 | `library/indicators/` 或 `library/strategies/` | 验证证据与对应的代码库 README |
 | 新增指标或告警 | `app/observability/` 与 `ops/` | 仪表盘、告警规则、可观测性文档 |
 | 新增 MCP 工具 | `mcp_server/src/quantdinger_mcp/` | Agent Gateway 权限范围、安全测试、Agent 文档 |
 
@@ -621,6 +673,13 @@ Web 与移动端仓库分别发布自己的 GHCR 镜像。只有从源码构建�
 
 | 主题 | 文档 |
 | --- | --- |
+| 安装与平台选择 | [安装总览](docs/getting-started/INSTALLATION_CN.md) |
+| 30 分钟上手 | [首次完整流程](docs/getting-started/QUICKSTART_30_MINUTES_CN.md) |
+| 系统配置 | [配置参考](docs/deployment/CONFIGURATION_REFERENCE_CN.md) |
+| 外部服务 | [券商、数据源与 AI 接入](docs/deployment/INTEGRATION_GUIDE_CN.md) |
+| 备份与迁移 | [备份、恢复与迁移](docs/deployment/BACKUP_RESTORE_MIGRATION_CN.md) |
+| 升级与回滚 | [升级与回滚](docs/deployment/UPGRADE_ROLLBACK_CN.md) |
+| 故障诊断 | [错误知识库](docs/deployment/ERROR_KNOWLEDGE_BASE_CN.md) |
 | 贡献者架构 | [系统架构](docs/architecture/ARCHITECTURE.md) |
 | 模块所有权 | [模块边界](docs/architecture/MODULE_BOUNDARIES.md) |
 | 进程与任务所有权 | [进程职责](docs/architecture/PROCESS_ROLES_AND_TASKS.md) |
@@ -632,7 +691,9 @@ Web 与移动端仓库分别发布自己的 GHCR 镜像。只有从源码构建�
 | 指标开发 | [指标指南](docs/trading/INDICATOR_DEV_GUIDE.md) |
 | MCP 与 Agent | [Agent 文档](docs/agent/README.md) |
 | 云部署 | [云部署](docs/deployment/CLOUD_DEPLOYMENT_EN.md) |
+| AWS Marketplace | [一键部署与升级](docs/deployment/AWS_MARKETPLACE_DEPLOYMENT_CN.md) |
 | 安装问题 | [故障排查](docs/deployment/INSTALL_TROUBLESHOOTING.md) |
+| 文档维护 | [文档维护规范](docs/architecture/DOCUMENTATION_MAINTENANCE_CN.md) |
 
 ## 参与贡献
 
@@ -640,11 +701,18 @@ Web 与移动端仓库分别发布自己的 GHCR 镜像。只有从源码构建�
 [DEVELOPMENT.md](DEVELOPMENT.md)。保持路由轻量，维护 API 兼容性，将长期运行行为放入正确的进程，
 并为高风险变更提供有针对性的测试。
 
+指标和策略同样由社区共同维护。欢迎将兼容的 Python 文件提交到
+[`library/indicators/`](library/indicators/) 或 [`library/strategies/`](library/strategies/)，
+并在 Pull Request 中附上图表预览或回测验证证据。
+
 [公开路线图](ROADMAP.md)列出了当前产品主题、规划阶段以及认领范围明确的贡献任务的流程。
 
 ## 许可证与商业条款
 
 - 后端源码采用 [Apache License 2.0](LICENSE) 许可证。
+- 本仓库通过 REUSE 自动检查；Open Byte Inc. 已完成
+  [OpenChain ISO/IEC 5230 与 ISO/IEC 18974 在线自我认证，并维护符合性证据](docs/compliance/README.md)。
+  认证对象是限定范围内的管理流程，不是对 QuantDinger 软件的第三方产品认证。
 - QuantDinger 是 **Open Byte Inc** 旗下产品。名称、Logo、产品标识和商业许可与代码许可证分开管理。
 - Web 前端源码发布在
   [QuantDinger Frontend](https://github.com/OpenByteInc/QuantDinger-Vue)，采用其独立的源码可用许可证。
@@ -694,11 +762,11 @@ QuantDinger 的持续开发和开源社区得到以下机构支持：
 
 <table>
   <tr>
-    <td align="center" width="50%">
+    <td align="center" width="33.33%">
       <a href="https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=quantdinger">
         <picture>
           <source media="(prefers-color-scheme: dark)" srcset="https://www.atlascloud.ai/logo-white.svg">
-          <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="190">
+          <img src="https://www.atlascloud.ai/logo.svg" alt="Atlas Cloud" width="176" align="middle">
         </picture>
       </a>
       <br><br>
@@ -706,11 +774,11 @@ QuantDinger 的持续开发和开源社区得到以下机构支持：
       <br>
       <sub>AI 推理赞助商</sub>
     </td>
-    <td align="center" width="50%">
-      <a href="https://aws.amazon.com/">
+    <td align="center" width="33.33%">
+      <a href="https://aws.amazon.com/marketplace/pp/prodview-ywy4zb5wnsari">
         <picture>
           <source media="(prefers-color-scheme: dark)" srcset="https://a0.awsstatic.com/libra-css/images/logos/aws_smile-header-desktop-en-white_59x35.png">
-          <img src="https://upload.wikimedia.org/wikipedia/commons/9/93/Amazon_Web_Services_Logo.svg" alt="Amazon Web Services" width="100">
+          <img src="https://upload.wikimedia.org/wikipedia/commons/9/93/Amazon_Web_Services_Logo.svg" alt="Amazon Web Services" width="72" align="middle">
         </picture>
       </a>
       <br><br>
@@ -718,12 +786,26 @@ QuantDinger 的持续开发和开源社区得到以下机构支持：
       <br>
       <sub>云基础设施赞助商</sub>
     </td>
+    <td align="center" width="33.33%">
+      <a href="https://openai.com/">
+        <picture>
+          <source media="(prefers-color-scheme: dark)" srcset="docs/badges/openai-wordmark-white.svg">
+          <img src="docs/badges/openai-wordmark-black.svg" alt="OpenAI" width="220" align="middle">
+        </picture>
+      </a>
+      <br><br>
+      <strong>OpenAI</strong>
+      <br>
+      <sub>开源开发工具赞助商</sub>
+    </td>
   </tr>
 </table>
 
 感谢 [Atlas Cloud](https://www.atlascloud.ai/?utm_source=github&utm_medium=link&utm_campaign=quantdinger)
-支持 AI 模型推理，也感谢 [Amazon Web Services](https://aws.amazon.com/) 提供云基础设施支持，
-帮助 QuantDinger 服务社区。
+支持 AI 模型推理，感谢 [Amazon Web Services](https://aws.amazon.com/) 提供云基础设施支持，
+也感谢 [OpenAI](https://openai.com/) 提供开源开发工具支持，帮助 QuantDinger 服务社区。
+
+<sub>OpenAI 与 OpenAI Logo 是 OpenAI 的商标。此处展示用于说明项目与工具支持，不代表 OpenAI 对 QuantDinger 的产品认证或背书。</sub>
 
 ## 致谢
 

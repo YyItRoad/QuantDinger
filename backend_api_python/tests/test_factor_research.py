@@ -5,6 +5,72 @@ from app.services.factors import compute_factor, list_factors
 from app.services.strategy_v2.factor_research import FactorResearchEngine
 
 
+@pytest.mark.parametrize("direction", [1.0, -1.0])
+def test_factor_research_rank_ic_sign_uses_next_open_forward_return(direction):
+    index = pd.date_range("2026-01-01", periods=8, freq="B")
+    frames = {}
+    for offset, symbol in enumerate(["A", "B", "C", "D", "E", "F"], start=1):
+        open_prices = [
+            100.0 * (1.0 + direction * offset * 0.005 * day)
+            for day in range(len(index))
+        ]
+        close_prices = [
+            100.0 * (1.0 - direction * offset * 0.005 * day)
+            for day in range(len(index))
+        ]
+        frames[symbol] = pd.DataFrame({
+            "open": open_prices,
+            "close": close_prices,
+            "signal": [float(offset)] * len(index),
+        }, index=index)
+
+    result = FactorResearchEngine().run(
+        frames=frames,
+        factor_id="signal",
+        start_date=index[0],
+        end_date=index[-1],
+        groups=3,
+        holding_period=1,
+        commission=0.0,
+        slippage=0.0,
+    )
+
+    assert result["rankIc"] == pytest.approx(direction)
+    assert result["icSeries"][0]["value"] == pytest.approx(direction)
+
+
+def test_factor_research_evaluates_custom_formula_point_in_time():
+    index = pd.date_range("2025-01-01", periods=90, freq="B")
+    frames = {}
+    for offset, symbol in enumerate(["A", "B", "C", "D", "E", "F"], start=1):
+        prices = [100.0 + day * offset * 0.1 for day in range(len(index))]
+        frames[symbol] = pd.DataFrame({
+            "open": prices,
+            "high": [value + 1.0 for value in prices],
+            "low": [value - 1.0 for value in prices],
+            "close": prices,
+            "volume": [1000.0 + offset] * len(index),
+        }, index=index)
+
+    result = FactorResearchEngine().run(
+        frames=frames,
+        factor_id="custom:1",
+        factor_params={"lookback": 20},
+        custom_factor={
+            "expression": "momentum(period=lookback)",
+            "default_params": {"lookback": 20},
+        },
+        start_date=index[30],
+        end_date=index[-1],
+        groups=3,
+        holding_period=5,
+    )
+
+    assert result["factorId"] == "custom:1"
+    assert result["rankIc"] > 0
+    assert result["coverage"] == pytest.approx(1.0)
+
+
 def test_factor_research_returns_ic_groups_costs_and_stability():
     index = pd.date_range("2025-01-01", periods=90, freq="B")
     frames = {}
@@ -305,7 +371,7 @@ def test_factor_research_reduces_groups_for_small_cross_sections():
 
     assert result["effectiveGroups"] == 3
     assert result["requestedGroups"] == 5
-    assert result["methodologyVersion"] == 2
+    assert result["methodologyVersion"] == 3
     assert "groupsReduced" in result["sampleDiagnostics"]["warnings"]
     assert result["executionAssumptions"]["periodsPerYear"] == pytest.approx(365.25)
 
@@ -331,6 +397,18 @@ def test_factor_research_sizes_groups_from_usable_factor_cross_section():
 
     assert result["effectiveGroups"] == 2
     assert result["sampleDiagnostics"]["medianCrossSectionSize"] == 4
+    assert result["monotonicity"] is None
+    assert result["executionAssumptions"]["longShortGrossExposure"] == 2.0
+    assert result["executionAssumptions"]["longShortCapitalConvention"] == "one_unit_per_leg"
+
+
+def test_factor_research_icir_uses_observed_research_frequency():
+    periods = FactorResearchEngine._observed_periods_per_year(
+        ["2025-01-01", "2025-07-02", "2026-01-01"],
+        fallback=73.05,
+    )
+
+    assert periods == pytest.approx(2.0, rel=0.01)
 
 
 def test_factor_research_warmup_bars_handles_shorthand_and_custom_multistage_factors():
@@ -381,3 +459,30 @@ def test_factor_research_warmup_bars_handles_shorthand_and_custom_multistage_fac
             [timestamp],
         )
         assert panel.loc[timestamp].notna().all(), factor_id
+
+
+def test_factor_research_correlation_survives_nan_close_in_amihud_illiquidity():
+    index = pd.date_range("2025-01-01", periods=60, freq="B")
+    frames = {}
+    for offset, symbol in enumerate(["A", "B", "C", "D", "E", "F"], start=1):
+        close = pd.Series([100.0 + day * (0.2 + offset * 0.05) for day in range(len(index))], index=index)
+        if symbol == "F":
+            close.iloc[40] = float("nan")
+        frames[symbol] = pd.DataFrame({
+            "open": close - 0.1,
+            "high": close + 1.0,
+            "low": close - 1.0,
+            "close": close,
+            "volume": [1_000.0 + day * 10.0 for day in range(len(index))],
+        }, index=index)
+
+    result = FactorResearchEngine().run(
+        frames=frames,
+        factor_id="momentum_20",
+        start_date=index[30],
+        end_date=index[-1],
+        groups=3,
+        holding_period=5,
+    )
+
+    assert "amihud_illiquidity" in result["factorCorrelation"]["factors"]
