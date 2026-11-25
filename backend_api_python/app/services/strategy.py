@@ -508,7 +508,7 @@ class StrategyService:
             client = create_client(resolved, market_type=str(resolved.get("market_type") or "swap"))
             data = client.get_account_summary() if hasattr(client, "get_account_summary") else {}
             if not isinstance(data, dict) or data.get("success") is False:
-                return {"success": False, "message": "strategyV2.connectionFailed", "data": data}
+                return {"success": False, "message": "strategyV2.connectionFailed", "data": None}
             return {"success": True, "message": "strategyV2.connectionOk", "data": data}
         except Exception as exc:
             logger.warning("Exchange connection test failed: %s", type(exc).__name__)

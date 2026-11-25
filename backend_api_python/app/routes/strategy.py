@@ -599,15 +599,15 @@ def get_strategy_workspace(source_id: int):
     try:
         asset_type = request.args.get("assetType") or request.args.get("asset_type")
         return _ok(get_strategy_ai_workspace(g.user_id, source_id, asset_type))
-    except LookupError as exc:
-        return _error(str(exc), 404)
-    except PermissionError as exc:
-        return _error(str(exc), 403)
+    except LookupError:
+        return _error("strategy_source_not_found", 404)
+    except PermissionError:
+        return _error("strategy_source_hidden", 403)
     except ValueError as exc:
         return _error(str(exc), 400)
     except Exception as exc:
-        logger.error("get strategy AI workspace failed: %s", exc, exc_info=True)
-        return _error(str(exc), 500)
+        logger.error("get strategy AI workspace failed: %s", type(exc).__name__)
+        return _error("internal_server_error", 500)
 
 
 @strategy_blp.route("/strategies/ai-workspace/<int:source_id>", methods=["DELETE"])
