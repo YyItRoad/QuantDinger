@@ -22,6 +22,57 @@ def strategy_shard(strategy_id: int, shard_count: int | None = None) -> int:
 
 
 class StrategyEventSubscriptionRepository:
+    def unready_strategy_ids(self) -> list[int]:
+        from app.services.strategy_command_repository import READY_RUNTIME_EXISTS_SQL
+
+        with get_db_connection() as db:
+            cur = db.cursor()
+            try:
+                cur.execute(
+                    f"""SELECT strategy.id FROM qd_strategies_trading AS strategy
+                       WHERE strategy.status = 'running'
+                         AND EXISTS (SELECT 1 FROM qd_strategy_event_subscriptions AS subscription
+                                     WHERE subscription.strategy_id = strategy.id)
+                         AND NOT {READY_RUNTIME_EXISTS_SQL}
+                         AND NOT EXISTS (
+                             SELECT 1 FROM qd_strategy_commands AS command
+                             WHERE command.strategy_id = strategy.id AND command.command_type = 'stop'
+                               AND command.status IN ('pending', 'processing'))
+                       ORDER BY strategy.id""",
+                )
+                return [int(row["id"]) for row in cur.fetchall()]
+            finally:
+                cur.close()
+
+    def active_bar_routes(self) -> list[dict[str, str]]:
+        """Return distinct bar routes still referenced by running strategies."""
+        with get_db_connection() as db:
+            cur = db.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT DISTINCT subscription.partition_key, subscription.timeframe
+                    FROM qd_strategy_event_subscriptions AS subscription
+                    JOIN qd_strategies_trading AS strategy
+                      ON strategy.id = subscription.strategy_id
+                    WHERE subscription.event_type = %s
+                      AND strategy.status = 'running'
+                    ORDER BY subscription.partition_key
+                    """,
+                    (MarketBarClosedV1.event_type,),
+                )
+                rows: list[dict[str, Any]] = cur.fetchall() or []
+            finally:
+                cur.close()
+        return [
+            {
+                "partition_key": str(row.get("partition_key") or ""),
+                "timeframe": str(row.get("timeframe") or ""),
+            }
+            for row in rows
+            if str(row.get("partition_key") or "").strip()
+        ]
+
     def replace_bar_streams(
         self,
         strategy_id: int,
@@ -142,7 +193,7 @@ class StrategyEventSubscriptionPlanner:
         from app.services.strategy_runtime.timeframes import (
             daily_equity_execution_policy,
         )
-        from app.services.strategy_v2 import compile_strategy_v2
+        from app.services.strategy_v2 import inspect_strategy_v2
         from app.services.strategy_v2.service import StrategyV2BacktestService
         from app.services.trading_executor import TradingExecutor, _json_object
 
@@ -150,7 +201,7 @@ class StrategyEventSubscriptionPlanner:
         if not strategy or str(strategy.get("status") or "").lower() != "running":
             return set()
         _source_version_id, code = TradingExecutor._load_source(strategy)
-        program = compile_strategy_v2(code)
+        program = inspect_strategy_v2(code)
         user_id = int(strategy.get("user_id") or 0)
         trading_config = _json_object(strategy.get("trading_config"))
         execution_mode = str(strategy.get("execution_mode") or "signal").lower()
@@ -192,7 +243,7 @@ class StrategyEventSubscriptionPlanner:
         eligible = bool(
             daily_policy is None
             and bot_type not in {"grid", "martingale", "layered_martingale"}
-            and not callable(program.namespace.get("on_price_tick"))
+            and not program.has_handler("on_price_tick")
             and supports_bar_close_events(frequency, candidates)
         )
         if not eligible:

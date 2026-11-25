@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -18,7 +19,7 @@ from app.services.grid.exchange_orders import (
 )
 from app.services.grid.fill_handler import record_grid_market_fill
 from app.services.grid.levels import GridCellSpec, generate_cells, generate_levels
-from app.services.grid.resting_orders_repo import GridRestingOrder, GridRestingOrderRepository
+from app.services.grid.resting_orders_repo import GridOrderLedgerUnavailable, GridRestingOrder, GridRestingOrderRepository
 from app.services.grid.runtime_state import load_grid_resting_state, persist_grid_resting_state
 from app.services.live_trading.grid_cells import GridCellRepository, GridCellState
 from app.services.live_trading.limit_price_safety import (
@@ -43,10 +44,12 @@ class GridEngine:
         exchange_config: Dict[str, Any],
         *,
         user_id: int = 1,
+        strategy_run_id: int = 0,
         create_client_fn: Callable[[], Any],
         enqueue_market: MarketSignalFn,
     ) -> None:
         self.strategy_id = int(strategy_id)
+        self.strategy_run_id = max(0, int(strategy_run_id or 0))
         self.user_id = int(user_id or 1)
         self.symbol = str(symbol or "")
         self.trading_config = trading_config if isinstance(trading_config, dict) else {}
@@ -62,9 +65,16 @@ class GridEngine:
         self._paused_entries = False
         self._runtime_params: Dict[str, Any] = {}
         gs = load_grid_resting_state(self.trading_config)
-        if gs.get("initial_market_done"):
+        try:
+            state_run_id = max(0, int(gs.get("strategy_run_id") or 0))
+        except (TypeError, ValueError):
+            state_run_id = 0
+        self._runtime_state_matches_run = (
+            self.strategy_run_id <= 0 or state_run_id == self.strategy_run_id
+        )
+        if self._runtime_state_matches_run and gs.get("initial_market_done"):
             self._initial_done = True
-        baseline = gs.get("initial_exchange_baseline")
+        baseline = gs.get("initial_exchange_baseline") if self._runtime_state_matches_run else None
         self._initial_exchange_baseline = (
             {
                 "long": max(0.0, float((baseline or {}).get("long") or 0.0)),
@@ -73,7 +83,7 @@ class GridEngine:
             if isinstance(baseline, dict)
             else {}
         )
-        seeded = gs.get("initial_seeded_cells")
+        seeded = gs.get("initial_seeded_cells") if self._runtime_state_matches_run else None
         self._initial_seeded_cells = {
             int(index)
             for index in (seeded if isinstance(seeded, list) else [])
@@ -232,6 +242,63 @@ class GridEngine:
         levels = generate_levels(lower, upper, self.cfg.grid_line_count, self.cfg.grid_mode)
         return levels, generate_cells(levels)
 
+    def validate_startup_order_sizes(self, client: Any) -> Tuple[bool, str]:
+        """Check the whole funded ladder without submitting or enlarging orders."""
+        from app.services.instrument_rules import get_instrument_rules_provider
+
+        exchange_id = str(self.exchange_config.get("exchange_id") or "")
+        rules = None
+        try:
+            if exchange_id:
+                rules = get_instrument_rules_provider().get_rules(
+                    self.symbol, exchange_id=exchange_id,
+                    market_type=self.cfg.market_type, client=client,
+                )
+        except Exception:
+            logger.warning("Grid startup rules unavailable sid=%s symbol=%s", self.strategy_id, self.symbol)
+            return False, f"reason=instrument_rules_unavailable symbol={self.symbol}"
+
+        _, cells = self._levels_and_cells()
+        funded_cells = 0
+        for cell in cells:
+            budget = self._grid_budget_usdt(cell.index)
+            if budget == 0:
+                continue
+            funded_cells += 1
+            # Check both boundaries: seed exits use their own cell budget, and
+            # a filled entry must still be tradable at the paired exit price.
+            for entry_price, exit_price in (
+                (cell.lower_price, cell.upper_price),
+                (cell.upper_price, cell.lower_price),
+            ):
+                quantity = self._qty_from_usdt(budget, entry_price)
+                normalized = quantity
+                for price in (entry_price, exit_price):
+                    limit_price = rules.normalize_price(price) if rules else price
+                    if not math.isfinite(normalized) or normalized <= 0 or limit_price <= 0:
+                        normalized = 0.0
+                        break
+                    normalized = normalize_grid_order_quantity(
+                        client, symbol=self.symbol, quantity=normalized,
+                        market_type=self.cfg.market_type, exchange_config=self.exchange_config,
+                        price=limit_price,
+                    )
+                if not math.isfinite(normalized) or normalized <= 0:
+                    detail = (
+                        f"reason=grid_order_size_untradable symbol={self.symbol} cell={cell.index} "
+                        f"budget={budget:.12g} price={entry_price:.12g} paired_price={exit_price:.12g} "
+                        f"requested_qty={quantity:.12g} normalized_qty={normalized:.12g}"
+                    )
+                    if rules:
+                        detail += (
+                            f" min_qty={rules.min_amount:.12g} qty_step={rules.amount_step:.12g} "
+                            f"min_notional={rules.min_notional:.12g}"
+                        )
+                    return False, detail
+        if not funded_cells:
+            return False, f"reason=grid_no_funded_cells symbol={self.symbol}"
+        return True, ""
+
     def bootstrap(self, current_price: float) -> Tuple[bool, str]:
         if current_price <= 0:
             return False, "invalid price"
@@ -326,9 +393,14 @@ class GridEngine:
                     SELECT 1 FROM qd_strategy_trades
                     WHERE strategy_id = %s
                       AND close_reason IN ('grid_initial_long', 'grid_initial_short')
+                      AND (%s <= 0 OR strategy_run_id = %s)
                     LIMIT 1
                     """,
-                    (int(self.strategy_id),),
+                    (
+                        int(self.strategy_id),
+                        int(self.strategy_run_id),
+                        int(self.strategy_run_id),
+                    ),
                 )
                 row = cur.fetchone()
                 cur.close()
@@ -430,10 +502,13 @@ class GridEngine:
         if not force and cached and now - float(cached[0]) <= 1.0:
             return bool(cached[1]), dict(cached[2])
 
-        try:
-            from app.services.live_trading.position_query import query_exchange_position_size
-            from app.services.pending_orders.entry_position_guard import evaluate_entry_position_guard
+        from app.services.live_trading.position_query import (
+            PositionSnapshotUnavailable,
+            query_exchange_position_size,
+        )
+        from app.services.pending_orders.entry_position_guard import evaluate_entry_position_guard
 
+        try:
             account_qty = query_exchange_position_size(
                 client=client,
                 symbol=self.symbol,
@@ -470,6 +545,19 @@ class GridEngine:
                     guard.log_message,
                 )
             return allowed, metadata
+        except PositionSnapshotUnavailable as exc:
+            error_key = f"snapshot:{side}"
+            if error_key not in self._ownership_check_errors:
+                append_strategy_log(
+                    self.strategy_id,
+                    "warning",
+                    f"Grid entry deferred because the exchange position snapshot is temporarily "
+                    f"unavailable: {self.symbol} {side}; {exc}",
+                )
+                self._ownership_check_errors.add(error_key)
+            metadata = {"reason": "position_ownership_snapshot_failed", "error": str(exc)}
+            self._entry_ownership_cache[side] = (now, False, metadata)
+            return False, metadata
         except Exception as exc:
             error_key = f"snapshot:{side}"
             if error_key not in self._ownership_check_errors:
@@ -489,6 +577,14 @@ class GridEngine:
         if isinstance(value, bool):
             return value
         return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+    @staticmethod
+    def _ownership_rejection_requires_exit_rebuild(metadata: Dict[str, Any]) -> bool:
+        """Return true only when a fresh snapshot proves existing exits may be oversized."""
+        return str(metadata.get("reason") or "") in {
+            "account_below_protected_allocation",
+            "account_below_strategy_allocation",
+        }
 
     def _binance_reserved_exit_quantity(self, client: Any, pos_side: str) -> Optional[float]:
         """Return quantity already reserved by Binance orders for this position leg."""
@@ -607,7 +703,7 @@ class GridEngine:
                         float(order.quantity or 0.0) - float(order.processed_fill_qty or 0.0),
                     )
             except Exception:
-                existing = 0.0
+                return 0.0
             budgets = [max(0.0, float(meta.get("db_size") or 0.0))]
             if "exchange_strategy_available" in meta:
                 budgets.append(max(0.0, float(meta.get("exchange_strategy_available") or 0.0)))
@@ -653,6 +749,7 @@ class GridEngine:
 
     def set_initial_exchange_baseline(self, *, long_size: float = 0.0, short_size: float = 0.0) -> None:
         """Freeze the pre-start account position so recovery only claims new delta."""
+        self.prepare_runtime_state()
         if self._initial_exchange_baseline:
             return
         self._initial_exchange_baseline = {
@@ -663,6 +760,21 @@ class GridEngine:
             self.strategy_id,
             {"initial_exchange_baseline": dict(self._initial_exchange_baseline)},
         )
+
+    def prepare_runtime_state(self) -> None:
+        """Reset run-scoped startup flags before a newly created strategy run starts."""
+        if self.strategy_run_id <= 0 or self._runtime_state_matches_run:
+            return
+        persist_grid_resting_state(
+            self.strategy_id,
+            {
+                "strategy_run_id": self.strategy_run_id,
+                "initial_market_done": False,
+                "initial_exchange_baseline": {},
+                "initial_seeded_cells": [],
+            },
+        )
+        self._runtime_state_matches_run = True
 
     def _initial_exchange_delta(self, pos_side: str) -> float:
         total = self._leg_position_qty(pos_side)
@@ -722,6 +834,19 @@ class GridEngine:
         px = float(avg or 0)
         if px <= 0:
             return False
+        pos_side = self._pos_side_for_signal(signal_type)
+        exchange_delta = self._initial_exchange_delta(pos_side)
+        recovery_tolerance = max(1e-12, float(filled) * 0.02)
+        if exchange_delta <= 0 or float(filled) > exchange_delta + recovery_tolerance:
+            logger.warning(
+                "grid initial recovery rejected sid=%s run=%s coid=%s filled=%s exchange_delta=%s",
+                self.strategy_id,
+                self.strategy_run_id,
+                coid,
+                filled,
+                exchange_delta,
+            )
+            return False
         from app.services.pending_orders.fee_reconciliation import (
             fee_breakdown_snapshot,
             fee_breakdown_to_quote,
@@ -755,6 +880,7 @@ class GridEngine:
             client_order_id=coid,
             exchange_id=str(self.exchange_config.get("exchange_id") or ""),
             user_id=self.user_id,
+            strategy_run_id=int(getattr(self, "strategy_run_id", 0) or 0),
             fee_status=str(
                 details.get("fee_status")
                 or ("actual" if fees else "pending")
@@ -819,7 +945,8 @@ class GridEngine:
             if quantity <= 0 or opened_signal not in {"open_long", "open_short"}:
                 continue
             leg = "long" if close_signal == "close_long" else "short"
-            client_order_id = f"grb{self.strategy_id}{leg}"[:32]
+            run_segment = f"r{self.strategy_run_id}" if self.strategy_run_id > 0 else ""
+            client_order_id = f"grb{self.strategy_id}{run_segment}{leg}"[:32]
             execution = execute_grid_market_order(
                 client,
                 symbol=self.symbol,
@@ -861,6 +988,7 @@ class GridEngine:
                 exchange_order_id=execution.exchange_order_id,
                 exchange_id=str(self.exchange_config.get("exchange_id") or ""),
                 user_id=self.user_id,
+                strategy_run_id=self.strategy_run_id,
                 fee_status=execution.fee_status,
                 fee_source="rest",
             )
@@ -915,7 +1043,11 @@ class GridEngine:
             self._initial_done = True
             persist_grid_resting_state(self.strategy_id, {"initial_market_done": True})
             return True
-        coid = make_grid_initial_client_order_id(self.strategy_id, leg=pos_side)
+        coid = make_grid_initial_client_order_id(
+            self.strategy_id,
+            leg=pos_side,
+            strategy_run_id=int(getattr(self, "strategy_run_id", 0) or 0),
+        )
         try:
             recovered = self._probe_initial_client_order_fill(
                 self._create_client(), coid, signal_type, reason, current_price)
@@ -945,17 +1077,12 @@ class GridEngine:
         coid = str(client_order_id or "").strip() or make_grid_initial_client_order_id(
             self.strategy_id,
             leg=self._pos_side_for_signal(signal_type),
+            strategy_run_id=self.strategy_run_id,
         )
         pos_side = self._pos_side_for_signal(signal_type)
         exch_qty = self._initial_exchange_delta(pos_side)
         if exch_qty > 0:
             return False
-        try:
-            client = self._create_client()
-            if self._probe_initial_client_order_fill(client, coid, signal_type, reason, price):
-                return True
-        except Exception as e:
-            logger.debug("grid initial pre-place probe sid=%s: %s", self.strategy_id, e)
         try:
             client = self._create_client()
             if self.order_guard and not self.order_guard():
@@ -1001,6 +1128,7 @@ class GridEngine:
             client_order_id=str(getattr(execution, "client_order_id", coid) or coid),
             exchange_id=str(self.exchange_config.get("exchange_id") or ""),
             user_id=self.user_id,
+            strategy_run_id=self.strategy_run_id,
             fee_status=str(getattr(execution, "fee_status", "pending") or "pending"),
             fee_source="rest",
         )
@@ -1082,7 +1210,11 @@ class GridEngine:
                 usdt,
                 current_price,
                 "grid_initial_short",
-                client_order_id=make_grid_initial_client_order_id(self.strategy_id, leg="short"),
+                client_order_id=make_grid_initial_client_order_id(
+                    self.strategy_id,
+                    leg="short",
+                    strategy_run_id=self.strategy_run_id,
+                ),
             )
         elif direction == "neutral":
             half = usdt / 2.0
@@ -1091,14 +1223,22 @@ class GridEngine:
                 half,
                 current_price,
                 "grid_initial_long",
-                client_order_id=make_grid_initial_client_order_id(self.strategy_id, leg="long"),
+                client_order_id=make_grid_initial_client_order_id(
+                    self.strategy_id,
+                    leg="long",
+                    strategy_run_id=self.strategy_run_id,
+                ),
             )
             ok_short = self._sync_initial_market_leg(
                 "open_short",
                 half,
                 current_price,
                 "grid_initial_short",
-                client_order_id=make_grid_initial_client_order_id(self.strategy_id, leg="short"),
+                client_order_id=make_grid_initial_client_order_id(
+                    self.strategy_id,
+                    leg="short",
+                    strategy_run_id=self.strategy_run_id,
+                ),
             )
             ok = ok_long or ok_short
             if ok:
@@ -1113,7 +1253,11 @@ class GridEngine:
                 usdt,
                 current_price,
                 "grid_initial_long",
-                client_order_id=make_grid_initial_client_order_id(self.strategy_id, leg="long"),
+                client_order_id=make_grid_initial_client_order_id(
+                    self.strategy_id,
+                    leg="long",
+                    strategy_run_id=self.strategy_run_id,
+                ),
             )
         if ok:
             self._initial_done = True
@@ -1186,15 +1330,10 @@ class GridEngine:
                 if allowed:
                     continue
                 self.cancel_entry_orders_on_exchange(pos_side=pos_side)
-                if str(metadata.get("reason") or "") in {
-                    "account_below_protected_allocation",
-                    "account_below_strategy_allocation",
-                    "position_ownership_snapshot_failed",
-                    "position_ownership_credential_missing",
-                }:
-                    # A negative/unknown snapshot can make already-resting exits
-                    # exceed strategy-safe inventory.  Cancel them and let exit
-                    # coverage rebuild from the verified budget.
+                if self._ownership_rejection_requires_exit_rebuild(metadata):
+                    # A fresh negative snapshot can prove that already-resting
+                    # exits exceed strategy-safe inventory. Rebuild only from
+                    # that verified evidence. Unknown snapshots keep protection.
                     self.cancel_exit_orders_on_exchange(pos_side=pos_side)
         if entry_sides and not any(allowed_sides.values()):
             return 0
@@ -1386,10 +1525,7 @@ class GridEngine:
 
     def _open_orders_for_cell(self, cell_index: int, purpose: str) -> List[GridRestingOrder]:
         out: List[GridRestingOrder] = []
-        try:
-            orders = self._orders.list_open(self.strategy_id)
-        except Exception:
-            orders = []
+        orders = self._orders.list_open(self.strategy_id)
         for order in orders:
             if int(order.cell_index) != int(cell_index):
                 continue
@@ -1418,7 +1554,7 @@ class GridEngine:
         pos_side: str,
         quantity: float,
     ) -> bool:
-        """Keep one reduce-only exit equal to the cell's confirmed held size."""
+        """Cover confirmed inventory without withdrawing working exits to add size."""
         desired = self._normalize_grid_base_qty(float(quantity or 0.0), float(price or 0.0))
         if desired <= 0:
             return False
@@ -1431,11 +1567,35 @@ class GridEngine:
         if abs(covered - desired) <= tolerance:
             return True
 
-        # A later partial entry can increase the held quantity. Replace the
-        # prior child exit only after its cancellation and fills are reconciled.
+        if any(
+            item.status == "pending"
+            or float(item.filled_quantity or 0.0) > float(item.processed_fill_qty or 0.0) + tolerance
+            for item in open_orders
+        ):
+            return False
+
+        if covered < desired:
+            # Top up only the missing quantity. A failed snapshot or submit must
+            # not remove the protection already working at the exchange.
+            return self._place_limit(
+                cell, purpose, side, price, reduce_only=True, pos_side=pos_side,
+                quantity=desired - covered, coverage_target=desired,
+            )
+
+        # Shrinking coverage can affect other owners of a shared position. Only
+        # rebuild after a fresh position read, never on an unavailable snapshot.
         client = None
         try:
             client = self._create_client()
+            if client is None:
+                return False
+            from app.services.live_trading.position_query import query_exchange_position_size
+
+            query_exchange_position_size(
+                client=client, symbol=self.symbol, pos_side=pos_side,
+                market_type=self.cfg.market_type, exchange_config=self.exchange_config,
+                strict=True,
+            )
         except Exception as exc:
             logger.warning("grid exit coverage client sid=%s: %s", self.strategy_id, exc)
             return False
@@ -1452,6 +1612,7 @@ class GridEngine:
             reduce_only=True,
             pos_side=pos_side,
             quantity=desired,
+            coverage_target=desired,
         )
 
     def _cancel_confirmed_order(self, client: Any, order: GridRestingOrder) -> bool:
@@ -1537,7 +1698,7 @@ class GridEngine:
                 )
 
     def _dedupe_open_exit_orders(self, purpose: str) -> None:
-        """Cancel duplicate open exit limits on the same cell (recovery from prior stacking)."""
+        """Keep legitimate partial-fill top-ups; remove only fully redundant exits."""
         by_cell: Dict[int, List[GridRestingOrder]] = {}
         for order in self._orders.list_open(self.strategy_id):
             if str(order.purpose or "") != purpose:
@@ -1546,11 +1707,19 @@ class GridEngine:
         for cell_idx, orders in by_cell.items():
             if len(orders) <= 1:
                 continue
+            cell = self._cell_record(cell_idx)
+            held = float(getattr(cell, "leg_size", 0.0) or 0.0)
+            if held <= 0 or any(order.status == "pending" for order in orders):
+                continue
             orders.sort(
                 key=lambda o: float(o.quantity or 0) - float(o.processed_fill_qty or 0),
                 reverse=True,
             )
-            for extra in orders[1:]:
+            retained = 0.0
+            for extra in orders:
+                if retained < held - 1e-10:
+                    retained += max(0.0, float(extra.quantity or 0) - float(extra.processed_fill_qty or 0))
+                    continue
                 try:
                     client = self._create_client()
                 except Exception as e:
@@ -1758,6 +1927,7 @@ class GridEngine:
         reduce_only: bool,
         pos_side: str,
         quantity: Optional[float] = None,
+        coverage_target: Optional[float] = None,
     ) -> bool:
         if self._stop_requested:
             return False
@@ -1786,6 +1956,8 @@ class GridEngine:
         if qty <= 0:
             return False
         coid = make_grid_client_order_id(self.strategy_id, cell.index, purpose)
+        oid = None
+        acknowledged = False
         try:
             client = self._create_client()
             if not reduce_only:
@@ -1796,19 +1968,27 @@ class GridEngine:
                 )
                 if not allowed:
                     self.cancel_entry_orders_on_exchange(pos_side=pos_side)
-                    if str(metadata.get("reason") or "") in {
-                        "account_below_protected_allocation",
-                        "account_below_strategy_allocation",
-                        "position_ownership_snapshot_failed",
-                        "position_ownership_credential_missing",
-                    }:
+                    if self._ownership_rejection_requires_exit_rebuild(metadata):
                         self.cancel_exit_orders_on_exchange(pos_side=pos_side)
                     return False
-            else:
+            expected_orders = self._orders.list_open(self.strategy_id)
+            if any(order.status == "pending" for order in expected_orders):
+                return False
+            if not reduce_only and any(
+                order.cell_index == cell.index and order.purpose == purpose
+                for order in expected_orders
+            ):
+                return False
+            if reduce_only:
+                if coverage_target is not None:
+                    covered = sum(
+                        max(0.0, order.quantity - order.processed_fill_qty)
+                        for order in expected_orders
+                        if order.cell_index == cell.index and order.purpose == purpose
+                    )
+                    qty = min(qty, max(0.0, coverage_target - covered))
                 qty = self._resolve_grid_exit_quantity(
-                    client,
-                    pos_side=pos_side,
-                    requested_qty=qty,
+                    client, pos_side=pos_side, requested_qty=qty,
                 )
                 qty = self._normalize_grid_base_qty(qty, px)
                 if qty <= 0:
@@ -1821,22 +2001,6 @@ class GridEngine:
             )
             if self.order_guard and not self.order_guard():
                 return False
-            res = place_grid_limit_order(
-                client,
-                symbol=self.symbol,
-                side=side,
-                quantity=qty,
-                price=px,
-                market_type=self.cfg.market_type,
-                exchange_config=self.exchange_config,
-                pos_side=pos_side,
-                reduce_only=reduce_only,
-                client_order_id=coid,
-                leverage=self.cfg.leverage,
-                margin_mode=self.cfg.margin_mode,
-                post_only=post_only,
-            )
-            ex_oid = str(res.exchange_order_id or "")
             paired_cell = self._cell_record(cell.index) if reduce_only else None
             paired_extra = getattr(paired_cell, "extra", {}) or {}
             paired_ids = paired_extra.get("entry_grid_order_ids", []) if isinstance(paired_extra, dict) else []
@@ -1853,10 +2017,30 @@ class GridEngine:
                 quantity=qty,
                 quote_amount=usdt,
                 client_order_id=coid,
-                exchange_order_id=ex_oid,
-                status="open",
+                status="pending",
             )
-            oid = self._orders.insert(row)
+            oid = self._orders.reserve_pending(row, expected_orders)
+            if not oid:
+                return False
+            res = place_grid_limit_order(
+                client,
+                symbol=self.symbol,
+                side=side,
+                quantity=qty,
+                price=px,
+                market_type=self.cfg.market_type,
+                exchange_config=self.exchange_config,
+                pos_side=pos_side,
+                reduce_only=reduce_only,
+                client_order_id=coid,
+                leverage=self.cfg.leverage,
+                margin_mode=self.cfg.margin_mode,
+                post_only=post_only,
+            )
+            acknowledged = True
+            ex_oid = str(res.exchange_order_id or "")
+            if not ex_oid:
+                raise RuntimeError("Grid submission returned no exchange order ID; reconciliation required")
             if oid:
                 try:
                     from app.services.execution_streams.repository import ExecutionEventRepository
@@ -1880,30 +2064,6 @@ class GridEngine:
                     )
                 except Exception:
                     logger.debug("grid execution binding failed oid=%s", oid, exc_info=True)
-            if not oid:
-                if client and (ex_oid or coid):
-                    try:
-                        cancel_grid_order(
-                            client,
-                            symbol=self.symbol,
-                            market_type=self.cfg.market_type,
-                            exchange_order_id=ex_oid,
-                            client_order_id=coid,
-                            exchange_config=self.exchange_config,
-                        )
-                    except Exception as ce:
-                        logger.warning(
-                            "Grid insert failed; cancel orphan sid=%s cell=%s: %s",
-                            self.strategy_id,
-                            cell.index,
-                            ce,
-                        )
-                append_strategy_log(
-                    self.strategy_id,
-                    "error",
-                    f"Grid limit DB insert failed {purpose} cell={cell.index}",
-                )
-                return False
             st = GridCellState.BUY_OPEN if side == "buy" else GridCellState.SELL_OPEN
             if reduce_only and pos_side == "long":
                 st = GridCellState.LONG_HELD
@@ -1916,15 +2076,24 @@ class GridEngine:
             leg_entry_price = px
             if reduce_only:
                 leg_entry_price = self._cell_cost_basis(cell.index, purpose, fallback=px)
-            self._cells.update_state(
-                self.strategy_id,
-                self.symbol,
-                cell.index,
-                state=st,
-                leg_size=qty,
-                leg_entry_price=leg_entry_price,
-                working_order_id=ex_oid or coid,
-            )
+            from app.services.live_trading.fill_accounting import lock_strategy_fills
+            from app.utils.db import get_db_transaction
+
+            with get_db_transaction():
+                lock_strategy_fills(self.strategy_id)
+                if self._orders.acknowledge_submission(oid, ex_oid):
+                    current_cell = self._cell_record(cell.index) if reduce_only else None
+                    held = float(getattr(current_cell, "leg_size", 0.0) or 0.0)
+                    if not self._cells.update_state(
+                        self.strategy_id,
+                        self.symbol,
+                        cell.index,
+                        state=st,
+                        leg_size=max(qty, held) if reduce_only else qty,
+                        leg_entry_price=leg_entry_price,
+                        working_order_id=ex_oid or coid,
+                    ):
+                        raise RuntimeError("Grid cell acknowledgement could not be persisted")
             append_strategy_log(
                 self.strategy_id,
                 "info",
@@ -1937,6 +2106,31 @@ class GridEngine:
                 f"{e} [cell={cell.index} side={side} price={px:.12g} "
                 f"qty={qty:.12g} client_order_id={coid}]"
             )
+            if isinstance(e, GridOrderLedgerUnavailable):
+                logger.warning("Grid submission deferred: %s", context)
+                return False
+            if oid:
+                from app.services.live_trading.base import LiveTradingError
+                from app.services.pending_orders.error_classification import classify_exchange_order_error
+                from app.services.pending_orders.order_retry import is_safe_explicit_order_retry
+
+                category = classify_exchange_order_error(e)["category"]
+                definitive = isinstance(e, LiveTradingError) and category in {
+                    "credentials", "clock_skew", "rate_limit", "invalid_symbol",
+                    "price_band", "insufficient_funds", "order_size",
+                    "account_configuration", "risk_limit",
+                }
+                definitive = definitive or (
+                    isinstance(e, LiveTradingError) and is_safe_explicit_order_retry(e)
+                )
+                if acknowledged or not definitive:
+                    append_strategy_log(
+                        self.strategy_id, "warning",
+                        f"Grid submission unconfirmed; retaining intent for reconciliation, "
+                        f"no resubmit: {context}",
+                    )
+                    return False
+                self._orders.update_status(oid, status="cancelled")
             self._record_order_error(purpose, RuntimeError(context))
         return False
 
@@ -1973,6 +2167,7 @@ class GridEngine:
             exchange_fill_id=exchange_fill_id,
             execution_event_id=execution_event_id,
             fees_by_ccy=fees_by_ccy,
+            strategy_run_id=int(getattr(self, "strategy_run_id", 0) or 0),
         )
         _, cells = self._levels_and_cells()
         cell_map = {c.index: c for c in cells}

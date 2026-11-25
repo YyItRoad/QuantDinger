@@ -1,7 +1,6 @@
 """Bounded read-only venue queries for reported order P&L; no trade placement."""
 from collections import defaultdict
 import json
-import time
 from datetime import datetime
 
 from app.services.execution_streams.reported_pnl import fetch_order_report, json_object, number, same_quantity, websocket_report
@@ -9,7 +8,18 @@ from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
-_SUPPORTED = {"binance", "okx", "bybit", "bitget", "gate", "htx", "ibkr"}
+_CRYPTO_VENUES = {"binance", "okx", "bybit", "bitget", "gate", "htx"}
+_DERIVATIVE_MARKETS = {"swap", "future", "futures", "perp", "perpetual"}
+
+
+def supports_reported_order_pnl(exchange_id, market_type):
+    exchange = str(exchange_id or "").strip().lower()
+    market = str(market_type or "").strip().lower()
+    if exchange == "ibkr":
+        return market == "usstock"
+    if exchange == "tiger":
+        return market in {"usstock", "hkstock"}
+    return exchange in _CRYPTO_VENUES and market in _DERIVATIVE_MARKETS
 
 
 def order_key(row):
@@ -20,11 +30,15 @@ def order_key(row):
 def _claim(key, expected):
     with get_db_connection() as db:
         cur = db.cursor()
-        cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", ("reported-pnl:" + str(key[0]),))
+        cur.execute("SELECT pg_try_advisory_xact_lock(hashtext(%s)) AS acquired", ("reported-pnl:" + str(key[0]),))
+        if not (cur.fetchone() or {}).get("acquired"):
+            cur.close()
+            return False
         cur.execute("""SELECT COUNT(*) AS n FROM qd_exchange_order_pnl
             WHERE credential_id=%s AND checked_at > NOW() - INTERVAL '60 seconds'""", (key[0],))
         if int((cur.fetchone() or {}).get("n") or 0) >= 4:
             db.commit()
+            cur.close()
             return False
         cur.execute("""INSERT INTO qd_exchange_order_pnl
             (credential_id, exchange_id, market_type, symbol, exchange_order_id, expected_quantity)
@@ -52,17 +66,18 @@ def _save(key, report):
 def _load(keys):
     if not keys:
         return {}, {}
-    credentials, orders = list({k[0] for k in keys}), list({k[4] for k in keys})
+    placeholders = ','.join(['(%s,%s,%s,%s,%s)'] * len(keys))
+    params = tuple(value for key in keys for value in key)
+    predicate = f'(credential_id,exchange_id,market_type,symbol,exchange_order_id) IN ({placeholders})'
     with get_db_connection() as db:
         cur = db.cursor()
-        cur.execute("SELECT * FROM qd_exchange_order_pnl WHERE credential_id=ANY(%s) AND exchange_order_id=ANY(%s)",
-                    (credentials, orders))
+        cur.execute(f"SELECT * FROM qd_exchange_order_pnl WHERE {predicate}", params)
         reports = {order_key(row): dict(json_object(row.get("report")), checked_at=row["checked_at"].timestamp())
                    for row in cur.fetchall() or []}
-        cur.execute("""SELECT credential_id,exchange_id,market_type,symbol,exchange_order_id,exchange_fill_id,
+        cur.execute(f"""SELECT credential_id,exchange_id,market_type,symbol,exchange_order_id,exchange_fill_id,
             quantity,realized_pnl,raw_json FROM qd_execution_events
-            WHERE credential_id=ANY(%s) AND exchange_order_id=ANY(%s) AND (realized_pnl IS NOT NULL OR quantity > 0)
-            ORDER BY id""", (credentials, orders))
+            WHERE {predicate} AND (realized_pnl IS NOT NULL OR quantity > 0)
+            ORDER BY id""", params)
         events = defaultdict(list)
         for row in cur.fetchall() or []:
             events[order_key(row)].append(dict(row))
@@ -81,7 +96,7 @@ def _client(key, user_id, trading_config):
     return create_client(cfg, market_type=key[2]), cfg
 
 
-def enrich_reported_order_pnl(rows, *, user_id, trading_config):
+def enrich_reported_order_pnl(rows, *, user_id, trading_config, fetch_missing=True, claimed_keys=()):
     """Attach each order total once; never allocate reported P&L by local quantity."""
     from app.utils.trade_close_reason import is_exit_trade_type
     groups = defaultdict(list)
@@ -89,14 +104,17 @@ def enrich_reported_order_pnl(rows, *, user_id, trading_config):
         row["exchange_pnl"] = {"status": "not_applicable"}
         if row.get("exchange_order_id"):
             groups[order_key(row)].append(row)
-    eligible = {k: v for k, v in groups.items() if k[0] > 0 and k[1] in _SUPPORTED
-                and (k[2] in {"swap", "future", "futures", "perp", "perpetual"} or (k[1] == "ibkr" and k[2] == "usstock"))
+    eligible = {k: v for k, v in groups.items() if k[0] > 0 and supports_reported_order_pnl(k[1], k[2])
                 and all(is_exit_trade_type(str(r.get("type") or "")) for r in v)}
     for key, members in groups.items():
         if any(is_exit_trade_type(str(r.get("type") or "")) for r in members):
             for row in members:
-                if key[2] == "spot" and key[1] in _SUPPORTED - {"ibkr"}:
+                if key[0] <= 0:
+                    row["exchange_pnl"] = {"status": "unavailable"}
+                elif key[2] == "spot" and key[1] in _CRYPTO_VENUES:
                     row["exchange_pnl"] = {"status": "not_applicable_spot"}
+                elif not supports_reported_order_pnl(key[1], key[2]):
+                    row["exchange_pnl"] = {"status": "unsupported"}
                 else:
                     row["exchange_pnl"] = {"status": "pending" if key in eligible else "unavailable"}
     if not eligible:
@@ -111,13 +129,14 @@ def enrich_reported_order_pnl(rows, *, user_id, trading_config):
             continue
         expected = sum(quantities)
         report = reports.get(key) or {}
-        if (report.get("status") != "reported" or not same_quantity(report.get("quantity"), expected)
-                or time.time() - float(report.get("checked_at") or 0) > 300):
+        # Confirmed execution history does not expire; new fills require reconciliation.
+        if report.get("status") != "reported" or not same_quantity(report.get("quantity"), expected):
             report = {}
             quote = key[3].rsplit("/", 1)[-1].upper() if "/" in key[3] else ""
             if (key[1] in {"binance", "bybit"} and quote in {"USDT", "USDC"}) or key[1] == "ibkr":
                 report = websocket_report(events.get(key, []), expected=expected, exchange=key[1], currency=quote) or {}
-            if not report and key[1] != "ibkr" and attempts < 2 and _claim(key, expected):
+            if (not report and fetch_missing and key[1] != "ibkr" and attempts < 2
+                    and (key in claimed_keys or _claim(key, expected))):
                 attempts += 1
                 try:
                     client, cfg = _client(key, user_id, trading_config)

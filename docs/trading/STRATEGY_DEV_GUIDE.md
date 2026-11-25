@@ -158,6 +158,8 @@ A valid response contains <code>valid: true</code> and the manifest. Verify the 
 
 The parser also normalizes selected aliases, such as <code>600519.XSHG</code> to <code>CNStock:600519.SH</code> and <code>BTCUSDT</code> to <code>BTC/USDT</code>.
 
+Broker-listed securities use <code>Market:Symbol</code> as their canonical strategy identity. Do not append a broker or listing venue such as <code>@NASDAQ</code>, <code>@NYSE</code>, <code>@HKEX</code>, or <code>@spot</code> to <code>USStock</code>, <code>HKStock</code>, <code>CNStock</code>, <code>Forex</code>, <code>Futures</code>, or <code>MOEX</code> identifiers. The runtime keeps broker and listing metadata separately for execution. Only exchange-routed <code>Crypto</code> identities carry an <code>@venue:market_type</code> suffix.
+
 Production strategies should use the full market prefix. Crypto defaults to spot when no market type is present. Only swap instruments can permit contract leverage. Parsing a market name does not by itself guarantee data coverage or live-trading support; see the live venue matrix in Section 18.
 
 ### Exchange-routed equity products: preserve the trading instrument
@@ -314,6 +316,8 @@ Multi-timeframe runtime rules:
 - <code>set_warmup(n)</code> requests an appropriate lookback for every subscribed timeframe. The source must still guard the length of every returned DataFrame.
 - The requested backtest window must satisfy every timeframe's provider limit. An instrument missing any required timeframe is not run with a partial bundle.
 - Provider history limits still apply independently. Intraday feeds often retain less history than daily or weekly feeds, so a <code>5m + 1w</code> design may need a shorter backtest range even though both subscriptions are valid. Crypto venues, stock feeds, and forex feeds may expose different historical depths.
+- Crypto history includes the pre-start warm-up window and is fetched in endpoint-sized pages. A per-request candle cap is not the total backtest limit. Bitget historical requests use the V3 history endpoint with at most 100 candles and a 90-day query range per page.
+- Pagination cannot extend a venue's retained history. HTX spot exposes only its recent 2,000 candles through this adapter, while HTX USDT swaps use inclusive <code>from</code>/<code>to</code> historical pages. Incomplete history is rejected instead of being replaced with a recent page or another venue for an explicitly exchange-scoped instrument.
 - Manifest <code>primaryFrequency</code> remains the first declaration for compatibility. Scheduling, execution, and performance annualization use <code>drivingFrequency</code>.
 - <code>data.history(..., frequency="4h")</code>, <code>data.current(..., frequency="4h")</code>, <code>indicator(..., frequency="4h")</code>, and <code>factor(..., frequency="4h")</code> also accept an explicit timeframe. <code>data[symbol]</code> uses the driving timeframe.
 
@@ -389,6 +393,9 @@ Live sessions process each closed bar once and preserve <code>g</code> state whi
 - Real-time prices are reserved for stop loss, take profit, trailing protection, and equity risk. They must not make an unfinished candle look complete or revise a confirmed strategy signal.
 - Multi-timeframe strategies apply the completed-bar rule separately to every timeframe. A lower-timeframe advance never exposes a still-forming four-hour or daily bar.
 - The runtime filters unfinished candles centrally. Strategy source must not drop the final row, guess closure from local wall-clock time, or write a live price into OHLC; those workarounds break parity across backtests, restart replay, and live execution.
+- Candle boundaries follow the selected venue, including its daily timezone and weekly anchor. A close event wakes the runtime; it does not prove that the provider has published the final candle. The runtime checks the latest required candle for every subscribed timeframe, respects explicit provider confirmation, and retries missing data without advancing signal progress. Normal quotes alone do not clear a candle-data fault.
+- US and Hong Kong equities use exchange sessions, holidays, early closes, daylight saving time, and the Hong Kong lunch break. Daily and weekly bars retain the 15-minute post-close data allowance. Aggregated bars must contain all expected constituent bars in their session; they must not bridge a missing bar or use five daily rows as a calendar week. Exchange-listed stock perpetuals and tokenized equities use their venue candle calendar, not the underlying stock-market session calendar.
+- Recovery does not backfill historical real orders. Confirmed-bar deduplication remains in effect, and old cached candle data is not reused across candle-contract revisions.
 - A future tick-driven strategy product needs a separate API, replay model, and contract. Do not simulate it inside ordinary Strategy API V2 source.
 
 ---
@@ -408,7 +415,11 @@ Common context fields:
 | <code>context.portfolio.positions</code> | current position map |
 | <code>context.data</code> | data view |
 
+In live Strategy API V2 execution, `total_value` uses the deployment's lifetime strategy ledger, including recorded trading costs, funding, broker activities and unrealized P&L. A new runtime run does not reset equity to `starting_cash`. Percentage targets and opening-budget checks use current equity, not the shared exchange account balance. See [strategy equity and shared accounts](LIVE_TRADING_SAFETY.md#strategy-equity-and-shared-accounts) for the accounting boundary.
+
 Use <code>data.current(symbol, field, frequency="1h")</code> for a current visible value, <code>data.history(symbols, count, fields, frequency="4h")</code> for a selected timeframe, and <code>data[symbol]</code> for the driving timeframe's current visible DataFrame.
+
+Use <code>is_trade()</code> to filter scheduled callbacks. It returns <code>True</code> when the current event timestamp exists in at least one subscribed data frame and <code>False</code> otherwise. It answers “does this event have tradable data?”, not whether an exchange is open, an account may submit orders, or a product is suspended; live eligibility is still validated by deployment and execution layers.
 
 Persist state across callbacks on <code>g</code>:
 
@@ -491,7 +502,21 @@ scores = get_factors(symbols, ["momentum_20", "volatility_20"])
 
 TA-Lib 0.8.1 functions use the explicit <code>talib:</code> namespace in generated code, the factor library, and factor research. This keeps platform-native factors stable when both libraries expose the same name. Multi-output functions expose an <code>output</code> parameter in factor calls; <code>indicator</code> returns all output columns. The 0.8.1 catalog contains 201 functions, including the 40 additions such as <code>SUPERTREND</code>, <code>KDJ</code>, <code>HMA</code>, <code>VWAP</code>, <code>DONCHIAN</code>, and <code>PERCENTRANK</code>.
 
-Fundamentals:
+### Custom formula factors
+
+The **Factor library → New factor** dialog exposes the authoring contract and three runnable examples. This is a restricted expression language, not Python/Pine source. Write one expression (at most 2,000 characters / 120 AST nodes), for example:
+
+```text
+momentum(period=lookback) / max(realized_volatility(period=vol_window), floor)
+```
+
+Default parameters: `{"lookback":20,"vol_window":20,"floor":0.0001}`. Defaults are finite numbers or booleans with identifier names. Raw OHLCV names are current-bar scalars, not series; history is available through registered factor calls. Use named arguments, not `momentum(20)`. Library calls use `factor("talib:RSI", timeperiod=14)` or `factor("qlib:alpha158:IMAX20")`, without a symbol inside the formula. The result must be one finite scalar; booleans become 0/1. Math helpers are `abs`, `min`, `max`, `log`, `log1p`, `sqrt`, and `clip`. Imports, assignment, loops, attributes, indexing, I/O and nested custom-factor dependencies are forbidden.
+
+Validation checks structure, dependencies, parameter declarations and minimum history, not actual market data or profitability. Saved private factors are listed for portfolio/cross-sectional strategies; use the catalog's **Copy call** action for their owner-scoped `custom:<id>` invocation. Runtime compatibility does not guarantee data availability. VWAP and other extra fields must exist in the supplied frame; no OHLCV estimate is substituted. TA-Lib ACOS/ASIN require inputs in [-1, 1]. Invalid latest TA-Lib or raw custom-factor values fail instead of silently reusing an older valid result.
+
+Qlib IMAX/IMIN are the one-based positions measured from the oldest bar of the window (first tied extreme wins), not bars since the extreme. IMXD is their difference. RSQR is undefined for flat/near-flat prices, matching Qlib's standard-deviation tolerance. Research and backtests using the earlier reversed-position or flat-price results should be rerun after upgrading; existing saved results are not rewritten.
+
+### Fundamental data
 
 ~~~python
 fundamentals = get_fundamentals(
@@ -580,6 +605,24 @@ Common order options:
 | <code>execution_algo</code> | <code>market</code>, <code>limit</code>, or <code>maker_then_market</code> |
 | <code>maker_wait_sec</code> | maker wait before market fallback |
 | <code>maker_offset_bps</code> | maker-price offset in basis points |
+| <code>protection</code> | protection mapping containing the stop, take-profit, trailing, and time fields below |
+| <code>stop_loss_pct</code> | fixed stop-loss decimal ratio from position cost |
+| <code>stop_loss_price</code> | fixed absolute stop-loss price |
+| <code>take_profit_pct</code> | fixed take-profit decimal ratio from position cost |
+| <code>take_profit_price</code> | fixed absolute take-profit price |
+| <code>trailing_stop_pct</code> | trailing distance from the subsequent position peak/trough |
+| <code>trailing_stop_points</code> | absolute-point trailing distance from the subsequent peak/trough |
+| <code>trailing_activation_pct</code> | profit threshold from position cost that activates trailing |
+| <code>trailing_activation_points</code> | absolute favorable-point move that activates trailing |
+| <code>exit_fraction</code> | one-shot fraction of the current position leg to exit, in <code>(0, 1]</code> |
+| <code>stop_loss_exit_fraction</code> | optional stop-loss-specific exit fraction |
+| <code>take_profit_exit_fraction</code> | optional take-profit-specific exit fraction |
+| <code>trailing_exit_fraction</code> | optional trailing-stop-specific exit fraction |
+| <code>time_limit_exit_fraction</code> | optional time-limit-specific exit fraction |
+| <code>time_limit_seconds</code> | maximum holding time in seconds |
+| <code>trailing_rebase_on_scale_in</code> | whether a same-side scale-in resets trailing state and the holding clock; defaults to <code>True</code> |
+
+<code>type</code> and <code>price</code> are compatibility aliases for <code>order_type</code> and the limit-order <code>limit_price</code>, respectively. New strategies should use the canonical names. The compiler and runtime reject keywords outside this table instead of silently ignoring them.
 
 Example with a stable client reference:
 
@@ -617,7 +660,7 @@ In live execution, an active same-leg request suppresses duplicate requests unti
 
 ## 13. Stop, take-profit, trailing, and time protection
 
-Attach protection to an entry:
+Protection arguments are accepted by all five order helpers, but should be declared on an entry or same-side scale-in. The most direct form uses inline order keywords:
 
 ~~~python
 order_target_percent(
@@ -632,6 +675,38 @@ order_target_percent(
 )
 ~~~
 
+Protection V2 also supports fixed prices, point trailing, and a one-shot partial exit:
+
+~~~python
+order_target_percent(
+    g.symbol,
+    0.8,
+    reason="absolute_protected_entry",
+    stop_loss_price=96.0,
+    take_profit_price=112.0,
+    trailing_stop_points=2.5,
+    trailing_activation_points=4.0,
+    exit_fraction=0.5,
+    stop_loss_exit_fraction=1.0,
+)
+~~~
+
+A literal mapping is also supported. Inline fields on the same call override matching values in that mapping:
+
+~~~python
+order_target_percent(
+    g.symbol,
+    0.8,
+    reason="breakout_long_entry",
+    protection={
+        "stop_loss_pct": 0.03,
+        "take_profit_pct": 0.08,
+    },
+    trailing_stop_pct=0.025,
+    trailing_activation_pct=0.02,
+)
+~~~
+
 Or set defaults inside an executable handler/scheduled callback before later entries (do not call this in <code>initialize</code>; manifest discovery does not retain runtime protection state):
 
 ~~~python
@@ -641,13 +716,62 @@ set_default_protection(
 )
 ~~~
 
-Percentage fields are ratios: <code>0.03</code> means 3%. Values are clamped to safe ranges, and negatives become zero.
+<code>set_default_protection</code> applies to later orders that have no effective per-order protection; per-order protection takes precedence. Call <code>set_default_protection()</code> to clear the defaults. If a Crypto swap strategy requests protection, put effective protection directly on every opening leg. AI validation does not treat defaults alone as proof that each swap entry leg is protected.
+
+Parameter contract:
+
+| Parameter | Unit and range | Behavior |
+| --- | --- | --- |
+| <code>stop_loss_pct</code> | decimal ratio, <code>0..1</code> | long trigger is cost × <code>(1-pct)</code>; short trigger is cost × <code>(1+pct)</code> |
+| <code>stop_loss_price</code> | positive absolute price | must be below entry for a long and above entry for a short |
+| <code>take_profit_pct</code> | decimal ratio, <code>0..5</code> | long trigger is cost × <code>(1+pct)</code>; short trigger is cost × <code>(1-pct)</code> |
+| <code>take_profit_price</code> | positive absolute price | must be above entry for a long and below entry for a short |
+| <code>trailing_stop_pct</code> | decimal ratio, <code>0..1</code> | after activation, follows the highest price for longs and the lowest price for shorts |
+| <code>trailing_stop_points</code> | non-negative absolute points | after activation, trails the favorable extreme by this price distance |
+| <code>trailing_activation_pct</code> | decimal ratio, <code>0..5</code> | favorable move from cost required to activate trailing; activation without a trailing distance creates no protection |
+| <code>trailing_activation_points</code> | non-negative absolute points | favorable absolute move from entry required to activate trailing |
+| <code>exit_fraction</code> | decimal fraction, <code>(0, 1]</code> | exits this fraction of the current leg once; <code>1</code> is a full exit |
+| <code>stop_loss_exit_fraction</code> | decimal fraction, <code>(0, 1]</code> | optional stop-loss override; otherwise inherits <code>exit_fraction</code> |
+| <code>take_profit_exit_fraction</code> | decimal fraction, <code>(0, 1]</code> | optional take-profit override; otherwise inherits <code>exit_fraction</code> |
+| <code>trailing_exit_fraction</code> | decimal fraction, <code>(0, 1]</code> | optional trailing-stop override; otherwise inherits <code>exit_fraction</code> |
+| <code>time_limit_exit_fraction</code> | decimal fraction, <code>(0, 1]</code> | optional time-limit override; otherwise inherits <code>exit_fraction</code> |
+| <code>time_limit_seconds</code> | non-negative integer seconds | exits after the holding limit; <code>0</code> disables it |
+| <code>trailing_rebase_on_scale_in</code> | boolean, default <code>True</code> | <code>True</code> resets trailing extrema, activation, and the holding clock on a same-side scale-in; <code>False</code> preserves an active trail and the original clock |
+
+All pct values are decimal ratios: <code>0.03</code> means 3%, not 0.03% or 3. A value of <code>0</code> disables that rule. The runtime clamps negative and oversized values to the ranges above, but source and AI-generated strategies should provide valid values rather than rely on correction.
+
+Names must be exact. Strategy API V2 accepts <code>stop_loss_price</code> and <code>take_profit_price</code>; it does not accept the ambiguous aliases <code>stop_loss</code>, <code>take_profit</code>, or <code>stop_price</code>. Absolute-price and point fields take precedence over their percentage counterparts when both are present. A directionally invalid absolute price is ignored; provide a valid percentage fallback if the entry price is not known when the order is created.
+
+A partial trigger is deliberately one-shot. After its order is filled to the requested remaining position, that trigger is disarmed so repeated price ticks cannot repeatedly reduce the leg; other configured protection reasons remain active. Re-arm the fired trigger explicitly on a later entry or same-side position update. In live mode the pending target quantity and trigger reason are stored in the session snapshot, so a restart does not duplicate the partial exit.
+
+A trigger-specific exit fraction of <code>0</code> inherits <code>exit_fraction</code>; the shared fraction itself must be greater than zero. Invalid or non-finite fractions are rejected, not converted into full exits.
+
+Live partial exits track their client order reference and starting position across restarts. When venue lot-size rounding changes the executable quantity, the runtime waits for a terminal filled order and the corresponding position-ledger update before releasing the pending leg. Rejected or cancelled orders can retry the original remaining-position target; they do not apply the exit fraction again to the reduced position. A full-exit target still requires the position to become flat.
+
+Partial exits and point-based trailing remain runtime-owned. They require the strategy worker and a fresh price feed; they do not continue at the exchange during a service outage. The native-order adapter omits these rules rather than changing their quantity or trailing semantics. Independently configured full-exit stop-loss/take-profit rules remain eligible for native protection where supported; stock brackets remain opt-in. Native and runtime rules use the same absolute-price precedence. Deferred backtest protection orders retain their original remaining-position target, with one attempt per position per bar and one reported trigger event.
+
+<code># @param stop_loss_pct ...</code> only declares a run-panel parameter; it does not enable a stop automatically. A handler must read it and pass it to the entry order:
+
+~~~python
+def handle_data(context, data):
+    stop_loss_pct = float(context.params.get("stop_loss_pct", 0.03))
+    if should_enter:
+        order_target_percent(
+            g.symbol,
+            0.5,
+            reason="protected_entry",
+            stop_loss_pct=stop_loss_pct,
+        )
+~~~
+
+Fixed stop/take-profit protection, trailing protection, and signal exits are distinct mechanisms. Only effective order fields or runtime defaults create protection state; a parameter declaration, comment, or ordinary exit condition does not prove that fixed protection is attached. After a protection exit, <code>consume_last_exit_reason(symbol)</code> returns and clears <code>stop_loss</code>, <code>take_profit</code>, <code>trailing_stop</code>, or <code>time_limit</code>.
 
 Backtest behavior:
 
 - A gap through a protection threshold fills at the available bar open.
 - An intrabar touch fills at the trigger price.
 - If several protections trigger in one bar, conservative mode prioritizes stop-loss, trailing stop, time limit, then take-profit.
+- A partial protection uses the same trigger and gap rules, closes only <code>exit_fraction</code> of the current leg, and then disarms.
 
 Live execution checks the same protection semantics on an independent price clock instead of waiting for the next strategy bar. Protection state can be persisted and restored after a session restart.
 
@@ -953,7 +1077,7 @@ Mixed-market live deployment is unsupported. Other markets cannot be forced thro
 | <code>advanced</code> | records <code>account position - strategy position</code> after explicit confirmation | strategy inventory may coexist with that floor; any later unknown delta pauses entries/adds again |
 
 - Drift pauses same-side opens/adds only. The first state transition logs account, strategy, protected, and unknown quantities; an unchanged blocked state does not spam duplicate logs.
-- Grid strategies run the same ownership check on every resting-order sync. Drift cancels unfilled entry orders on that leg. If the account is below its protected allocation or the protection ledger cannot be verified, potentially oversized exits are also cancelled and rebuilt from strategy inventory, existing exits, and the protected floor.
+- Grid strategies run the same ownership check on every resting-order sync. Drift or an unavailable ownership snapshot cancels unfilled entry orders on that leg. Confirmed exit, stop-loss, take-profit, and reduce-only orders remain in place while account truth is unavailable. Potentially oversized exits are cancelled and rebuilt only when a fresh snapshot proves that the account is below its strategy or protected allocation.
 - Closes/reductions remain available but are capped by the strategy ledger, actual exchange inventory, and protected baseline. They can never cross protected manual inventory, and are not a tool for absorbing an unknown delta.
 - The Ownership & Repair page exposes <code>protect_manual</code> (record the current delta and enable advanced mode), <code>strict_mode</code> (clear the floor and return to strict mode), and <code>recheck</code> (refresh and reconcile). These actions update ownership records only and never trade automatically.
 - Advanced coexistence is QuantDinger ledger isolation, not physical venue isolation. Spot inventory still shares the account balance; same-side derivatives still share venue entry price, margin, and liquidation risk.
@@ -969,7 +1093,42 @@ Use signal mode first to validate notifications, signal frequency, and state res
 
 ## 19. Sandbox and common failures
 
-Strategy source runs in a safe execution environment. File, network, database, process, dynamic execution, reflection, and unsafe imports are prohibited. Do not use <code>eval</code>, <code>exec</code>, <code>compile</code>, <code>open</code>, dunder bypasses, or external state.
+Strategy source runs in a safe execution environment. File, network, database, process, dynamic execution, reflection, and unsafe imports are prohibited.
+
+Manifest discovery and runtime callbacks use separate credential-free processes. A backtest receives an immutable market-data snapshot and exits when the run completes. A live deployment owns one persistent process for its callbacks and serializable strategy state. These processes receive market frames, strategy parameters, risk settings, and order-status snapshots only; they do not receive database handles, exchange credentials, application secrets, or an order-submission client. Callback results cross the boundary as validated order intents, and the trusted trading worker remains responsible for account checks, reconciliation, fencing, and exchange submission.
+
+On Linux, the runtime process also applies fail-closed filesystem and syscall restrictions before loading strategy handlers. If the kernel boundary cannot be activated, the strategy does not run. Callback timeouts terminate the isolated process rather than leaving untrusted code in the API, backtest, evaluator, or trading process.
+
+The execution stages are deliberately separate:
+
+| Stage | Process lifetime | Data admitted to the process | Result returned to the trusted host |
+| --- | --- | --- | --- |
+| Manifest discovery | one disposable process per source inspection | source text and fixed discovery helpers | instruments, subscriptions, schedules, handler names, and metadata |
+| Backtest | one disposable process per run | validated source, serialized market frames, parameters, execution assumptions, and instrument rules | report data, fills, logs, and serializable state |
+| Live callbacks | one persistent process per running deployment | incremental market frames, parameters, risk settings, strategy-owned positions, and order-status snapshots | validated order intents, logs, and serializable state |
+
+The sandbox is not an order gateway. It cannot open an exchange session, query the database, decrypt a credential, or submit an order. The trading worker independently applies ownership, balance, instrument, account-mode, reconciliation, risk, lease, and fencing checks before an intent can reach an exchange.
+
+Only serializable strategy state is durable. Use <code>g</code> and <code>PERSIST_RUNTIME_STATE</code> for state that must survive a restart. Open files, sockets, threads, database objects, imported process state, and objects that cannot cross the JSON transport boundary are unsupported. A sandbox timeout, protocol failure, or kernel-isolation failure is an execution failure; QuantDinger does not fall back to running the callback in a trusted application process.
+
+The official deployment defaults are:
+
+| Setting | Default | Purpose |
+| --- | ---: | --- |
+| <code>STRATEGY_RUNTIME_SANDBOX_TIMEOUT_SECONDS</code> | <code>120</code> | complete live sandbox request timeout, bounded to 2–300 seconds |
+| <code>STRATEGY_RUNTIME_SANDBOX_MEMORY_MB</code> | <code>2048</code> | live callback-process address-space limit |
+| <code>STRATEGY_BACKTEST_SANDBOX_TIMEOUT_SECONDS</code> | <code>900</code> | complete isolated backtest timeout |
+| <code>STRATEGY_BACKTEST_SANDBOX_MEMORY_MB</code> | <code>4096</code> | isolated backtest address-space limit |
+
+The live request budget covers frame decoding, runtime preparation, all callbacks invoked by that request, and response generation. Market-data fetching happens in the trusted host before the request. The budget is not a per-symbol or per-handler allowance. The retired <code>STRATEGY_SCRIPT_CALLBACK_TIMEOUT_SEC</code> setting is ignored. Missing, empty, non-numeric, or non-finite values use the 120-second default. Distributed evaluation and startup waits allow at least this budget plus 30 seconds, so their outer deadline cannot cut short the sandbox request.
+
+A timeout or terminated sandbox stops the deployment with the original failure and operation name. The owner does not retry a dead process or replay a partially completed callback. Restart requires a new session and the usual state and position reconciliation. Increasing the budget does not disable isolation or the deadline; measure large-universe strategies on the deployment host before adjusting it.
+
+Untrusted strategy execution is supported through the official Linux-based deployment. The runtime currently requires a supported <code>x86_64</code> or <code>aarch64</code> Linux kernel with seccomp and Landlock. Native Windows or macOS development may still use the UI and supporting services, but it must not bypass a fail-closed sandbox error or enable in-process execution. Operators should not add secret environment variables, credential files, host sockets, or broad application-tree mounts to a sandbox process.
+
+The following exact identifiers are reserved sandbox capabilities and cannot be called, referenced as values, passed as callbacks, or reused as strategy variable/function names: <code>eval</code>, <code>exec</code>, <code>compile</code>, <code>__import__</code>, <code>getattr</code>, <code>setattr</code>, <code>delattr</code>, <code>globals</code>, <code>vars</code>, <code>dir</code>, <code>breakpoint</code>, <code>open</code>, <code>input</code>, <code>exit</code>, <code>quit</code>, <code>chr</code>, and <code>format</code>. Matching is by complete identifier, not by substring: descriptive names such as <code>open_long</code>, <code>open_position</code>, <code>format_signal</code>, and <code>dir_value</code> remain valid.
+
+Do not access dunder attributes or assemble dunder names dynamically through literals, variables, concatenation, multiplication, or f-strings. A name that resolves to a blocked dunder is rejected even when it is constructed indirectly.
 
 Allowed import roots are <code>numpy</code>, <code>pandas</code>, <code>math</code>, <code>json</code>, <code>datetime</code>, <code>time</code>, <code>collections</code>, <code>functools</code>, <code>itertools</code>, <code>statistics</code>, <code>decimal</code>, <code>fractions</code>, and <code>copy</code>. File/URL/database methods such as pandas <code>read_*</code>/<code>to_*</code>, NumPy load/save, pickle-like deserialization, and string-expression evaluators remain blocked even through an allowed module.
 

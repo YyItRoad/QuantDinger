@@ -11,7 +11,12 @@ from app.professional_report.snapshot import build_evidence_snapshot
 
 def _collector_payload(market="USStock"):
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    symbol = {"USStock": "AAPL", "HKStock": "00700", "Crypto": "ETH/USDT@swap"}[market]
+    symbol = {
+        "USStock": "AAPL",
+        "HKStock": "00700",
+        "CNStock": "600519",
+        "Crypto": "ETH/USDT@swap",
+    }[market]
     payload = {
         "market": market,
         "symbol": symbol,
@@ -33,7 +38,8 @@ def _collector_payload(market="USStock"):
         "news": [{"title": "Confirmed product update", "source": "wire", "published_at": now}],
         "_meta": {"success_items": ["price", "kline", "indicators"], "failed_items": [], "duration_ms": 12},
     }
-    if market in {"USStock", "HKStock"}:
+    if market in {"USStock", "HKStock", "CNStock"}:
+        currency = {"USStock": "USD", "HKStock": "HKD", "CNStock": "CNY"}[market]
         payload["fundamental"] = {
             "source": "test_fundamental",
             "market_cap": 1_000_000_000,
@@ -43,7 +49,7 @@ def _collector_payload(market="USStock"):
             "field_metadata": {
                 key: {"source": "test_fundamental", "as_of": now, "unit": unit}
                 for key, unit in {
-                    "market_cap": "USD" if market == "USStock" else "HKD",
+                    "market_cap": currency,
                     "revenue_growth": "percent",
                     "profit_margin": "percent",
                     "pe_ratio": "ratio",
@@ -51,6 +57,10 @@ def _collector_payload(market="USStock"):
             },
             "financial_statements": {"latest_quarter": {"period_end": now[:10]}},
             "identity": {"verified": True, "reported_symbol": symbol},
+        }
+        payload["company"] = {
+            "name": "Kweichow Moutai" if market == "CNStock" else symbol,
+            "industry": "Consumer Staples" if market == "CNStock" else "",
         }
     else:
         payload["crypto_instrument"] = {"venue": "binance", "market_type": "perpetual"}
@@ -93,7 +103,7 @@ def _analysis(payload, evidence_claims=None):
     }
 
 
-@pytest.mark.parametrize("market", ["USStock", "HKStock", "Crypto"])
+@pytest.mark.parametrize("market", ["USStock", "HKStock", "CNStock", "Crypto"])
 def test_professional_builder_produces_valid_contract_for_supported_markets(market):
     payload = _collector_payload(market)
     snapshot = build_evidence_snapshot(payload)
@@ -109,6 +119,147 @@ def test_professional_builder_produces_valid_contract_for_supported_markets(mark
     assert "\u00e2\u20ac\u201d" not in report["executive_summary"]
     assert "\ufffd" not in report["executive_summary"]
     assert report["data_quality"]["coverage_ratio"] == 1
+    assert report["price_chart"]["bars"][0]["close"] == 100
+    assert report["price_chart"]["support"] == 95
+    assert report["price_chart"]["resistance"] == 110
+
+
+def test_cn_stock_report_uses_cn_identity_workflow_and_market_features():
+    payload = _collector_payload("CNStock")
+    report = build_professional_report(payload, _analysis(payload))
+
+    assert report["contract_validation"]["valid"] is True
+    assert report["instrument"]["quote_currency"] == "CNY"
+    assert report["instrument"]["timezone"] == "Asia/Shanghai"
+    assert report["market_features"]["market"] == "CNStock"
+    assert report["research_intelligence"]["workflow_id"] == "cn_equity_deep_dive_v1"
+    dimension = next(item for item in report["dimensions"] if item["key"] == "market_specific")
+    assert "A股特有证据" in dimension["narrative"]
+    assert report["provider_options"]["community"]
+
+
+def test_cn_readiness_recognizes_company_and_exposes_uncollected_capabilities():
+    payload = _collector_payload("CNStock")
+    report = build_professional_report(payload, _analysis(payload))
+    research = report["research_intelligence"]
+    assert "company_profile" in research["available_capabilities"]
+    assert research["missing_required_capabilities"] == []
+    assert research["readiness_posture"] == "conditional"
+    missing = {"company_news", "exchange_disclosures", "margin_financing", "cn_macro"}
+    assert missing <= set(research["missing_optional_capabilities"])
+    assert missing <= set(report["market_features"]["missing_capabilities"])
+    assert "company.name" in report["data_quality"]["required_metrics"]
+
+
+def test_cn_quote_and_candles_alone_cannot_claim_full_core_coverage():
+    payload = _collector_payload("CNStock")
+    payload.update(fundamental={}, company={}, indicators={})
+    report = build_professional_report(payload, _analysis(payload))
+    assert report["data_quality"]["coverage_ratio"] == 0.25
+    assert report["data_quality"]["directional_conclusion_allowed"] is False
+    assert report["decision_profile"]["decision"] == "HOLD"
+    assert report["research_intelligence"]["readiness_posture"] == "insufficient"
+
+
+@pytest.mark.parametrize("relevance,available", [("background", False), ("direct", True), ("material", True)])
+def test_cn_news_capability_requires_issuer_relevance(relevance, available):
+    payload = _collector_payload("CNStock")
+    payload["news"][0]["asset_relevance"] = relevance
+    report = build_professional_report(payload, _analysis(payload))
+    assert ("company_news" in report["research_intelligence"]["available_capabilities"]) is available
+    assert bool(report["market_features"]["market_specific"]["company_news"]) is available
+
+
+def test_cn_profile_missing_is_not_silently_assumed_from_market_identity():
+    payload = _collector_payload("CNStock")
+    payload["company"] = {}
+    report = build_professional_report(payload, _analysis(payload))
+    assert "company_profile" in report["research_intelligence"]["missing_required_capabilities"]
+    assert "company.name" in report["data_quality"]["missing_metrics"]
+
+
+def test_chinese_report_localizes_scenarios_and_monitoring_items():
+    payload = _collector_payload("CNStock")
+    report = build_professional_report(payload, _analysis(payload))
+    assert report["scenarios"][0]["trigger"] == "价格走势与支持证据共同确认乐观情景。"
+    assert report["research_intelligence"]["research_brief"]["watch_items"][0]["text"] == report["scenarios"][0]["trigger"]
+    analysis = _analysis(payload)
+    analysis["language"] = "en-US"
+    english = build_professional_report(payload, analysis)
+    assert english["scenarios"][0]["trigger"] == "Price and evidence confirm the upside thesis."
+
+
+@pytest.mark.parametrize(
+    ("market", "symbol", "enrichment", "expected_dimension"),
+    [
+        (
+            "Forex",
+            "EURUSD",
+            {
+                "forex_drivers": {
+                    "base_currency": "EUR",
+                    "quote_currency": "USD",
+                    "policy_rates": {
+                        "EUR": {"value_pct": 2.0, "series_id": "ECBDFR"},
+                        "USD": {"value_pct": 4.5, "series_id": "FEDFUNDS"},
+                    },
+                    "policy_rate_differential_pct": -2.5,
+                    "source": "fred",
+                }
+            },
+            "fx_relative_value",
+        ),
+        (
+            "Futures",
+            "GC",
+            {
+                "futures_curve": {
+                    "contracts": [{"contract": "GCZ26.CMX", "price": 2700}],
+                    "curve_state": "contango",
+                    "scope": "nearby_expiry_settlement_proxy",
+                    "source": "yahoo_finance",
+                },
+                "futures_positioning": {
+                    "participant_group": "money_manager",
+                    "net_contracts": 108000,
+                    "scope": "weekly_cftc_commitments_of_traders",
+                    "source": "cftc",
+                },
+            },
+            "futures_curve_positioning",
+        ),
+    ],
+)
+def test_professional_builder_supports_cross_asset_research(
+    market, symbol, enrichment, expected_dimension
+):
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    payload = {
+        "market": market,
+        "symbol": symbol,
+        "timeframe": "1D",
+        "collected_at": now,
+        "price": {"price": 100, "source": "test_quote"},
+        "kline": [
+            {"timestamp": now, "open": 98, "high": 101, "low": 97, "close": 99, "volume": 100},
+            {"timestamp": now, "open": 99, "high": 102, "low": 98, "close": 100, "volume": 110},
+        ],
+        "indicators": {
+            "rsi": {"value": 55},
+            "moving_averages": {"trend": "uptrend"},
+            "levels": {"support": 95, "resistance": 110},
+            "trading_levels": {"suggested_stop_loss": 95, "suggested_take_profit": 110},
+        },
+        "_meta": {"success_items": ["price", "kline", "indicators"], "failed_items": []},
+        **enrichment,
+    }
+    report = build_professional_report(payload, _analysis(payload))
+
+    assert report["contract_validation"]["valid"] is True
+    assert report["instrument"]["market"] == market
+    assert any(item["key"] == expected_dimension for item in report["dimensions"])
+    assert report["research_intelligence"]["workflow_id"]
+    assert report["research_intelligence"]["calculation_audit"]
 
 
 def test_missing_required_equity_data_blocks_directional_recommendation():
@@ -251,6 +402,33 @@ def test_macro_dimension_has_deterministic_narrative_and_evidence():
     assert "美元指数" in macro["narrative"]
     assert "不应单独作为买卖依据" in macro["narrative"]
     assert macro["evidence_refs"]
+    assert macro["narrative_code"]["facts"] == [
+        {"metric": "dxy", "value": "98.87", "unit": None},
+        {"metric": "risk_sentiment", "value": "71.00", "unit": None},
+    ]
+    assert macro["narrative_code"]["context"] == "hk_funding"
+
+
+def test_crypto_dimension_exposes_language_neutral_narrative_code():
+    payload = _collector_payload("Crypto")
+    payload["crypto_factors"]["signals"] = {
+        "volume_state": "expanding",
+        "derivatives_bias": "neutral",
+        "flow_bias": "bullish",
+        "squeeze_risk": "low",
+    }
+
+    report = build_professional_report(payload, _analysis(payload))
+    dimension = next(
+        item for item in report["dimensions"]
+        if item["key"] == "crypto_market_structure"
+    )
+
+    assert dimension["narrative_code"] == {
+        "volume_state": "expanding",
+        "bias": "bullish",
+        "crowding": "low",
+    }
 
 
 def test_macro_dimension_uses_market_specific_context():
@@ -447,6 +625,7 @@ def test_llm_contract_drops_unknown_and_ungrounded_claims():
 @pytest.mark.parametrize("market, marker", [
     ("USStock", "reported filings"),
     ("HKStock", "HKEX disclosures"),
+    ("CNStock", "mainland China A-shares"),
     ("Crypto", "spot from perpetual"),
 ])
 def test_prompt_is_market_specific_grounded_and_injection_resistant(market, marker):
@@ -458,3 +637,6 @@ def test_prompt_is_market_specific_grounded_and_injection_resistant(market, mark
     assert "Prediction Market" not in system + user
     assert "HIGHEST PRIORITY" not in system + user
     assert "ev_" in user
+    assert "Never describe current assets as cash or net cash" in system
+    assert "EV/EBIT requires enterprise value" in system
+    assert "do not mix enterprise values and equity values" in system

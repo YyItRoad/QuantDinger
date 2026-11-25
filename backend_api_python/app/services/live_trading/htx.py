@@ -22,6 +22,7 @@ from urllib.parse import urlencode, urlparse
 from app.services.live_trading.base import BaseRestClient, LiveOrderResult, LiveTradingError
 from app.services.live_trading import htx_v5
 from app.services.live_trading.symbols import to_htx_contract_code, to_htx_spot_symbol
+from app.services.pending_orders.error_classification import classify_exchange_order_error
 from app.utils.numeric_precision import floor_decimal_to_step
 
 logger = logging.getLogger(__name__)
@@ -555,6 +556,50 @@ class HtxClient(BaseRestClient):
         val = self._floor_to_int(contracts)
         return val if val > 0 else 0
 
+    def _normalize_price(self, *, symbol: str, price: float) -> Tuple[Decimal, Optional[int]]:
+        """Align a spot or swap price to the venue's published increment."""
+        value = self._to_dec(price)
+        if value <= 0:
+            return (Decimal("0"), None)
+
+        market_type = str(getattr(self, "market_type", "swap") or "swap").strip().lower()
+        metadata: Dict[str, Any] = {}
+        try:
+            metadata = (
+                self.get_spot_symbol_info(symbol=symbol)
+                if market_type == "spot"
+                else self.get_contract_info(symbol=symbol)
+            ) or {}
+        except Exception:
+            metadata = {}
+
+        tick_size = self._to_dec(metadata.get("price_tick") or metadata.get("priceTick") or "0")
+        if tick_size <= 0 and market_type == "spot":
+            precision_value = (
+                metadata.get("price-precision")
+                or metadata.get("price_precision")
+                or metadata.get("pp")
+            )
+            try:
+                places = int(precision_value)
+            except (TypeError, ValueError):
+                places = -1
+            if 0 <= places <= 18:
+                tick_size = Decimal("1").scaleb(-places)
+
+        if tick_size > 0:
+            value = floor_decimal_to_step(value, tick_size)
+
+        price_precision = None
+        if tick_size > 0:
+            try:
+                exponent = tick_size.normalize().as_tuple().exponent
+                if isinstance(exponent, int):
+                    price_precision = min(max(0, -exponent), 18)
+            except Exception:
+                pass
+        return (value, price_precision)
+
     def set_leverage(self, *, symbol: str, leverage: float, margin_mode: str = "") -> bool:
         if self.market_type == "spot":
             return False
@@ -708,6 +753,15 @@ class HtxClient(BaseRestClient):
                     return self._place_swap_order_v1(req)
                 except LiveTradingError as e:
                     last_err = e
+                    category = str(
+                        classify_exchange_order_error(e).get("category") or ""
+                    )
+                    if category in {
+                        "transport",
+                        "rate_limit",
+                        "market_unavailable",
+                    }:
+                        raise
                     if htx_v5.is_multi_asset_v1_unavailable(str(e)):
                         skip_v1 = True
                         logger.info(
@@ -877,6 +931,9 @@ class HtxClient(BaseRestClient):
         sd = str(side or "").strip().lower()
         if sd not in ("buy", "sell"):
             raise LiveTradingError(f"Invalid side: {side}")
+        price_dec, _price_precision = self._normalize_price(symbol=symbol, price=px)
+        if price_dec <= 0:
+            raise LiveTradingError("Invalid price (below instrument tick)")
 
         if self.market_type == "spot":
             account_id = self._get_spot_account_id()
@@ -885,7 +942,7 @@ class HtxClient(BaseRestClient):
                 "symbol": to_htx_spot_symbol(symbol),
                 "type": f"{sd}-limit",
                 "amount": f"{qty:.12f}".rstrip("0").rstrip("."),
-                "price": f"{px:.12f}".rstrip("0").rstrip("."),
+                "price": format(price_dec, "f"),
                 "source": self.spot_source,
             }
             formatted_client_order_id = self._format_spot_client_order_id(client_order_id)
@@ -907,7 +964,7 @@ class HtxClient(BaseRestClient):
             volume=volume,
             side=sd,
             order_price_type="limit",
-            price=px,
+            price=float(price_dec),
             channel_code=self.broker_id or "",
             margin_mode=self._default_margin_mode(),
             reduce_only=reduce_only,

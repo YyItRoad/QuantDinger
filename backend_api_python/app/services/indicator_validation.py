@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from app.services.indicator_code_quality import analyze_indicator_code_quality
+from app.services.indicator_market_data import extract_indicator_data_requests
 from app.services.indicator_params import IndicatorParamsParser
 from app.utils.safe_exec import safe_exec_indicator_isolated
 
@@ -55,10 +56,23 @@ def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None
     hints = analyze_indicator_code_quality(raw)
     df = generate_mock_df()
     merged_params = merge_indicator_params(raw, user_params)
+    data_requests = extract_indicator_data_requests(raw)
+    mock_context = {
+        "version": 1,
+        "market": "Crypto",
+        "symbol": "BTC/USDT",
+        "timeframe": "4H",
+        "requests": [request.as_dict() for request in data_requests],
+        "series": {
+            request.timeframe: df.to_dict(orient="records")
+            for request in data_requests
+        },
+    }
     exec_result = safe_exec_indicator_isolated(
         code=raw,
         df=df,
         params=merged_params,
+        context=mock_context,
         timeout=20,
     )
     if not exec_result.get("success"):
@@ -95,10 +109,14 @@ def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None
             "signals_count": 0,
             "hints": hints,
         }
-    if "plots" not in output and "signals" not in output:
+    supported_output_keys = {
+        "plots", "signals", "layers", "drawings", "tables", "panels",
+        "bar_colors", "barColors", "background_colors", "backgroundColors", "backgrounds",
+    }
+    if not supported_output_keys.intersection(output):
         return {
             "success": False,
-            "msg": "'output' dict should contain 'plots' or 'signals' list.",
+            "msg": "'output' dict does not contain a supported chart output field.",
             "error_type": "InvalidOutputStructure",
             "details": None,
             "plots_count": 0,
@@ -108,13 +126,77 @@ def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None
 
     plots = output.get("plots", [])
     signals = output.get("signals", [])
+    layers = output.get("layers", output.get("drawings", []))
+    tables = output.get("tables", output.get("panels", []))
+    if not isinstance(plots, list):
+        return _validation_error("InvalidPlots", "Output 'plots' must be a list.", [], signals if isinstance(signals, list) else [], hints)
+    if not isinstance(signals, list):
+        return _validation_error("InvalidSignals", "Output 'signals' must be a list.", plots, [], hints)
+    if not isinstance(layers, list):
+        return _validation_error(
+            "InvalidLayers",
+            "Output 'layers' must be a list.",
+            plots,
+            signals,
+            hints,
+        )
     for plot in plots:
+        if not isinstance(plot, dict):
+            return _validation_error("InvalidPlot", "Every plot must be a dictionary.", plots, signals, hints)
         if "data" not in plot:
             return _validation_error("InvalidPlot", f"Plot '{plot.get('name')}' missing 'data' field.", plots, signals, hints)
         if len(plot["data"]) != len(df):
             return _validation_error(
                 "LengthMismatch",
                 f"Plot '{plot.get('name')}' data length ({len(plot['data'])}) does not match DataFrame length ({len(df)}).",
+                plots,
+                signals,
+                hints,
+            )
+
+    for field_name in ("bar_colors", "barColors", "background_colors", "backgroundColors", "backgrounds"):
+        if field_name not in output:
+            continue
+        values = output.get(field_name)
+        if not isinstance(values, list):
+            return _validation_error(
+                "InvalidStyleSeries",
+                f"Output '{field_name}' must be a list.",
+                plots,
+                signals,
+                hints,
+            )
+        if len(values) != len(df):
+            return _validation_error(
+                "LengthMismatch",
+                f"Output '{field_name}' length ({len(values)}) does not match DataFrame length ({len(df)}).",
+                plots,
+                signals,
+                hints,
+            )
+
+    if not isinstance(tables, list):
+        return _validation_error(
+            "InvalidTables",
+            "Output 'tables' must be a list.",
+            plots,
+            signals,
+            hints,
+        )
+    for table_index, table in enumerate(tables):
+        if not isinstance(table, dict):
+            return _validation_error(
+                "InvalidTable",
+                f"Table {table_index} must be a dictionary.",
+                plots,
+                signals,
+                hints,
+            )
+        rows = table.get("rows", table.get("data", []))
+        if not isinstance(rows, list):
+            return _validation_error(
+                "InvalidTable",
+                f"Table {table_index} rows must be a list.",
                 plots,
                 signals,
                 hints,
@@ -132,6 +214,28 @@ def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None
                 hints,
             )
 
+    for layer_index, layer in enumerate(layers):
+        if not isinstance(layer, dict):
+            return _validation_error(
+                "InvalidLayer",
+                f"Layer {layer_index} must be a dictionary.",
+                plots,
+                signals,
+                hints,
+            )
+        layer_type = str(layer.get("type") or "").strip().lower()
+        if layer_type not in {"zone", "box", "rect", "area"}:
+            continue
+        top = layer.get("top")
+        bottom = layer.get("bottom")
+        if not _is_finite_number(top) or not _is_finite_number(bottom):
+            return _validation_error(
+                "InvalidZoneLayer",
+                f"Zone layer {layer_index} requires finite numeric 'top' and 'bottom' bounds.",
+                plots,
+                signals,
+                hints,
+            )
     return {
         "success": True,
         "msg": "Verification passed. Indicator code rendered successfully.",
@@ -141,6 +245,15 @@ def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None
         "signals_count": len(signals),
         "hints": hints,
     }
+
+
+def _is_finite_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        return bool(np.isfinite(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return False
 
 
 def _validation_error(

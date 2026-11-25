@@ -8,6 +8,7 @@ from app.services.signal_notifier import SignalNotifier
 from app.services.user_service import get_user_service
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
+from app.utils.language import normalize_language
 
 logger = get_logger(__name__)
 
@@ -15,20 +16,7 @@ VALID_NOTIFICATION_CHANNELS = {"browser", "email", "telegram", "discord", "webho
 
 
 def ensure_chart_templates_column() -> None:
-    """Add qd_users.chart_templates when upgrading existing databases."""
-    try:
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                ALTER TABLE qd_users
-                ADD COLUMN IF NOT EXISTS chart_templates TEXT DEFAULT ''
-                """
-            )
-            db.commit()
-            cur.close()
-    except Exception as exc:
-        logger.warning("ensure chart_templates column skipped: %s", exc)
+    """Compatibility hook; canonical schema changes run in migrations."""
 
 
 def get_notification_settings(user_id: int) -> dict | None:
@@ -52,6 +40,7 @@ def update_notification_settings(user_id: int, data: dict[str, Any]) -> dict:
         channels = ["browser"]
 
     settings = {
+        "language": normalize_language(data.get("language")),
         "default_channels": channels,
         "telegram_bot_token": str(data.get("telegram_bot_token") or "").strip(),
         "telegram_chat_id": str(data.get("telegram_chat_id") or "").strip(),
@@ -75,6 +64,19 @@ def update_notification_settings(user_id: int, data: dict[str, Any]) -> dict:
     return settings
 
 
+def notification_targets_from_settings(settings: dict) -> dict:
+    return {
+        "telegram": (settings.get("telegram_chat_id") or "").strip(),
+        "telegram_bot_token": (settings.get("telegram_bot_token") or "").strip(),
+        "email": (settings.get("email") or "").strip(),
+        "phone": (settings.get("phone") or "").strip(),
+        "discord": (settings.get("discord_webhook") or "").strip(),
+        "webhook": (settings.get("webhook_url") or "").strip(),
+        "webhook_token": (settings.get("webhook_token") or "").strip(),
+        "webhook_signing_secret": (settings.get("webhook_signing_secret") or "").strip(),
+    }
+
+
 def send_test_notification(user_id: int, accept_language: str = "") -> tuple[bool, str, dict]:
     """Send a test notification using saved profile settings."""
     row = _fetch_user_settings_row(user_id)
@@ -86,18 +88,9 @@ def send_test_notification(user_id: int, accept_language: str = "") -> tuple[boo
     if not isinstance(channels, list) or not channels:
         channels = ["browser"]
 
-    notify_email = (settings.get("email") or "").strip() or (row.get("email") or "").strip()
-    targets = {
-        "telegram": (settings.get("telegram_chat_id") or "").strip(),
-        "telegram_bot_token": (settings.get("telegram_bot_token") or "").strip(),
-        "email": notify_email,
-        "phone": (settings.get("phone") or "").strip(),
-        "discord": (settings.get("discord_webhook") or "").strip(),
-        "webhook": (settings.get("webhook_url") or "").strip(),
-        "webhook_token": (settings.get("webhook_token") or "").strip(),
-        "webhook_signing_secret": (settings.get("webhook_signing_secret") or "").strip(),
-    }
-    language = "zh-CN" if "zh" in (accept_language or "").lower() else "en-US"
+    targets = notification_targets_from_settings(settings)
+    targets["email"] = targets["email"] or (row.get("email") or "").strip()
+    language = normalize_language(accept_language or settings.get("language"))
     results = SignalNotifier().send_profile_test_notifications(
         user_id=int(user_id),
         channels=channels,

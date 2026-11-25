@@ -10,7 +10,7 @@ through someone else's IBKR/TWS account.
 
 from flask import jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
-from app.utils.auth import login_required
+from app.utils.auth import login_required, trading_required
 
 from app.utils.logger import get_logger
 from app.utils.broker_session import BrokerSessionRegistry
@@ -19,6 +19,7 @@ from app.utils.local_brokers import (
     local_desktop_brokers_allowed,
 )
 from app.services.ibkr_trading import IBKRClient, IBKRConfig
+from app.utils.trading_venue_visibility import is_trading_venue_enabled
 
 logger = get_logger(__name__)
 
@@ -26,6 +27,12 @@ ibkr_blp = Blueprint('ibkr', __name__)
 
 # Per-user client cache keyed by (user_id, 'ibkr')
 _sessions = BrokerSessionRegistry('ibkr')
+
+
+@ibkr_blp.before_request
+def _require_ibkr_enabled():
+    if not is_trading_venue_enabled('ibkr'):
+        return jsonify({"success": False, "error": "brokerAccounts.tradingVenueDisabled"}), 403
 
 
 def _placeholder_status():
@@ -75,6 +82,7 @@ def get_status():
 
 @ibkr_blp.route('/connect', methods=['POST'])
 @login_required
+@trading_required
 def connect():
     """
     Connect to TWS / IB Gateway.
@@ -134,6 +142,7 @@ def connect():
 
 @ibkr_blp.route('/disconnect', methods=['POST'])
 @login_required
+@trading_required
 def disconnect():
     """Disconnect from IBKR."""
     try:
@@ -221,6 +230,7 @@ def get_orders():
 
 @ibkr_blp.route('/order', methods=['POST'])
 @login_required
+@trading_required
 def place_order():
     """
     Place an IBKR order.
@@ -304,6 +314,7 @@ def place_order():
 
 @ibkr_blp.route('/order/<int:order_id>', methods=['DELETE'])
 @login_required
+@trading_required
 def cancel_order(order_id: int):
     """Cancel an IBKR order by ID."""
     try:

@@ -17,6 +17,7 @@ from app.services.factors import (
     get_factor,
     get_factor_metadata,
 )
+from app.services.custom_factors import CustomFactorError, compute_custom_factor
 
 
 class FactorResearchEngine:
@@ -93,6 +94,8 @@ class FactorResearchEngine:
         neutralize_industry: bool = False,
         members: Sequence[Mapping[str, Any]] | None = None,
         annualization_periods: float = 252.0,
+        include_factor_correlation: bool = True,
+        custom_factor: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         requested_groups = max(2, min(10, int(groups or 5)))
         holding_period = max(1, int(holding_period or 5))
@@ -118,6 +121,7 @@ class FactorResearchEngine:
             close,
             normalized_factor_params,
             research_dates,
+            custom_factor=custom_factor,
         )
         entry = open_price.shift(-1)
         exit_price = open_price.shift(-(holding_period + 1))
@@ -250,7 +254,11 @@ class FactorResearchEngine:
         ic_mean = float(ic_series.mean())
         ic_std = float(ic_series.std(ddof=1)) if len(ic_series) > 1 else 0.0
         annualization = max(1.0, float(annualization_periods or 252.0))
-        icir = ic_mean / ic_std * math.sqrt(annualization / holding_period) if ic_std > 0 else 0.0
+        ic_periods_per_year = self._observed_periods_per_year(
+            [item["time"] for item in ic_rows],
+            fallback=annualization / holding_period,
+        )
+        icir = ic_mean / ic_std * math.sqrt(ic_periods_per_year) if ic_std > 0 else 0.0
         rolling = ic_series.rolling(20, min_periods=5).mean()
         for index, item in enumerate(ic_rows):
             item["rolling"] = None if pd.isna(rolling.iloc[index]) else float(rolling.iloc[index])
@@ -291,7 +299,7 @@ class FactorResearchEngine:
         )
 
         return {
-            "methodologyVersion": 2,
+            "methodologyVersion": 3,
             "factorId": factor_name,
             "factorParams": normalized_factor_params,
             "rankIc": ic_mean,
@@ -301,7 +309,10 @@ class FactorResearchEngine:
             "groupCurves": curves,
             "longShortCurve": long_short,
             "groupObservations": group_rows,
-            "monotonicity": sum(monotonicities) / len(monotonicities) if monotonicities else 0.0,
+            "monotonicity": (
+                sum(monotonicities) / len(monotonicities)
+                if monotonicities else None
+            ),
             "coverage": coverage,
             "missingRate": 1.0 - coverage,
             "averageTurnover": average_turnover,
@@ -312,13 +323,18 @@ class FactorResearchEngine:
             "effectiveGroups": effective_groups,
             "sampleDiagnostics": sample_diagnostics,
             "pointInTimeUniverseApplied": self._has_dated_membership(members or ()),
-            "factorCorrelation": self._factor_correlation(
-                prepared,
-                close,
-                membership,
-                research_dates,
-                factor_name,
-                normalized_factor_params,
+            "factorCorrelation": (
+                self._factor_correlation(
+                    prepared,
+                    close,
+                    membership,
+                    research_dates,
+                    factor_name,
+                    normalized_factor_params,
+                    custom_factor,
+                )
+                if include_factor_correlation
+                else {"factors": [], "matrix": [], "observations": []}
             ),
             "stability": {
                 "firstHalfIc": float(first_half.mean()) if not first_half.empty else 0.0,
@@ -335,6 +351,9 @@ class FactorResearchEngine:
                 "commission": commission,
                 "slippage": slippage,
                 "periodsPerYear": annualization,
+                "icPeriodsPerYear": ic_periods_per_year,
+                "longShortGrossExposure": 2.0,
+                "longShortCapitalConvention": "one_unit_per_leg",
                 "initialFormationExcludedFromAverageTurnover": True,
             },
         }
@@ -374,7 +393,30 @@ class FactorResearchEngine:
         close: pd.DataFrame,
         params: Mapping[str, Any] | None = None,
         timestamps: Sequence[pd.Timestamp] | None = None,
+        custom_factor: Mapping[str, Any] | None = None,
     ) -> pd.DataFrame:
+        if custom_factor is not None:
+            result = pd.DataFrame(index=close.index, columns=close.columns, dtype=float)
+            requested = close.index if timestamps is None else pd.Index(timestamps)
+            requested = requested.intersection(close.index, sort=False)
+            for timestamp in requested:
+                for symbol, frame in frames.items():
+                    if symbol not in result.columns or frame.empty or frame.index[0] > timestamp:
+                        continue
+                    try:
+                        result.at[timestamp, symbol] = compute_custom_factor(
+                            custom_factor,
+                            frame.loc[frame.index <= timestamp],
+                            params,
+                        )
+                    except CustomFactorError as exc:
+                        if exc.code not in {
+                            "factor.noData",
+                            "factor.missingFields",
+                            "factor.customComputeFailed",
+                        }:
+                            raise
+            return result
         if factor_id.startswith("qlib:"):
             return self._catalog_factor_panel(
                 frames,
@@ -564,6 +606,21 @@ class FactorResearchEngine:
         )
 
     @staticmethod
+    def _observed_periods_per_year(
+        timestamps: Sequence[Any],
+        *,
+        fallback: float,
+    ) -> float:
+        parsed = sorted(pd.Timestamp(item) for item in timestamps)
+        if len(parsed) < 2:
+            return max(1.0, float(fallback))
+        elapsed_years = (parsed[-1] - parsed[0]).total_seconds() / (365.25 * 86_400.0)
+        if elapsed_years <= 0:
+            return max(1.0, float(fallback))
+        observed = (len(parsed) - 1) / elapsed_years
+        return max(1.0, min(float(fallback), observed))
+
+    @staticmethod
     def _long_short_curve(
         long_values: list[dict[str, Any]],
         short_values: list[dict[str, Any]],
@@ -591,6 +648,7 @@ class FactorResearchEngine:
         research_dates: Sequence[pd.Timestamp],
         selected_factor: str,
         selected_params: Mapping[str, Any] | None = None,
+        custom_factor: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         names = list(dict.fromkeys((selected_factor, *self._CORRELATION_FACTORS)))
         panels: dict[str, pd.DataFrame] = {}
@@ -601,6 +659,7 @@ class FactorResearchEngine:
                 close,
                 selected_params if name == selected_factor else None,
                 research_dates,
+                custom_factor=custom_factor if name == selected_factor else None,
             )
             visible = panel.reindex(index=research_dates)
             if int(visible.notna().sum().sum()) >= 3:
@@ -609,10 +668,10 @@ class FactorResearchEngine:
         if not names:
             return {"factors": [], "matrix": [], "observations": []}
 
-        values: list[list[float]] = []
+        values: list[list[float | None]] = []
         observations: list[list[int]] = []
         for row_name in names:
-            value_row: list[float] = []
+            value_row: list[float | None] = []
             observation_row: list[int] = []
             for column_name in names:
                 correlations: list[float] = []
@@ -635,7 +694,10 @@ class FactorResearchEngine:
                     correlation = left_rank.corr(right_rank, method="pearson")
                     if not pd.isna(correlation):
                         correlations.append(float(correlation))
-                value_row.append(sum(correlations) / len(correlations) if correlations else 0.0)
+                value_row.append(
+                    sum(correlations) / len(correlations)
+                    if correlations else None
+                )
                 observation_row.append(len(correlations))
             values.append(value_row)
             observations.append(observation_row)

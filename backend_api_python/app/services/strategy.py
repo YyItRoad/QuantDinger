@@ -9,6 +9,12 @@ from typing import Any, Dict, List, Optional
 
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
+from app.utils.structured_redaction import (
+    contains_structured_secret,
+    preserve_masked_secrets,
+    redact_structured_secrets,
+    strip_structured_secrets,
+)
 
 
 logger = get_logger(__name__)
@@ -58,28 +64,11 @@ def get_strategy_service() -> "StrategyService":
     return _service
 
 
-_SECRET_KEYS = {
-    "api_key", "apikey", "secret_key", "secretkey", "secret", "passphrase",
-    "password", "private_key", "privatekey", "access_token", "accesstoken",
-    "refresh_token", "refreshtoken", "bot_token", "bottoken", "webhook_secret",
-    "webhooksecret", "signing_secret", "signingsecret", "client_secret", "clientsecret",
-    "spot_broker_id", "spotbrokerid", "futures_broker_id", "futuresbrokerid",
-    "broker_id", "brokerid", "broker_code", "brokercode", "channel_api_code",
-    "channelapicode", "channel_code", "channelcode", "bybit_referer", "broker_referer", "brokerreferer",
-    "gate_channel_id", "gatechannelid", "htx_spot_source", "htxspotsource",
-}
-
-
-def _secret_key(key: Any) -> bool:
-    return str(key or "").replace("-", "_").lower() in _SECRET_KEYS
-
-
-def _has_secret(value: Any) -> bool:
-    if isinstance(value, dict):
-        return any((_secret_key(key) and item not in (None, "", False)) or _has_secret(item) for key, item in value.items())
-    if isinstance(value, list):
-        return any(_has_secret(item) for item in value)
-    return False
+_STRATEGY_SECRET_KEYS = frozenset({
+    "spotbrokerid", "futuresbrokerid", "brokerid", "brokercode",
+    "channelapicode", "channelcode", "bybitreferer", "brokerreferer",
+    "gatechannelid", "htxspotsource",
+})
 
 
 def reject_inline_strategy_secrets(exchange_config: Any) -> None:
@@ -87,27 +76,16 @@ def reject_inline_strategy_secrets(exchange_config: Any) -> None:
         return
     if exchange_config.get("credential_id") or exchange_config.get("credentials_id"):
         return
-    if _has_secret(exchange_config):
+    if contains_structured_secret(exchange_config, extra_keys=_STRATEGY_SECRET_KEYS):
         raise ValueError("INLINE_STRATEGY_SECRETS_NOT_ALLOWED")
 
 
 def strip_strategy_secrets(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: strip_strategy_secrets(item) for key, item in value.items() if not _secret_key(key)}
-    if isinstance(value, list):
-        return [strip_strategy_secrets(item) for item in value]
-    return value
+    return strip_structured_secrets(value, extra_keys=_STRATEGY_SECRET_KEYS)
 
 
 def redact_strategy_secrets(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: ("***" if _secret_key(key) and item not in (None, "", False) else redact_strategy_secrets(item))
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [redact_strategy_secrets(item) for item in value]
-    return value
+    return redact_structured_secrets(value, extra_keys=_STRATEGY_SECRET_KEYS)
 
 
 def redact_strategy_row(row: Dict[str, Any] | None) -> Dict[str, Any] | None:
@@ -159,14 +137,20 @@ class StrategyService:
                 cur.close()
                 return str(current.get("status") or "") == status
             cur.execute(
-                f"SELECT id, user_id, status FROM qd_strategies_trading WHERE {where} FOR UPDATE",
+                f"""
+                SELECT id, user_id, status, desired_runtime_epoch
+                FROM qd_strategies_trading
+                WHERE {where}
+                FOR UPDATE
+                """,
                 tuple(lookup_values),
             )
             strategy = cur.fetchone() or {}
             if not strategy:
                 cur.close()
                 return False
-            if str(strategy.get("status") or "") != "running":
+            current_status = str(strategy.get("status") or "")
+            if current_status != "running":
                 owner_id = int(strategy["user_id"])
                 cur.execute(
                     "SELECT vip_expires_at, vip_plan, vip_is_lifetime FROM qd_users WHERE id=? FOR UPDATE",
@@ -199,9 +183,58 @@ class StrategyService:
                     db.rollback()
                     cur.close()
                     raise StrategyLimitExceeded(limit, running)
+            if current_status == "running":
+                cur.execute(
+                    "UPDATE qd_strategies_trading SET status=?, updated_at=NOW() WHERE id=?",
+                    (status, int(strategy_id)),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE qd_strategies_trading
+                    SET status=?,
+                        desired_runtime_epoch=GREATEST(COALESCE(desired_runtime_epoch, 0), 0) + 1,
+                        runtime_requested_at=NOW(),
+                        updated_at=NOW()
+                    WHERE id=?
+                    """,
+                    (status, int(strategy_id)),
+                )
+            changed = int(cur.rowcount or 0)
+            db.commit()
+            cur.close()
+        return changed > 0
+
+    def request_strategy_runtime_restart(
+        self,
+        strategy_id: int,
+        user_id: int | None = None,
+    ) -> bool:
+        """Advance the desired runtime generation without changing business state."""
+        with get_db_connection() as db:
+            cur = db.cursor()
+            where = "id = ?"
+            values: list[Any] = [int(strategy_id)]
+            if user_id is not None:
+                where += " AND user_id = ?"
+                values.append(int(user_id))
             cur.execute(
-                "UPDATE qd_strategies_trading SET status=?, updated_at=NOW() WHERE id=?",
-                (status, int(strategy_id)),
+                f"SELECT status FROM qd_strategies_trading WHERE {where} FOR UPDATE",
+                tuple(values),
+            )
+            strategy = cur.fetchone() or {}
+            if str(strategy.get("status") or "") != "running":
+                cur.close()
+                return False
+            cur.execute(
+                f"""
+                UPDATE qd_strategies_trading
+                SET desired_runtime_epoch=GREATEST(COALESCE(desired_runtime_epoch, 0), 0) + 1,
+                    runtime_requested_at=NOW(),
+                    updated_at=NOW()
+                WHERE {where}
+                """,
+                tuple(values),
             )
             changed = int(cur.rowcount or 0)
             db.commit()
@@ -242,6 +275,13 @@ class StrategyService:
         )
         changes = self._deployment_payload(payload)
         existing_risk = existing_config.get("deployment_risk") or {}
+        existing_notifications = existing.get("notification_config") or {}
+        existing_targets = existing_notifications.get("targets") or {}
+        if isinstance(changes.get("notificationTargets"), dict):
+            changes["notificationTargets"] = preserve_masked_secrets(
+                changes["notificationTargets"],
+                existing_targets,
+            )
         merged = {
             "sourceId": existing_config.get("script_source_id"),
             "name": existing.get("strategy_name"),
@@ -250,6 +290,8 @@ class StrategyService:
             "leverage": existing.get("leverage"),
             "leverageEnabled": float(existing.get("leverage") or 1) > 1,
             "params": existing_config.get("params") or {},
+            "notificationChannels": existing_notifications.get("channels") or [],
+            "notificationTargets": existing_targets,
             "directionMode": existing_config.get("direction_mode") or "",
             "positionSide": existing_config.get("position_side") or "",
             "accountRisk": existing_config.get("account_risk") or {},
@@ -465,9 +507,12 @@ class StrategyService:
             resolved = resolve_exchange_config(exchange_config, user_id=user_id)
             client = create_client(resolved, market_type=str(resolved.get("market_type") or "swap"))
             data = client.get_account_summary() if hasattr(client, "get_account_summary") else {}
+            if not isinstance(data, dict) or data.get("success") is False:
+                return {"success": False, "message": "strategyV2.connectionFailed", "data": None}
             return {"success": True, "message": "strategyV2.connectionOk", "data": data}
         except Exception as exc:
-            return {"success": False, "message": str(exc), "data": None}
+            logger.warning("Exchange connection test failed: %s", type(exc).__name__)
+            return {"success": False, "message": "strategyV2.connectionFailed", "data": None}
 
     def _batch_status(self, strategy_ids: List[int], status: str, user_id: int | None) -> Dict[str, Any]:
         success_ids: list[int] = []

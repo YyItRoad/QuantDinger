@@ -13,6 +13,15 @@ from app.services.pending_orders.error_classification import (
     is_exchange_price_band_error,
 )
 from app.services.pending_orders.sent_order_recovery import normalize_live_order_status
+from app.services.pending_orders.order_retry import submit_with_safe_retry
+from app.services.live_trading.ws_order_transport import WebSocketOrderUnknown
+
+
+def _is_unknown_submit_outcome(exc: LiveTradingError) -> bool:
+    """Keep sent-but-unacknowledged orders in reconciliation instead of retrying."""
+    return isinstance(exc, WebSocketOrderUnknown) or (
+        classify_exchange_order_error(exc).get("category") == "transport"
+    )
 
 
 @dataclass(frozen=True)
@@ -64,9 +73,12 @@ class MarketOrderExecutor:
 
     def execute(self, intent: OrderIntent) -> OrderExecutionResult:
         try:
-            result = self.adapter.place_market_order(intent)
+            result = submit_with_safe_retry(
+                lambda: self.adapter.place_market_order(intent),
+                retry_exception_types=(LiveTradingError,),
+            )
         except LiveTradingError as exc:
-            if classify_exchange_order_error(exc).get("category") == "transport":
+            if _is_unknown_submit_outcome(exc):
                 unknown = OrderExecutionResult.submit_unknown(exc)
                 return replace(
                     unknown,
@@ -119,11 +131,14 @@ class RestingLimitExecutor:
         if float(intent.price or 0.0) <= 0:
             return OrderExecutionResult.rejected("limit_price_required")
         try:
-            result = self.adapter.place_limit_order(intent)
+            result = submit_with_safe_retry(
+                lambda: self.adapter.place_limit_order(intent),
+                retry_exception_types=(LiveTradingError,),
+            )
             status = "filled" if float(result.filled or 0.0) >= float(intent.quantity or 0.0) > 0 else "submitted"
             return OrderExecutionResult.from_live_order(result, status=status)
         except LiveTradingError as exc:
-            if classify_exchange_order_error(exc).get("category") == "transport":
+            if _is_unknown_submit_outcome(exc):
                 unknown = OrderExecutionResult.submit_unknown(exc)
                 return replace(
                     unknown,
@@ -154,7 +169,10 @@ class LimitThenMarketExecutor:
         result = None
         fill = None
         try:
-            result = self.adapter.place_limit_order(intent)
+            result = submit_with_safe_retry(
+                lambda: self.adapter.place_limit_order(intent),
+                retry_exception_types=(LiveTradingError,),
+            )
             fill = self.adapter.wait_for_fill(
                 intent,
                 order_id=result.exchange_order_id,
@@ -250,7 +268,7 @@ class LimitThenMarketExecutor:
                 deferred = _limit_result(result, fill, pending=True)
                 return replace(deferred, raw={**deferred.raw, "reconciliation_error": str(exc)})
             if isinstance(exc, LiveTradingError):
-                if classify_exchange_order_error(exc).get("category") == "transport":
+                if _is_unknown_submit_outcome(exc):
                     unknown = OrderExecutionResult.submit_unknown(exc)
                     return replace(
                         unknown,

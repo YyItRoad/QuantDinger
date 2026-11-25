@@ -15,13 +15,17 @@ roles:
 | --- | --- | --- |
 | API | `gunicorn -c gunicorn_config.py run:app` | HTTP, authentication, validation, and durable command submission. |
 | Migration | `python -m app.commands.migrate` | Fail-fast schema application before services start. |
-| Trading | `python -m app.commands.trading_worker` | Strategy runtimes, pending orders, broker sessions, and reconciliation. |
+| Trading | `python -m app.commands.trading_worker` | Strategy ownership, pending orders, broker sessions, reconciliation, and trusted order submission. |
 | Scheduler | `python -m app.commands.scheduler` | Portfolio, deployment, payment, and signal schedules. |
-| Celery worker | `celery -A app.celery_app:celery_app worker` | Finite AI, backtest, experiment, report, and maintenance jobs. |
+| Celery worker | `celery -A app.celery_app:celery_app worker` | Finite AI, experiment, report, and maintenance jobs. |
+| Backtest worker | `celery -A app.celery_app:celery_app worker -Q backtest` | Backtest orchestration and result persistence. |
+| Strategy sandbox child | internal `python -I` worker | Untrusted indicator, discovery, backtest, and live callback execution without credentials or direct order authority. |
 | Celery beat | `celery -A app.celery_app:celery_app beat` | Periodic task dispatch. |
 
 HTTP processes must not start trading or scheduler threads. Celery must not own
-long-lived strategy loops or broker sessions. See
+long-lived strategy ownership or broker sessions. Strategy sandbox children do
+not own leases or durable state and must never receive application credentials,
+database connections, or exchange clients. See
 [Process roles and durable tasks](../docs/architecture/PROCESS_ROLES_AND_TASKS.md).
 
 ## Storage model
@@ -47,8 +51,13 @@ app/
   openapi/              Human API schemas, registration, and export metadata
   routes/               HTTP facades and compatibility routes
   services/             Domain workflows and integration orchestration
+    strategy_v2/
+      sandbox.py        Trusted supervisor and JSON boundary for callback sandboxes
   tasks/                Celery task definitions
-  utils/                Small infrastructure helpers
+  utils/                Small infrastructure helpers and sandbox workers
+    safe_exec.py        AST policy, restricted namespace, and worker launchers
+    safe_exec_worker.py One-shot indicator and contract-discovery sandbox
+    strategy_runtime_worker.py  Credential-free backtest/live callback sandbox
 migrations/             PostgreSQL schema and incremental migrations
 scripts/                Backend quality, export, and production checks
 tests/                  Unit, integration, contract, and release-gate tests
@@ -62,19 +71,23 @@ Read [Backend architecture](../docs/architecture/ARCHITECTURE.md) and
 Create the unified runtime environment file from the repository root:
 
 ```bash
-cp .env.example .env
+python scripts/bootstrap_env.py
 ```
 
-At minimum, replace these values before a shared or production deployment:
+The bootstrap command creates `.env`, generates missing PostgreSQL,
+session-signing, and credential-encryption secrets, and preserves existing
+values during upgrades. Before a shared or production deployment, set the
+administrator credentials and review optional service credentials:
 
 ```dotenv
-SECRET_KEY=<independent-random-value-at-least-10-bytes-32-plus-recommended>
-CREDENTIAL_ENCRYPTION_KEY=<independent-random-value-at-least-32-bytes>
 ADMIN_USER=<initial-admin-name>
 ADMIN_PASSWORD=<strong-initial-password>
+REDIS_PASSWORD=<optional-independent-random-value>
+CELERY_REDIS_PASSWORD=<optional-independent-random-value>
 ```
 
-Generate each secret independently:
+When running the backend directly on the host, also set `DATABASE_URL` to the
+host PostgreSQL endpoint. To generate an additional independent secret manually:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -125,7 +138,8 @@ Create an environment and install development dependencies:
 ```bash
 python -m venv .venv
 python -m pip install --upgrade pip
-python -m pip install -r requirements.lock -r requirements-dev.txt
+python -m pip install --no-deps -r requirements.lock
+python -m pip install -r requirements-dev.txt
 ```
 
 Apply migrations:

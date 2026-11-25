@@ -26,6 +26,8 @@ from flask import current_app, g, jsonify, make_response, request
 from app.config.redis_urls import cache_redis_url
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
+from app.utils.role_access import role_can_trade
+from app.utils.structured_redaction import is_sensitive_key
 
 logger = get_logger(__name__)
 
@@ -363,11 +365,13 @@ def _lookup_token(raw_token: str) -> Optional[dict]:
         cur = db.cursor()
         cur.execute(
             """
-            SELECT id, user_id, name, scopes, markets, instruments,
-                   paper_only, rate_limit_per_min, max_order_notional,
-                   max_daily_notional, status, expires_at
-            FROM qd_agent_tokens
-            WHERE token_hash = %s
+            SELECT t.id, t.user_id, t.name, t.scopes, t.markets, t.instruments,
+                   t.paper_only, t.rate_limit_per_min, t.max_order_notional,
+                   t.max_daily_notional, t.status, t.expires_at,
+                   u.role AS owner_role
+            FROM qd_agent_tokens t
+            JOIN qd_users u ON u.id = t.user_id
+            WHERE t.token_hash = %s
             """,
             (token_hash,),
         )
@@ -392,31 +396,7 @@ def _touch_token_last_used(token_id: int) -> None:
 
 # ─────────────────────────── audit ───────────────────────────
 
-_REDACT_KEYS = {
-    "password",
-    "secret",
-    "secretkey",
-    "secret_key",
-    "token",
-    "apikey",
-    "api_key",
-    "authorization",
-    "passphrase",
-    "privatekey",
-    "private_key",
-    "accesstoken",
-    "access_token",
-    "refreshtoken",
-    "refresh_token",
-    "bottoken",
-    "bot_token",
-    "webhooksecret",
-    "webhook_secret",
-    "signingsecret",
-    "signing_secret",
-    "clientsecret",
-    "client_secret",
-}
+_AUDIT_SECRET_KEYS = frozenset({"token"})
 
 
 def _redact(obj: Any, depth: int = 0) -> Any:
@@ -425,7 +405,7 @@ def _redact(obj: Any, depth: int = 0) -> Any:
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            if str(k).replace("-", "_").lower() in _REDACT_KEYS:
+            if is_sensitive_key(k, extra_keys=_AUDIT_SECRET_KEYS):
                 out[k] = "<redacted>"
             else:
                 out[k] = _redact(v, depth + 1)
@@ -649,6 +629,16 @@ def agent_required(scope: str = SCOPE_R, *, domain_idempotency: bool = False):
                 _audit(scope, 403, {"granted": sorted(scopes)}, int((time.time() - t0) * 1000))
                 return resp, code
 
+            if scope == SCOPE_T and not role_can_trade(row.get("owner_role")):
+                g.agent_token = row
+                resp, code = _err(
+                    403,
+                    "The token owner does not have trading access",
+                    status=403,
+                )
+                _audit(scope, 403, {"reason": "owner_role"}, int((time.time() - t0) * 1000))
+                return resp, code
+
             rate = _check_rate_limit(
                 row["id"],
                 row["user_id"],
@@ -722,7 +712,7 @@ def agent_required(scope: str = SCOPE_R, *, domain_idempotency: bool = False):
                 response = make_response(fn(*args, **kwargs))
             except Exception as exc:
                 logger.error(f"agent route raised: {exc}", exc_info=True)
-                response = make_response(*_err(500, "Internal server error", details=str(exc), status=500))
+                response = make_response(*_err(500, "Internal server error", status=500))
 
             status_code = int(response.status_code)
             payload_summary: Any = response.get_json(silent=True)

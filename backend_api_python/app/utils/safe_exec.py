@@ -16,6 +16,18 @@ from app.utils.thread_capacity import format_thread_capacity
 logger = get_logger(__name__)
 
 
+RESERVED_SANDBOX_IDENTIFIERS: frozenset[str] = frozenset({
+    'eval', 'exec', 'compile', '__import__',
+    'getattr', 'setattr', 'delattr',
+    'globals', 'vars', 'dir', 'breakpoint',
+    'open', 'input', 'exit', 'quit',
+    # Runtime string construction plus format-field traversal was the
+    # primitive used by the August 2026 sandbox escape. Keep both names
+    # reserved even if a caller accidentally injects broader builtins.
+    'chr', 'format',
+})
+
+
 _SENSITIVE_ENV_NAME = re.compile(
     r"(?:SECRET|PASSWORD|PASSWD|TOKEN|API_?KEY|PRIVATE_?KEY|"
     r"CREDENTIAL|DATABASE_URL|DB_URL|DSN|SMTP|OAUTH|STRIPE|WEBHOOK)",
@@ -112,10 +124,13 @@ _DANGEROUS_METHOD_NAMES: Set[str] = {
     'to_csv', 'to_excel', 'to_xml', 'to_html', 'to_json', 'to_pickle',
     'to_parquet', 'to_orc', 'to_feather', 'to_hdf', 'to_sql',
     'to_clipboard', 'to_gbq', 'to_stata', 'to_latex',
-    'tofile',
+    'tofile', 'dump', 'to_string', 'to_markdown', 'savefig', 'imsave',
     # numpy IO: arbitrary read / write / pickle deser.
     'save', 'savez', 'savez_compressed', 'savetxt',
-    'load', 'loadtxt', 'genfromtxt', 'fromfile', 'memmap', 'DataSource',
+    'load', 'loadtxt', 'genfromtxt', 'recfromcsv', 'recfromtxt',
+    'fromfile', 'fromregex', 'memmap', 'DataSource',
+    # pandas constructors that open local files directly.
+    'ExcelFile', 'ExcelWriter', 'HDFStore',
     # String-expression evaluators that execute attacker-controlled code.
     'eval', 'query',
     # Frame / introspection accessors should never be invoked.
@@ -141,10 +156,11 @@ _SAFE_MODULE_DUNDER_ATTRS: Set[str] = {'__name__', '__doc__', '__all__'}
 
 
 class _SafeModuleProxy(types.ModuleType):
-    """Read-only view of an allowed module without importer internals."""
+    """Restricted module view without blocked capabilities or importer internals."""
 
     def __getattribute__(self, name: str) -> Any:
-        if name in _BLOCKED_MODULE_ATTRS or (
+        # Enforce capability restrictions even if static validation misses a reference.
+        if name in _DANGEROUS_METHOD_NAMES or name in _BLOCKED_MODULE_ATTRS or (
             name.startswith('__')
             and name.endswith('__')
             and name not in _SAFE_MODULE_DUNDER_ATTRS
@@ -172,6 +188,8 @@ _DANGEROUS_FRAME_ATTRS: Set[str] = {
     'f_code', 'f_trace', 'f_lasti', 'f_lineno',
     'tb_frame', 'tb_next', 'tb_lasti', 'tb_lineno',
     'func_globals', 'func_code', 'func_closure', 'func_dict',
+    # ndarray.ctypes exposes a wrapper retaining the real ctypes module.
+    'ctypes', '_ctypes',
 }
 
 # Sub-modules of whitelisted packages that expose C/native escapes.
@@ -198,7 +216,7 @@ def _dangerous_pd_numpy_import(name: str) -> Optional[str]:
     if internal:
         return name
     for attr in attrs:
-        if attr in _DANGEROUS_SUBMODULE_ATTRS:
+        if attr in _DANGEROUS_SUBMODULE_ATTRS or attr in _DANGEROUS_METHOD_NAMES:
             return name
     return None
 
@@ -215,7 +233,7 @@ def _is_safe_import_name(name: str) -> Tuple[bool, Optional[str]]:
 
 
 def _wrap_imported_module(module: Any) -> Any:
-    """Copy a module into a proxy that hides loader/spec escape attributes."""
+    """Copy permitted exports without modifying the host's module namespace."""
     if isinstance(module, _SafeModuleProxy):
         return module
     if not isinstance(module, types.ModuleType):
@@ -223,7 +241,7 @@ def _wrap_imported_module(module: Any) -> Any:
 
     proxy = _SafeModuleProxy(getattr(module, '__name__', 'safe_module'))
     for name, value in module.__dict__.items():
-        if name in _BLOCKED_MODULE_ATTRS:
+        if name in _DANGEROUS_METHOD_NAMES or name in _BLOCKED_MODULE_ATTRS:
             continue
         if name.startswith('__') and name.endswith('__') and name not in _SAFE_MODULE_DUNDER_ATTRS:
             continue
@@ -555,7 +573,10 @@ def safe_exec_code(
 
     try:
         with timeout_context(timeout):
-            exec(code, exec_globals, exec_locals)
+            # Intentional execution point after validation and namespace
+            # sanitization, used by credential-free isolated workers only.
+            # codeql[py/code-injection]
+            exec(code, exec_globals, exec_locals)  # NOSONAR
 
         return {'success': True, 'error': None, 'result': None}
 
@@ -640,6 +661,7 @@ def _sandbox_transport_encode(value: Any, *, depth: int = 0) -> Any:
     """Encode trusted parent input without using pickle across the boundary."""
     import math
     from datetime import date, datetime
+    from decimal import Decimal
 
     import numpy as np
     import pandas as pd
@@ -652,6 +674,13 @@ def _sandbox_transport_encode(value: Any, *, depth: int = 0) -> Any:
         return value
     if isinstance(value, float):
         return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        return {
+            _SANDBOX_TRANSPORT_TYPE: "decimal",
+            "value": str(value),
+        }
     if isinstance(value, np.generic):
         return _sandbox_transport_encode(value.item(), depth=depth + 1)
     if isinstance(value, (datetime, date, pd.Timestamp)):
@@ -708,6 +737,8 @@ def _sandbox_transport_encode(value: Any, *, depth: int = 0) -> Any:
 
 def _sandbox_transport_decode(value: Any) -> Any:
     """Decode JSON-only child output; no attacker-controlled pickle is loaded."""
+    from decimal import Decimal
+
     import numpy as np
     import pandas as pd
 
@@ -718,6 +749,9 @@ def _sandbox_transport_decode(value: Any) -> Any:
     kind = value.get(_SANDBOX_TRANSPORT_TYPE)
     if kind == "datetime":
         return pd.Timestamp(value.get("value"))
+    if kind == "decimal":
+        decoded = Decimal(str(value.get("value")))
+        return decoded if decoded.is_finite() else None
     if kind == "dataframe":
         return pd.DataFrame(
             data=[
@@ -756,8 +790,11 @@ def safe_exec_isolated(
     """Execute serializable user code in a clean-environment subprocess.
 
     The worker is started with ``python -I``, receives no parent environment
-    variables, and communicates using JSON only.  This prevents both process
-    secret inheritance and attacker-controlled pickle deserialization.
+    variables, and communicates using JSON only. On Linux it then applies a
+    fail-closed Landlock filesystem policy and seccomp capability filter before
+    user code runs. This prevents process-secret inheritance, application-file
+    access, network access, cross-process control, and attacker-controlled
+    pickle deserialization.
 
     Args:
         code: Python code to execute
@@ -786,10 +823,10 @@ def safe_exec_isolated(
             "timeout": int(timeout),
             "max_memory_mb": int(max_memory_mb),
         }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError):
         return {
             'success': False,
-            'error': f"Sandbox input serialization failed: {exc}",
+            'error': "Sandbox input serialization failed",
             'result': None,
         }
 
@@ -817,7 +854,7 @@ def safe_exec_isolated(
                 start_new_session=True,
             )
             try:
-                stdout, stderr = proc.communicate(payload, timeout=max(1, timeout + 2))
+                stdout, _ = proc.communicate(payload, timeout=max(1, timeout + 2))
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.communicate()
@@ -828,10 +865,10 @@ def safe_exec_isolated(
             'error': f"Code execution timed out after {timeout} seconds; subprocess terminated",
             'result': None,
         }
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError):
         return {
             'success': False,
-            'error': f"Failed to start sandbox worker: {exc}",
+            'error': "Failed to start sandbox worker",
             'result': None,
         }
 
@@ -843,11 +880,10 @@ def safe_exec_isolated(
         }
     try:
         response = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        detail = _redact_sensitive_text(stderr.decode("utf-8", errors="replace"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
         return {
             'success': False,
-            'error': f"Sandbox worker returned an invalid response: {exc}; {detail[:500]}",
+            'error': "Sandbox worker returned an invalid response",
             'result': None,
         }
     if isinstance(response.get("result"), dict):
@@ -982,6 +1018,7 @@ def safe_exec_indicator_isolated(
     code: str,
     df: Any,
     params: Optional[Dict[str, Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
     *,
     timeout: int = 20,
     max_memory_mb: int = 1024,
@@ -992,6 +1029,7 @@ def safe_exec_indicator_isolated(
         input_data={
             "df": df.copy(),
             "params": dict(params or {}),
+            "indicator_context": dict(context or {}),
             "output": None,
         },
         timeout=timeout,
@@ -1001,18 +1039,79 @@ def safe_exec_indicator_isolated(
 
 # Static validation
 
-def _fold_string_constant(node: Any) -> Optional[str]:
+def _fold_string_constant(
+    node: Any,
+    constants: Optional[Dict[str, str]] = None,
+    resolving: Optional[Set[str]] = None,
+) -> Optional[str]:
     """Resolve compile-time string concatenation for sandbox static checks."""
     import ast
 
+    constants = constants or {}
+    resolving = resolving or set()
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.Name) and node.id in constants and node.id not in resolving:
+        return constants[node.id]
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        left = _fold_string_constant(node.left)
-        right = _fold_string_constant(node.right)
+        left = _fold_string_constant(node.left, constants, resolving)
+        right = _fold_string_constant(node.right, constants, resolving)
         if left is not None and right is not None:
             return left + right
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+        if isinstance(node.left, ast.Constant) and isinstance(node.left.value, str):
+            if isinstance(node.right, ast.Constant) and isinstance(node.right.value, int):
+                if 0 <= node.right.value <= 1000:
+                    return node.left.value * node.right.value
+        if isinstance(node.right, ast.Constant) and isinstance(node.right.value, str):
+            if isinstance(node.left, ast.Constant) and isinstance(node.left.value, int):
+                if 0 <= node.left.value <= 1000:
+                    return node.right.value * node.left.value
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for item in node.values:
+            if isinstance(item, ast.Constant) and isinstance(item.value, str):
+                parts.append(item.value)
+                continue
+            if isinstance(item, ast.FormattedValue):
+                folded = _fold_string_constant(item.value, constants, resolving)
+                if folded is not None and item.format_spec is None:
+                    parts.append(folded)
+                    continue
+            return None
+        return "".join(parts)
     return None
+
+
+def _collect_string_constants(tree: Any) -> Dict[str, str]:
+    """Conservatively resolve names assigned only one static string value."""
+    import ast
+
+    assignments: Dict[str, list[Any]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+            for name in names:
+                assignments.setdefault(name, []).append(node.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            assignments.setdefault(node.target.id, []).append(node.value)
+        elif isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            assignments.setdefault(node.target.id, []).append(node.value)
+
+    constants: Dict[str, str] = {}
+    for _ in range(len(assignments) + 1):
+        changed = False
+        for name, values in assignments.items():
+            folded_values = [_fold_string_constant(value, constants, {name}) for value in values]
+            if any(value is None for value in folded_values):
+                continue
+            unique = set(folded_values)
+            if len(unique) == 1 and constants.get(name) != folded_values[0]:
+                constants[name] = folded_values[0]
+                changed = True
+        if not changed:
+            break
+    return constants
 
 
 def _string_has_forbidden_dunder(text: str) -> bool:
@@ -1120,9 +1219,10 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
         r'read_sas|read_spss|read_stata)\s*\(',
         r'\.(to_csv|to_excel|to_xml|to_html|to_json|to_pickle|to_parquet|'
         r'to_orc|to_feather|to_hdf|to_sql|to_clipboard|to_gbq|to_stata|'
-        r'to_latex|tofile)\s*\(',
+        r'to_latex|tofile|dump|to_string|to_markdown|savefig|imsave)\s*\(',
         r'\b(np|numpy)\.(save|savez|savez_compressed|savetxt|load|loadtxt|'
-        r'genfromtxt|fromfile|memmap|DataSource)\s*\(',
+        r'genfromtxt|recfromcsv|recfromtxt|fromfile|fromregex|memmap|DataSource)\s*\(',
+        r'\b(pd|pandas)\.(ExcelFile|ExcelWriter|HDFStore)\s*\(',
         r'\.(eval|query)\s*\(',
         # Frame / traceback / closure chains used to break out of the sandbox.
         r'\.(gi_frame|gi_code|cr_frame|cr_code|ag_frame|ag_code|'
@@ -1169,16 +1269,11 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
         'tempfile', 'glob', 'pathlib',
     }
 
-    dangerous_call_names = {
-        'eval', 'exec', 'compile', '__import__',
-        'getattr', 'setattr', 'delattr',
-        'globals', 'vars', 'dir', 'breakpoint',
-        'open', 'input', 'exit', 'quit',
-        # Runtime string construction plus format-field traversal was the
-        # primitive used by the August 2026 sandbox escape.  Keep both names
-        # rejected even if a caller accidentally injects broader builtins.
-        'chr', 'format',
-    }
+    dangerous_call_names = RESERVED_SANDBOX_IDENTIFIERS
+
+    # These capabilities remain dangerous when passed as values to callback
+    # factories such as numpy.frompyfunc, not only when called directly.
+    dangerous_value_names = dangerous_call_names
 
     dangerous_dunder_attrs = {
         '__builtins__', '__import__', '__class__', '__bases__',
@@ -1186,6 +1281,8 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
         '__func__', '__dict__', '__module__', '__loader__', '__spec__',
         '__path__', '__file__', '__cached__', '__package__',
     }
+
+    string_constants = _collect_string_constants(tree)
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
@@ -1240,9 +1337,13 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
                 if isinstance(node.func.attr, str) and node.func.attr in _DANGEROUS_METHOD_NAMES:
                     return False, f"Unsafe method call detected: .{node.func.attr}()"
             for arg in node.args:
-                folded = _fold_string_constant(arg)
+                folded = _fold_string_constant(arg, string_constants)
                 if folded is not None and _string_has_forbidden_dunder(folded):
                     return False, "Unsafe dunder string argument detected"
+
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load) and node.id in dangerous_value_names:
+                return False, f"Unsafe capability reference detected: {node.id}"
 
         elif isinstance(node, ast.Attribute):
             if isinstance(node.attr, str) and (
@@ -1268,12 +1369,12 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
             internal = _dangerous_pd_numpy_internal(root, attrs)
             if internal:
                 return False, f"Unsafe pandas/numpy internal access detected: {internal}"
-            folded = _fold_string_constant(node)
+            folded = _fold_string_constant(node, string_constants)
             if folded is not None and _string_has_forbidden_dunder(folded):
                 return False, "Unsafe dunder attribute access detected"
 
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-            folded = _fold_string_constant(node)
+            folded = _fold_string_constant(node, string_constants)
             if folded is not None and _string_has_forbidden_dunder(folded):
                 return False, "Unsafe dunder string concatenation detected"
 

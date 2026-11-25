@@ -61,6 +61,9 @@ def sender(monkeypatch):
                                              response_status=response.status_code)
     monkeypatch.setattr(agent_auth, '_reserve_idempotency', reserve)
     monkeypatch.setattr(agent_auth, '_complete_idempotency', complete)
+    monkeypatch.setattr(signal_notifier.socket, "getaddrinfo", lambda *_args, **_kwargs: [
+        (None, None, None, "", ("8.8.8.8", 443)),
+    ])
     post = Mock(return_value=Mock(status_code=200, text='{}'))
     monkeypatch.setattr(signal_notifier.requests, 'post', post)
     monkeypatch.setattr(signal_notifier.time, 'sleep', lambda _: None)
@@ -228,7 +231,8 @@ def test_mcp_to_gateway_in_process(client, sender, monkeypatch):
         monkeypatch.setattr(server, '_client', transport)
         result = asyncio.run(server.mcp.call_tool('send_notification', {**BODY, 'idempotency_key': 'mcp-event-1'}))
     import json
-    assert json.loads(result[0].text)['status'] == 'delivered'
+    payload = result.structuredContent if hasattr(result, 'structuredContent') else json.loads(result[0].text)
+    assert payload['status'] == 'delivered'
     assert sender[1].call_count == 1
 
 

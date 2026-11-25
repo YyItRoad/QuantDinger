@@ -7,6 +7,7 @@ from app.openapi.blueprint import HumanBlueprint as Blueprint
 from app.services.indicator_signal_alerts import IndicatorSignalAlertService
 from app.utils.auth import login_required
 from app.utils.logger import get_logger
+from app.utils.structured_redaction import redact_structured_secrets
 
 
 logger = get_logger(__name__)
@@ -37,10 +38,10 @@ def _user_id() -> int:
 def list_indicator_signal_alerts():
     """List current user's indicator signal alert tasks."""
     try:
-        return _ok(service.list_tasks(_user_id()))
+        return _ok(redact_structured_secrets(service.list_tasks(_user_id())))
     except Exception as exc:
-        logger.warning("list indicator signal alerts failed: %s", exc)
-        return _fail(str(exc), 500)
+        logger.warning("list indicator signal alert failed: %s", type(exc).__name__)
+        return _fail("Unable to list indicator signal alerts", 500)
 
 
 @indicator_signal_alerts_blp.route("/signal-alerts", methods=["POST"])
@@ -49,12 +50,12 @@ def create_indicator_signal_alert():
     """Create an indicator signal alert task."""
     try:
         payload = request.get_json(silent=True) or {}
-        return _ok(service.create_task(_user_id(), payload))
+        return _ok(redact_structured_secrets(service.create_task(_user_id(), payload)))
     except ValueError as exc:
         return _fail(str(exc), 400)
     except Exception as exc:
-        logger.exception("create indicator signal alert failed")
-        return _fail(str(exc), 500)
+        logger.warning("create indicator signal alert failed: %s", type(exc).__name__)
+        return _fail("Unable to create indicator signal alert", 500)
 
 
 @indicator_signal_alerts_blp.route("/signal-alerts/<int:task_id>", methods=["PUT"])
@@ -63,12 +64,12 @@ def update_indicator_signal_alert(task_id: int):
     """Update an indicator signal alert task."""
     try:
         payload = request.get_json(silent=True) or {}
-        return _ok(service.update_task(_user_id(), task_id, payload))
+        return _ok(redact_structured_secrets(service.update_task(_user_id(), task_id, payload)))
     except ValueError as exc:
         return _fail(str(exc), 400)
     except Exception as exc:
-        logger.exception("update indicator signal alert failed")
-        return _fail(str(exc), 500)
+        logger.warning("update indicator signal alert failed: %s", type(exc).__name__)
+        return _fail("Unable to update indicator signal alert", 500)
 
 
 @indicator_signal_alerts_blp.route("/signal-alerts/<int:task_id>", methods=["DELETE"])
@@ -79,8 +80,8 @@ def delete_indicator_signal_alert(task_id: int):
         service.delete_task(_user_id(), task_id)
         return _ok(True)
     except Exception as exc:
-        logger.exception("delete indicator signal alert failed")
-        return _fail(str(exc), 500)
+        logger.warning("delete indicator signal alert failed: %s", type(exc).__name__)
+        return _fail("Unable to delete indicator signal alert", 500)
 
 
 @indicator_signal_alerts_blp.route("/signal-alerts/<int:task_id>/pause", methods=["POST"])
@@ -88,12 +89,12 @@ def delete_indicator_signal_alert(task_id: int):
 def pause_indicator_signal_alert(task_id: int):
     """Pause an indicator signal alert task."""
     try:
-        return _ok(service.set_status(_user_id(), task_id, "paused"))
+        return _ok(redact_structured_secrets(service.set_status(_user_id(), task_id, "paused")))
     except ValueError as exc:
         return _fail(str(exc), 404)
     except Exception as exc:
-        logger.exception("pause indicator signal alert failed")
-        return _fail(str(exc), 500)
+        logger.warning("pause indicator signal alert failed: %s", type(exc).__name__)
+        return _fail("Unable to pause indicator signal alert", 500)
 
 
 @indicator_signal_alerts_blp.route("/signal-alerts/<int:task_id>/resume", methods=["POST"])
@@ -101,12 +102,12 @@ def pause_indicator_signal_alert(task_id: int):
 def resume_indicator_signal_alert(task_id: int):
     """Resume an indicator signal alert task."""
     try:
-        return _ok(service.set_status(_user_id(), task_id, "running"))
+        return _ok(redact_structured_secrets(service.set_status(_user_id(), task_id, "running")))
     except ValueError as exc:
         return _fail(str(exc), 404)
     except Exception as exc:
-        logger.exception("resume indicator signal alert failed")
-        return _fail(str(exc), 500)
+        logger.warning("resume indicator signal alert failed: %s", type(exc).__name__)
+        return _fail("Unable to resume indicator signal alert", 500)
 
 
 @indicator_signal_alerts_blp.route("/signal-alerts/<int:task_id>/test", methods=["POST"])
@@ -119,5 +120,5 @@ def test_indicator_signal_alert(task_id: int):
             return _fail("Task not found", 404)
         return _ok(service.evaluate_task(task_id))
     except Exception as exc:
-        logger.exception("test indicator signal alert failed")
-        return _fail(str(exc), 500)
+        logger.warning("test indicator signal alert failed: %s", type(exc).__name__)
+        return _fail("Unable to test indicator signal alert", 500)

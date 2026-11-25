@@ -118,6 +118,76 @@ def test_apply_init_sql_commits_on_success(tmp_path, monkeypatch):
     assert conn.committed, "_apply_init_sql must commit on success"
 
 
+def test_apply_init_sql_includes_public_universe_expansion(tmp_path, monkeypatch):
+    fake_sql = tmp_path / 'init.sql'
+    fake_sql.write_text("SELECT 1;", encoding='utf-8')
+    monkeypatch.setattr(db_module, '_resolve_init_sql_path', lambda: fake_sql)
+    applied = []
+
+    def fake_apply_component(_conn, _logger, **kwargs):
+        applied.append(kwargs['name'])
+        return 'applied'
+
+    monkeypatch.setattr(db_module, '_apply_migration_component', fake_apply_component)
+    conn = _FakeConn(deny_tables=())
+    with patch.object(db_module, 'get_db_connection', return_value=_FakeConnCtx(conn)):
+        db_module._apply_init_sql(logging.getLogger('test'))
+
+    assert 'public-universe-expansion-20261024' in applied
+    assert 'default-cn-hk-universe-members-20261025' in applied
+    assert 'default-global-universe-members-20261025' in applied
+    assert 'remove-manager-role-20261104' in applied
+    assert 'strategy-runtime-epoch-20261111' in applied
+    assert 'strategy-order-batches-20261121' in applied
+
+
+def test_strategy_runtime_epoch_migration_separates_desired_and_actual_lifecycle():
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / 'migrations'
+        / '20261111_strategy_runtime_epoch.sql'
+    )
+    migration = migration_path.read_text(encoding='utf-8')
+
+    assert 'desired_runtime_epoch' in migration
+    assert 'runtime_requested_at' in migration
+    assert 'runtime_epoch' in migration
+
+
+def test_remove_manager_role_migration_downgrades_legacy_users():
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / 'migrations'
+        / '20261104_remove_manager_role.sql'
+    )
+    migration = migration_path.read_text(encoding='utf-8')
+
+    assert "SET role = 'user'" in migration
+    assert "WHERE role = 'manager'" in migration
+
+
+def test_public_universe_expansion_has_explicit_returning_clause():
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / 'migrations'
+        / '20261024_public_universe_expansion.sql'
+    )
+
+    assert 'RETURNING code' in migration_path.read_text(encoding='utf-8')
+
+
+def test_global_universe_seed_only_populates_empty_system_pools():
+    migration_path = (
+        Path(__file__).resolve().parents[1]
+        / 'migrations'
+        / '20261025_default_global_universe_members.sql'
+    )
+    migration = migration_path.read_text(encoding='utf-8')
+
+    assert 'NOT EXISTS (' in migration
+    assert 'DELETE FROM qd_universe_members' not in migration
+
+
 class _MigrationCursor:
     def __init__(self, rows=()):
         self.rows = list(rows)
@@ -188,6 +258,48 @@ def test_migration_component_baselines_existing_large_catalogue(tmp_path):
     assert result == 'baselined'
     assert 'SELECT dangerous_large_seed();' not in statements
     assert any('INSERT INTO qd_bootstrap_migrations' in sql for sql in statements)
+    assert conn.commits == 1
+
+
+def test_migration_component_baselines_when_target_schema_already_exists(tmp_path):
+    sql_path = tmp_path / 'logical-assets.sql'
+    sql_path.write_text('SELECT legacy_watchlist_columns();', encoding='utf-8')
+    conn = _MigrationConn(rows=[None, {'column_exists': True}])
+
+    result = db_module._apply_migration_component(
+        conn,
+        logging.getLogger('test'),
+        name='logical-market-assets-20261105',
+        path=sql_path,
+        baseline_table='qd_watchlist',
+        baseline_column='asset_id',
+    )
+
+    statements = [sql for sql, _params in conn.cursor_obj.calls]
+    assert result == 'baselined'
+    assert 'SELECT legacy_watchlist_columns();' not in statements
+    assert any('information_schema.columns' in sql for sql in statements)
+    assert any('INSERT INTO qd_bootstrap_migrations' in sql for sql in statements)
+    assert conn.commits == 1
+
+
+def test_migration_component_applies_when_target_schema_is_legacy(tmp_path):
+    sql_path = tmp_path / 'logical-assets.sql'
+    sql_path.write_text('SELECT migrate_legacy_watchlist();', encoding='utf-8')
+    conn = _MigrationConn(rows=[None, {'column_exists': False}])
+
+    result = db_module._apply_migration_component(
+        conn,
+        logging.getLogger('test'),
+        name='logical-market-assets-20261105',
+        path=sql_path,
+        baseline_table='qd_watchlist',
+        baseline_column='asset_id',
+    )
+
+    statements = [sql for sql, _params in conn.cursor_obj.calls]
+    assert result == 'applied'
+    assert 'SELECT migrate_legacy_watchlist();' in statements
     assert conn.commits == 1
 
 
@@ -292,13 +404,16 @@ def test_bootstrap_applies_execution_accounting_after_schema(monkeypatch):
     assert names[:2] == ["schema-init", "execution-fill-accounting-20260916"]
     assert names[2] == "exchange-order-pnl-20260916"
     assert names[3] == "ai-decision-billing-20260920"
-    assert names[4] == "market-state"
-    assert names[5] == "market-state-schedule"
-    assert names[6] == "quick-trade-client-order-id-20260926"
-    assert names[7] == "signal-virtual-account-20260926"
-    assert names[8] == "signal-virtual-limit-orders-20260926"
-    assert names[-1] == "position-management-history-ext-20261021"
-    ext_sql = calls[-1]["path"].read_text(encoding="utf-8")
+    assert "client-scoped-sessions-20261106" in names
+    assert "virtual-account-capital-consistency-20261111" in names
+    assert "strategy-risk-stop-run-identity-20261111" in names
+    assert "market-state" in names
+    assert "market-state-schedule" in names
+    assert "quick-trade-client-order-id-20260926" in names
+    assert "signal-virtual-account-20260926" in names
+    assert "signal-virtual-limit-orders-20260926" in names
+    assert "position-management-history-ext-20261021" in names
+    ext_sql = calls[names.index("position-management-history-ext-20261021")]["path"].read_text(encoding="utf-8")
     assert "ADD COLUMN IF NOT EXISTS ext JSONB" in ext_sql
     assert "UPDATE " not in ext_sql
     assert "qd_exchange_order_pnl" in calls[2]["path"].read_text(encoding="utf-8")
@@ -310,5 +425,17 @@ def test_bootstrap_applies_execution_accounting_after_schema(monkeypatch):
     virtual_sql = calls[7]["path"].read_text(encoding="utf-8")
     assert "qd_strategy_virtual_trades" in virtual_sql
     assert "slippage_quote" in virtual_sql
+    capital_repair = next(
+        item for item in calls
+        if item["name"] == "virtual-account-capital-consistency-20261111"
+    )["path"].read_text(encoding="utf-8")
+    assert "cash_balance = s.initial_capital + va.realized_pnl" in capital_repair
+    assert "account_equity = vt.account_equity +" in capital_repair
+    run_identity = next(
+        item for item in calls
+        if item["name"] == "strategy-risk-stop-run-identity-20261111"
+    )["path"].read_text(encoding="utf-8")
+    assert "ADD COLUMN IF NOT EXISTS strategy_run_id" in run_identity
+    assert "idx_positions_strategy_run" in run_identity
     assert calls[1]["path"].is_file()
     assert "commission_breakdown" in calls[1]["path"].read_text(encoding="utf-8")
