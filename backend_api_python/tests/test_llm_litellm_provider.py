@@ -919,9 +919,7 @@ def test_test_connection_reports_http_failure(monkeypatch):
     ok, detail = service.test_connection()
 
     assert ok is False
-    assert "HTTP 401" in detail
-    assert secret not in detail
-    assert "api_key=<redacted>" in detail
+    assert detail == "openrouter: HTTP 401"
 
 
 def test_test_connection_never_puts_google_key_in_url(monkeypatch):
