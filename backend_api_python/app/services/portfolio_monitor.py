@@ -480,9 +480,8 @@ def _run_ai_analysis(positions: List[Dict[str, Any]], config: Dict[str, Any], us
         }
 
     except Exception as e:
-        logger.error(f"_run_ai_analysis failed: {e}")
-        logger.error(traceback.format_exc())
-        return {'success': False, 'error': str(e), 'timestamp': _now_ts()}
+        logger.error('Portfolio analysis failed: %s', type(e).__name__)
+        return {'success': False, 'error': 'Portfolio analysis failed', 'timestamp': _now_ts()}
 
 
 def _build_comprehensive_report(
@@ -1571,9 +1570,8 @@ def run_single_monitor(
 
         return result
     except Exception as e:
-        logger.error(f"run_single_monitor failed: {e}")
-        logger.error(traceback.format_exc())
-        return {'success': False, 'error': str(e)}
+        logger.error('Portfolio monitor failed: %s', type(e).__name__)
+        return {'success': False, 'error': 'Portfolio monitor failed'}
 
 
 def _check_position_alerts():

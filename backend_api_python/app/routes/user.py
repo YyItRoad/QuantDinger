@@ -1717,19 +1717,14 @@ def admin_toggle_system_strategy():
             ok = executor.start_strategy(strategy_id)
             if not ok:
                 svc.update_strategy_status(strategy_id, 'stopped')
-                detail = getattr(executor, '_last_start_failure', '') or ''
-                msg = 'Failed to start strategy executor'
-                if detail:
-                    msg = f'{msg}: {detail}'
-                return jsonify({'code': 0, 'msg': msg, 'data': {'status': 'stopped'}}), 500
-            alive, hint = executor.wait_strategy_running(strategy_id, timeout=3.0)
+                return jsonify({'code': 0, 'msg': 'Failed to start strategy executor', 'data': {'status': 'stopped'}}), 500
+            alive, _ = executor.wait_strategy_running(strategy_id, timeout=3.0)
             if not alive:
                 svc.update_strategy_status(strategy_id, 'stopped')
-                msg = f'Strategy executor exited immediately after start: {hint}'
                 return jsonify({
                     'code': 0,
-                    'msg': msg,
-                    'data': {'id': strategy_id, 'status': 'stopped', 'detail': hint},
+                    'msg': 'Strategy executor exited immediately after start',
+                    'data': {'id': strategy_id, 'status': 'stopped'},
                 }), 500
             logger.info(
                 'Admin %s started strategy %s (owner user_id=%s)',
