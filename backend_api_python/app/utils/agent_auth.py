@@ -712,7 +712,7 @@ def agent_required(scope: str = SCOPE_R, *, domain_idempotency: bool = False):
                 response = make_response(fn(*args, **kwargs))
             except Exception as exc:
                 logger.error(f"agent route raised: {exc}", exc_info=True)
-                response = make_response(*_err(500, "Internal server error", details=str(exc), status=500))
+                response = make_response(*_err(500, "Internal server error", status=500))
 
             status_code = int(response.status_code)
             payload_summary: Any = response.get_json(silent=True)

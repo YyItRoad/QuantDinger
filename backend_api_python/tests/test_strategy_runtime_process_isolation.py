@@ -49,7 +49,8 @@ def _frame() -> pd.DataFrame:
     )
 
 
-def test_manifest_inspection_does_not_load_user_handlers_in_parent():
+def test_manifest_inspection_does_not_load_user_handlers_in_parent(monkeypatch):
+    monkeypatch.setenv("QD_STRATEGY_RUNTIME_WORKER", "1")
     program = inspect_strategy_v2(SOURCE)
 
     assert program.handler("handle_data") is None

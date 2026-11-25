@@ -435,8 +435,8 @@ def get_fills():
             "source": "exchange",
         })
     except Exception as e:
-        logger.error(f"Get Alpaca fills failed: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error("Get Alpaca fills failed: %s", type(e).__name__)
+        return jsonify({"success": False, "error": "Unable to retrieve fill history"}), 500
 
 
 # ==================== Trading ====================

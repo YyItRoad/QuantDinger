@@ -235,11 +235,16 @@ def compile_strategy_v2(
     Outside the runtime worker this function intentionally returns the same
     metadata-only result for backward-compatible callers.
     """
-    load_runtime_namespace = os.getenv("QD_STRATEGY_RUNTIME_WORKER") == "1"
+    if os.getenv("QD_STRATEGY_RUNTIME_WORKER") != "1":
+        return _compile_strategy_v2(code, discovery_snapshot=discovery_snapshot)
+
+    def load_namespace(namespace: dict[str, Any], context: DiscoveryContext, state: StateNamespace) -> None:
+        _load_runtime_namespace(str(code or "").strip(), namespace, context, state)
+
     return _compile_strategy_v2(
         code,
-        load_runtime_namespace=load_runtime_namespace,
         discovery_snapshot=discovery_snapshot,
+        load_namespace=load_namespace,
     )
 
 
@@ -247,7 +252,6 @@ def inspect_strategy_v2(code: str) -> CompiledStrategyV2:
     """Return the validated manifest without loading user functions in-process."""
     return _compile_strategy_v2(
         code,
-        load_runtime_namespace=False,
         discovery_snapshot=None,
     )
 
@@ -255,8 +259,8 @@ def inspect_strategy_v2(code: str) -> CompiledStrategyV2:
 def _compile_strategy_v2(
     code: str,
     *,
-    load_runtime_namespace: bool,
     discovery_snapshot: Mapping[str, Any] | None,
+    load_namespace: Callable[[dict[str, Any], DiscoveryContext, StateNamespace], None] | None = None,
 ) -> CompiledStrategyV2:
     raw = str(code or "").strip()
     if not raw:
@@ -292,48 +296,8 @@ def _compile_strategy_v2(
     context = DiscoveryContext()
     state = StateNamespace()
     namespace = _static_module_namespace(raw)
-    if load_runtime_namespace:
-        schedules = _ScheduleBindings(context)
-        discovery_log = _DiscoveryLogger()
-        namespace.update({
-            "__builtins__": build_safe_builtins(),
-            "g": state,
-            "run_daily": schedules.daily,
-            "run_weekly": schedules.weekly,
-            "run_monthly": schedules.monthly,
-            "get_index_stocks": lambda value, **_: [normalize_index_reference(value)],
-            "get_universe_stocks": lambda *_args, **_kwargs: [],
-            "get_position": lambda *_args, **_kwargs: SimpleNamespace(
-                amount=0.0,
-                avg_cost=0.0,
-                last_price=0.0,
-            ),
-            "get_positions": lambda *_args, **_kwargs: {},
-            "get_order_status": lambda *_args, **_kwargs: {
-                "status": "unknown",
-                "filled_quantity": 0.0,
-                "filled_notional": 0.0,
-                "fee": 0.0,
-            },
-            "cancel_order": lambda *_args, **_kwargs: False,
-            "consume_last_exit_reason": lambda *_args, **_kwargs: "",
-            "get_history": lambda *_args, **_kwargs: [],
-            "history": lambda *_args, **_kwargs: [],
-            "is_trade": lambda *_args, **_kwargs: False,
-            "log": discovery_log,
-        })
-        result = safe_exec_with_validation(
-            raw,
-            namespace,
-            namespace,
-            timeout=STRATEGY_COMPILE_TIMEOUT_SECONDS,
-        )
-        if not result.get("success"):
-            raise StrategyV2ContractError(
-                str(result.get("error") or "strategyV2.compileFailed")
-            )
-        if not callable(namespace.get("initialize")):
-            raise StrategyV2ContractError("strategyV2.initializeRequired")
+    if load_namespace is not None:
+        load_namespace(namespace, context, state)
     for name, value in dict(discovery.get("state") or {}).items():
         setattr(state, str(name), value)
     for item in list(discovery.get("calls") or []):
@@ -444,6 +408,58 @@ def _compile_strategy_v2(
             "response": deepcopy(discovery_result),
         },
     )
+
+
+def _load_runtime_namespace(
+    raw: str,
+    namespace: dict[str, Any],
+    context: DiscoveryContext,
+    state: StateNamespace,
+) -> None:
+    """Load executable handlers after isolated discovery in the runtime worker."""
+    if os.getenv("QD_STRATEGY_RUNTIME_WORKER") != "1":
+        raise StrategyV2ContractError("strategyV2.runtimeWorkerRequired")
+    schedules = _ScheduleBindings(context)
+    discovery_log = _DiscoveryLogger()
+    namespace.update({
+        "__builtins__": build_safe_builtins(),
+        "g": state,
+        "run_daily": schedules.daily,
+        "run_weekly": schedules.weekly,
+        "run_monthly": schedules.monthly,
+        "get_index_stocks": lambda value, **_: [normalize_index_reference(value)],
+        "get_universe_stocks": lambda *_args, **_kwargs: [],
+        "get_position": lambda *_args, **_kwargs: SimpleNamespace(
+            amount=0.0,
+            avg_cost=0.0,
+            last_price=0.0,
+        ),
+        "get_positions": lambda *_args, **_kwargs: {},
+        "get_order_status": lambda *_args, **_kwargs: {
+            "status": "unknown",
+            "filled_quantity": 0.0,
+            "filled_notional": 0.0,
+            "fee": 0.0,
+        },
+        "cancel_order": lambda *_args, **_kwargs: False,
+        "consume_last_exit_reason": lambda *_args, **_kwargs: "",
+        "get_history": lambda *_args, **_kwargs: [],
+        "history": lambda *_args, **_kwargs: [],
+        "is_trade": lambda *_args, **_kwargs: False,
+        "log": discovery_log,
+    })
+    result = safe_exec_with_validation(
+        raw,
+        namespace,
+        namespace,
+        timeout=STRATEGY_COMPILE_TIMEOUT_SECONDS,
+    )
+    if not result.get("success"):
+        raise StrategyV2ContractError(
+            str(result.get("error") or "strategyV2.compileFailed")
+        )
+    if not callable(namespace.get("initialize")):
+        raise StrategyV2ContractError("strategyV2.initializeRequired")
 
 
 def _static_module_namespace(code: str) -> dict[str, Any]:
