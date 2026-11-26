@@ -202,6 +202,27 @@ def test_timeout_after_acceptance_and_restart_only_query_original_id(runtime):
     assert runtime.rows[1]["filled_amount"] == 0.70
 
 
+def test_sent_exit_does_not_query_another_exchange_endpoint(runtime):
+    runtime.timeout, runtime.close_status, runtime.close_fill = True, "FILLED", "0.70"
+    queue()
+    worker()
+    (client_id, _), = runtime.posts
+
+    config = exits.resolve_exchange_config.return_value
+    config["environment"] = "demo"
+    runtime.now += timedelta(seconds=31)
+    worker()
+    assert not runtime.reads
+    assert runtime.rows[1]["status"] == exits._SENT
+
+    config["environment"] = "live"
+    runtime.now += timedelta(seconds=31)
+    worker()
+    assert runtime.reads == [client_id]
+    assert len(runtime.posts) == 1
+    assert runtime.rows[1]["status"] == "filled"
+
+
 @pytest.mark.parametrize("change, value", [("plan", "matched"), ("plan", "unavailable"),
                                            ("managed", "registered"), ("qty", None)])
 def test_worker_rechecks_plan_and_live_ownership(runtime, change, value):

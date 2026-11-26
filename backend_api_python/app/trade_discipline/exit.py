@@ -7,6 +7,7 @@ import json
 import os
 from datetime import datetime, timezone
 from decimal import Decimal
+from urllib.parse import urlsplit
 
 from app.services.exchange_execution import resolve_exchange_config
 from app.services.live_trading.binance import BinanceFuturesClient
@@ -262,14 +263,17 @@ def _process_exit(row, *, exit_from, lookback_hours, still_active):
         if not isinstance(client, BinanceFuturesClient):
             return
         client.timeout_sec = min(client.timeout_sec, 6.0)
-        # 只在原交易接口和原凭证仍一致时回查已提交请求。
-        account = hashlib.sha256(f"{client.base_url}|{client.api_key}".encode()).hexdigest()
+        # 币安凭证换密钥时创建新凭证。原用户、凭证和无鉴权信息的接口地址共同限定回查范围。
+        endpoint = urlsplit(client.base_url)
+        account_scope = [user_id, credential_id, endpoint.scheme, endpoint.hostname, endpoint.port, endpoint.path]
         # 已提交状态进入回查分支。即使上次请求超时，也继续按原号查结果。
         if row["status"] == _SENT:
-            if meta["account"] == account:
+            if meta.get("account_scope") == account_scope:
                 audit("exit_lookup", **context, client_order_id=row["client_order_id"])
                 raw = client.get_order(symbol=meta["instrument"], client_order_id=row["client_order_id"])
                 _save_order(row, raw)
+            else:
+                audit("exit_deferred", **context, reason="exit_account_scope_unverified")
             return
         with _management_leg_lock(credential_id=credential_id, market_type="swap", symbol=symbol, side=side):
             # 发送退出请求前复核当前仓位和归属，数量上限以本次核对结果为准。
@@ -291,7 +295,7 @@ def _process_exit(row, *, exit_from, lookback_hours, still_active):
             now = datetime.now(timezone.utc)
             # 请求发出前先保存客户端订单号，超时或重启后按原订单号回查。
             client_order_id = client._format_client_order_id(f"qde{meta['key']}")
-            meta.update(submitted_qty=str(quantity), checked_at=int(now.timestamp()), account=account)
+            meta.update(submitted_qty=str(quantity), checked_at=int(now.timestamp()), account_scope=account_scope)
             tracked = _update_request(row, payload, status=_SENT, client_order_id=client_order_id)
             if tracked and authorized():
                 audit("exit_submit", **context, client_order_id=client_order_id, quantity=quantity,
