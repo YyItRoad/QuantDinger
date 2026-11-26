@@ -463,6 +463,10 @@ BEGIN
 END
 $$;
 
+CREATE UNIQUE INDEX IF NOT EXISTS uq_strategy_discipline_adoption
+ON qd_strategies_trading (user_id, (trading_config->'position_management'->>'discipline_adoption_key'))
+WHERE trading_config->'position_management'->>'discipline_adoption_key' IS NOT NULL;
+
 INSERT INTO qd_script_source_versions
     (source_id, user_id, version_no, name, description, code,
      template_key, param_schema, metadata, created_at)
@@ -3310,6 +3314,9 @@ ALTER TABLE qd_quick_trades ADD COLUMN IF NOT EXISTS client_order_id VARCHAR(100
 CREATE INDEX IF NOT EXISTS idx_quick_trades_client_order
     ON qd_quick_trades(credential_id, exchange_id, market_type, client_order_id)
     WHERE client_order_id <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_quick_trade_discipline_exit
+    ON qd_quick_trades(user_id, credential_id, (raw_result->'_discipline_exit'->>'key'))
+    WHERE source = 'trade_discipline' AND (raw_result->'_discipline_exit'->>'key') IS NOT NULL;
 UPDATE qd_strategy_trades
 SET commission_quote = commission
 WHERE commission_quote IS NULL

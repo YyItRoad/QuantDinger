@@ -44,6 +44,7 @@ class BinanceFuturesClient(BaseRestClient):
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
         self.broker_id = self._BROKER_ID
+        self.strict_market_close_guard = None
         if not self.api_key or not self.secret_key:
             raise LiveTradingError("Missing Binance api_key/secret_key")
 
@@ -208,12 +209,14 @@ class BinanceFuturesClient(BaseRestClient):
     def _signed_request(self, method: str, path: str, *, params: Dict[str, Any]) -> Dict[str, Any]:
         self._ensure_server_time()
         last_err: Optional[LiveTradingError] = None
-        for attempt in range(2):
+        market_submission = method.upper() == "POST" and path == "/fapi/v1/order"
+        single_attempt = self.strict_market_close_guard is not None and market_submission
+        for attempt in range(1 if single_attempt else 2):
             p = dict(params or {})
             p["timestamp"] = int(time.time() * 1000) + int(self._time_offset_ms)
             if "recvWindow" not in p:
                 p["recvWindow"] = 10000
-            if str(method or "").upper() == "POST" and path == "/fapi/v1/order":
+            if market_submission and not single_attempt:
                 ws_result = submit_binance_order(
                     api_key=self.api_key,
                     secret_key=self.secret_key,
@@ -225,17 +228,19 @@ class BinanceFuturesClient(BaseRestClient):
                     return ws_result
             qs = urlencode(p, doseq=True)
             p["signature"] = self._sign(qs)
+            if single_attempt and not self.strict_market_close_guard():
+                raise LiveTradingError("Strict close no longer authorized for submission")
             code, data, text = self._request(method, path, params=p, headers=self._signed_headers())
             if code >= 400:
                 err = LiveTradingError(f"Binance HTTP {code}: {text[:500]}")
-                if attempt == 0 and ("-1021" in text or "1021" in text):
+                if not single_attempt and attempt == 0 and ("-1021" in text or "1021" in text):
                     self._ensure_server_time(force=True)
                     last_err = err
                     continue
                 raise err
             if isinstance(data, dict) and data.get("code") and int(data.get("code")) < 0:
                 err = LiveTradingError(f"Binance error: {data}")
-                if attempt == 0 and int(data.get("code") or 0) == -1021:
+                if not single_attempt and attempt == 0 and int(data.get("code") or 0) == -1021:
                     self._ensure_server_time(force=True)
                     last_err = err
                     continue
@@ -498,17 +503,27 @@ class BinanceFuturesClient(BaseRestClient):
             raise LiveTradingError("Invalid Binance liquidation response")
         return data
 
-    def get_open_orders(self, *, symbol: str = "") -> Any:
+    def get_open_orders(self, *, symbol: str = "", strict: bool = False) -> Any:
         """Return current USD-M futures orders, optionally scoped to one symbol."""
         params: Dict[str, Any] = {}
         if symbol:
             params["symbol"] = to_binance_futures_symbol(symbol)
         data = self._signed_request("GET", "/fapi/v1/openOrders", params=params)
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict) and isinstance(data.get("raw"), list):
-            return data["raw"]
-        return []
+        rows = data.get("raw") if isinstance(data, dict) else data
+        if strict and (not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows)):
+            raise LiveTradingError("Invalid Binance open orders response")
+        return rows if isinstance(rows, list) else []
+
+    def get_open_algo_orders(self, *, symbol: str) -> list[dict]:
+        """Return the separate USD-M conditional-order snapshot for one instrument."""
+        native = to_binance_futures_symbol(symbol)
+        if not native:
+            raise LiveTradingError("Binance conditional orders require a symbol")
+        data = self._signed_request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": native})
+        rows = data.get("raw") if isinstance(data, dict) else data
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise LiveTradingError("Invalid Binance open conditional orders response")
+        return rows
 
     def get_fee_for_order(self, *, symbol: str, order_id: str, max_retries: int = 3) -> Tuple[float, str]:
         """
@@ -611,9 +626,9 @@ class BinanceFuturesClient(BaseRestClient):
         try:
             data = self._signed_request("GET", "/fapi/v1/positionSide/dual", params={})
             v = data.get("dualSidePosition") if isinstance(data, dict) else None
-            if v is None:
+            if type(v) is not bool:
                 return None
-            val = bool(v)
+            val = v
             self._dual_side_cache = (now, val)
             return val
         except Exception:
@@ -812,6 +827,8 @@ class BinanceFuturesClient(BaseRestClient):
         client_order_id: Optional[str] = None,
     ) -> LiveOrderResult:
         sym = to_binance_futures_symbol(symbol)
+        if self.strict_market_close_guard is not None and not reduce_only:
+            raise LiveTradingError("Strict close requires reduce-only and a known position mode")
         sd = (side or "").upper()
         if sd not in ("BUY", "SELL"):
             raise LiveTradingError(f"Invalid side: {side}")
@@ -861,6 +878,8 @@ class BinanceFuturesClient(BaseRestClient):
         # Hedge mode requires explicit positionSide (LONG/SHORT). One-way mode should not use LONG/SHORT.
         dual_side = self.get_dual_side_position()
         pos_norm = self._normalize_position_side(position_side)
+        if self.strict_market_close_guard is not None and dual_side is None:
+            raise LiveTradingError("Strict close requires a known position mode")
         if dual_side is True:
             params["positionSide"] = (pos_norm if pos_norm in ("LONG", "SHORT") else self._infer_position_side(side=sd, reduce_only=reduce_only))
         elif dual_side is False:
@@ -877,6 +896,8 @@ class BinanceFuturesClient(BaseRestClient):
         try:
             raw = self._signed_request("POST", "/fapi/v1/order", params=params)
         except LiveTradingError as e:
+            if self.strict_market_close_guard is not None:
+                raise
             # Retry once if position mode mismatch (-4061).
             if self._is_err_code(e, -4061):
                 params2 = dict(params)

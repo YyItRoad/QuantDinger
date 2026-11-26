@@ -8,6 +8,9 @@ from psycopg2.extras import Json
 from app.utils.db import get_db_transaction
 
 
+_DISCIPLINE_OPENING_PASSED = 'discipline_opening_passed'
+
+
 def public(value):
     if isinstance(value, dict):
         return {key: public(item) for key, item in value.items()}
@@ -112,7 +115,49 @@ class PlanRepository:
         return [public(row) for row in cur.fetchall()]
 
     def events(self, cur, uid, plan_id):
-        cur.execute('SELECT * FROM qd_trade_plan_events WHERE user_id=%s AND plan_id=%s ORDER BY recorded_at,id', (uid, plan_id))
+        # 首次通过是接管内部状态，计划详情和公开事件列表沿用原来的事件范围。
+        cur.execute('''SELECT * FROM qd_trade_plan_events
+            WHERE user_id=%s AND plan_id=%s AND event_type<>%s ORDER BY recorded_at,id''',
+            (uid, plan_id, _DISCIPLINE_OPENING_PASSED))
+        return [public(row) for row in cur.fetchall()]
+
+    def discipline_opening_pass(self, cur, uid, eid):
+        cur.execute('''SELECT (payload->>'passed_round')::timestamptz AS passed_round,
+                   plan_id::text AS plan_id, plan_version_id::text AS version_id
+            FROM qd_trade_plan_events WHERE id=%s AND user_id=%s AND event_type=%s''',
+            (eid, uid, _DISCIPLINE_OPENING_PASSED))
+        return cur.fetchone()
+
+    def record_discipline_opening_pass(self, cur, uid, eid, plan_id, version_id, round_at, observed_at):
+        # 同一开仓只保留第一次通过。冲突时读回原轮次和计划版本，重启也以此为准。
+        self.event(cur, eid, uid, plan_id, version_id, _DISCIPLINE_OPENING_PASSED,
+                   {'passed_round': round_at.isoformat()}, observed_at, 'system', 'trade_discipline',
+                   ignore_duplicate=True)
+        return self.discipline_opening_pass(cur, uid, eid)
+
+    def observing_at(self, cur, uid, cutoff, direction):
+        # 按下单时刻重建计划状态，计划现有的版本或生命周期可能已变化。
+        """Read the version and lifecycle visible at the order timestamp."""
+        cur.execute("""
+            SELECT p.id AS plan_id, v.id AS version_id, v.version_no, v.snapshot,
+                   v.created_at AS version_created_at, state.recorded_at AS observing_since
+            FROM qd_trade_plans p
+            JOIN LATERAL (
+                SELECT id, version_no, snapshot, created_at
+                FROM qd_trade_plan_versions
+                WHERE user_id=p.user_id AND plan_id=p.id AND created_at<=%s
+                ORDER BY created_at DESC, version_no DESC LIMIT 1
+            ) v ON TRUE
+            JOIN LATERAL (
+                SELECT payload->>'to' AS lifecycle, recorded_at
+                FROM qd_trade_plan_events
+                WHERE user_id=p.user_id AND plan_id=p.id AND event_type='state_changed'
+                  AND recorded_at<=%s
+                ORDER BY recorded_at DESC, id DESC LIMIT 1
+            ) state ON state.lifecycle='observing'
+            WHERE p.user_id=%s AND p.created_at<=%s AND v.snapshot->>'direction'=%s
+            ORDER BY v.created_at DESC, p.id
+        """, (cutoff, cutoff, uid, cutoff, direction))
         return [public(row) for row in cur.fetchall()]
 
     def new_plan(self, cur, uid, plan_id, parent_id):
@@ -128,11 +173,13 @@ class PlanRepository:
     def update(self, cur, uid, plan_id, lifecycle):
         cur.execute('UPDATE qd_trade_plans SET lifecycle=%s,row_revision=row_revision+1,updated_at=NOW() WHERE user_id=%s AND id=%s', (lifecycle, uid, plan_id))
 
-    def event(self, cur, eid, uid, plan_id, vid, kind, payload, occurred_at, source, actor):
-        cur.execute('''INSERT INTO qd_trade_plan_events
+    def event(self, cur, eid, uid, plan_id, vid, kind, payload, occurred_at, source, actor, *, ignore_duplicate=False):
+        sql = '''INSERT INTO qd_trade_plan_events
             (id,user_id,plan_id,plan_version_id,event_type,payload,occurred_at,source,actor_id)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
-            (eid, uid, plan_id, vid, kind, Json(payload), occurred_at, source, actor))
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)'''
+        if ignore_duplicate:
+            sql += ' ON CONFLICT (id) DO NOTHING'
+        cur.execute(sql, (eid, uid, plan_id, vid, kind, Json(payload), occurred_at, source, actor))
 
     def research(self, cur, uid, rid):
         cur.execute('''SELECT id,market,symbol,exchange_id,market_type,instrument_id,timeframe,

@@ -15,7 +15,8 @@ class PendingOrderLoops:
 
     def _run_sync_loop(self) -> None:
         while not self._stop_event.is_set():
-            for sync in (self._sync_quick_trade_orders, self._sync_alpaca_sent_orders, self._sync_live_sent_orders, self._maybe_sync_positions):
+            for sync in (self._sync_discipline_exits, self._sync_quick_trade_orders,
+                         self._sync_alpaca_sent_orders, self._sync_live_sent_orders, self._maybe_sync_positions):
                 if self._stop_event.is_set() or (self.lease_guard and not self.lease_guard()):
                     break
                 try:
@@ -34,6 +35,14 @@ class PendingOrderLoops:
             except Exception:
                 logger.warning("Order batch reconciliation failed", exc_info=True)
             self._stop_event.wait(self.poll_interval_sec)
+
+    def _sync_discipline_exits(self) -> None:
+        # Trading Worker 接手 Scheduler 持久化的退出请求，执行前持续检查当前租约。
+        if self.lease_guard is None:
+            return
+        from app.trade_discipline.exit import process_discipline_exits
+
+        process_discipline_exits(still_active=lambda: not self._stop_event.is_set() and self.lease_guard())
 
     def _tick(self) -> None:
         if self.lease_guard and not self.lease_guard():

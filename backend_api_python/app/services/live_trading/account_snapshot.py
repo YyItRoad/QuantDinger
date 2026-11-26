@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.exchange_execution import resolve_exchange_config
-from app.services.live_trading.factory import create_client
+from app.services.live_trading.factory import create_client, exchange_trading_environment
 from app.services.live_trading.records import normalize_strategy_symbol
 from app.services.live_trading.spot_wallet_snapshot import list_spot_wallet_positions
 from app.utils.logger import get_logger
@@ -406,6 +406,7 @@ def fetch_target_position_snapshot(
         "open_orders": [],
         "fetched_at": int(time.time()),
         "exchange_id": exchange_id,
+        "environment": exchange_trading_environment(exchange_config, exchange_id),
         "warnings": uniq_errors,
         "partial": bool(uniq_errors) and bool(rows),
         "error": uniq_errors[0] if uniq_errors and not rows else "",

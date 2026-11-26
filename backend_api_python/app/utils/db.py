@@ -474,6 +474,12 @@ def _apply_init_sql(logger, *, strict: bool = False):
                 name="position-management-history-ext-20261021",
                 path=init_sql.parent / "20261021_position_management_history_ext.sql",
             )
+            _apply_migration_component(
+                conn,
+                logger,
+                name="trade-discipline-execution-indexes-20261127",
+                path=init_sql.parent / "20261127_trade_discipline_execution_indexes.sql",
+            )
         logger.info("Database bootstrap components are current")
         _migration_progress("all components complete")
     except Exception as exc:

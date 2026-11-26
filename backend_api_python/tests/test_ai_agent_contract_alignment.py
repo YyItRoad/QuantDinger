@@ -326,3 +326,10 @@ def test_position_management_history_contract_is_account_scoped_and_read_only():
     names = {'list_position_management_trade_history', 'get_position_management_trade_history'}
     metadata = {tool.id.removeprefix('mcp.'): tool for tool in MCP_AGENT_TOOLS}
     assert all(metadata[name].read_only for name in names)
+
+
+def test_quick_trade_documents_discipline_rejection():
+    contract = json.loads((BACKEND_ROOT / "docs/agent/agent-openapi.json").read_text())
+    order = contract["paths"]["/api/agent/v1/quick-trade/orders"]["post"]
+    assert "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED" in order["description"]
+    assert "details.reason" in order["responses"]["409"]["description"]

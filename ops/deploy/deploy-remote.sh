@@ -29,6 +29,7 @@ set -euo pipefail
 : "${COMPOSE_FILE:=docker-compose.ghcr.yml}"
 : "${PRUNE:=false}"
 : "${REPO_OWNER:=OpenByteInc}"
+: "${DISCIPLINE_OBSERVATION_USER_ID:=}"
 # GHCR requires lowercase repo names. We lowercase in bash instead of using
 # the GitHub Actions `| lower` filter — that filter triggered a schema
 # fallback that hid the workflow name and the Run workflow button.
@@ -118,6 +119,39 @@ env_set() {
 }
 
 ENV_FILE="$DEPLOY_DIR/.env"
+verify_discipline_preview() {
+  "$@" python - "$DISCIPLINE_OBSERVATION_USER_ID" <<'PY'
+import os
+import sys
+from dotenv import load_dotenv
+
+load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
+disabled = ("TRADE_DISCIPLINE_AUTO_EXIT_ENABLED", "TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED",
+            "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED")
+if (os.getenv("TRADE_DISCIPLINE_USER_ID") != sys.argv[1]
+        or os.getenv("TRADE_DISCIPLINE_OBSERVATION_ENABLED") != "true"
+        or any(os.getenv(name) != "false" for name in disabled)):
+    raise SystemExit("Unexpected trade-discipline preview configuration")
+print("Trade-discipline observation on; automatic actions and entry guard off")
+PY
+}
+if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
+  # 生产预览仅允许观察指定用户。先核实用户、现有计划事件表与数据库备份。
+  [[ "$DISCIPLINE_OBSERVATION_USER_ID" =~ ^[1-9][0-9]{0,9}$ ]] || die "Invalid discipline observation user id."
+  observation_ready=$("${compose[@]}" exec -T postgres sh -c '
+    PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=5000" \
+      psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      -c "SELECT EXISTS (SELECT 1 FROM qd_users WHERE id=$1) AND
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_trade_plan_events\$\$), \$\$SELECT\$\$), false)"
+  ' sh "$DISCIPLINE_OBSERVATION_USER_ID")
+  [[ "$observation_ready" == "t" ]] || die "Discipline preview user or existing plan-event table unavailable."
+  backup_dir="$DEPLOY_DIR/backups/discipline-preview-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  (umask 077; mkdir -p "$backup_dir"
+    "${compose[@]}" exec -T postgres sh -c 'pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > "$backup_dir/postgres.dump"
+  )
+  "${compose[@]}" exec -T postgres pg_restore --list < "$backup_dir/postgres.dump" > /dev/null
+  log "Verified preview PostgreSQL backup: $backup_dir"
+fi
 env_set "$ENV_FILE" "BACKEND_TAG" "$IMAGE_TAG"
 log "Pinned BACKEND_TAG=$IMAGE_TAG in $ENV_FILE."
 
@@ -139,8 +173,22 @@ log "Pulling backend image for services that share quantdinger-backend:$IMAGE_TA
 log "Running database migration (idempotent — re-running is safe)..."
 "${compose[@]}" run --rm migration
 
+if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_USER_ID" "$DISCIPLINE_OBSERVATION_USER_ID"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_AUTO_EXIT_ENABLED" "false"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED" "false"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED" "false"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_OBSERVATION_ENABLED" "true"
+  # 先用候选容器核对应用将读到的实际配置，再重启服务。
+  verify_discipline_preview "${compose[@]}" run --rm --no-deps -T --entrypoint "" scheduler-worker
+fi
+
 log "Restarting backend services..."
 "${compose[@]}" up -d "${backend_services[@]}"
+
+if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
+  verify_discipline_preview "${compose[@]}" exec -T scheduler-worker
+fi
 
 ###############################################################################
 # 8. Wait for backend /api/health to come up                                ##

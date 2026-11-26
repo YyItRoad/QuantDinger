@@ -241,6 +241,25 @@ def is_equity_bar_close(market: str, closed_at: datetime) -> bool:
     return True
 
 
+def equity_hourly_bar_windows(market: str, start: datetime, end: datetime) -> list[tuple[int, int]]:
+    """Return regular-session hourly windows, including the last short bar of each session segment."""
+    calendar = _calendar(market)
+    first = pd.Timestamp(_utc(start)).tz_convert(calendar.tz).date()
+    last = pd.Timestamp(_utc(end)).tz_convert(calendar.tz).date()
+    windows = []
+    for session in calendar.sessions_in_range(pd.Timestamp(first), pd.Timestamp(last)):
+        opens = int(calendar.session_open(session).timestamp())
+        closes = int(calendar.session_close(session).timestamp())
+        break_start = calendar.session_break_start(session)
+        break_end = calendar.session_break_end(session)
+        spans = ((opens, closes),)
+        if pd.notna(break_start) and pd.notna(break_end):
+            spans = ((opens, int(break_start.timestamp())), (int(break_end.timestamp()), closes))
+        for left, right in spans:
+            windows.extend((stamp, min(stamp + 3600, right)) for stamp in range(left, right, 3600))
+    return windows
+
+
 def latest_completed_session(
     market: str,
     now: Optional[datetime] = None,

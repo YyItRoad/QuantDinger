@@ -43,6 +43,7 @@ def opening(full_app, monkeypatch):
     monkeypatch.setattr(spot_sizing, 'normalize_spot_base_quantity', lambda *a, quantity, **k: quantity)
     monkeypatch.setattr(spot_sizing, 'normalize_spot_quote_amount', lambda *a, quote_amount, **k: quote_amount)
     monkeypatch.setattr(account_configuration, 'configure_derivatives_account', lambda *a, **k: None)
+    monkeypatch.setattr(quick_trade, 'configure_quick_trade_derivatives', lambda *a, **k: None)
     monkeypatch.setattr(account_warmup, 'configure_derivatives_account', lambda *a, **k: None)
     monkeypatch.setattr(execution, 'place_order_from_signal', execute_order)
     monkeypatch.setattr(ExecutionEventRepository, 'register_binding', lambda *a, **k: None)

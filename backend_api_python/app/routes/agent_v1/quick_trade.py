@@ -214,6 +214,10 @@ def _finish_live_notional(status: str) -> None:
         cur.close()
 
 
+class EntryDisciplineBlocked(ValueError):
+    pass
+
+
 def _place_live_order(*, body: dict, user_id: int) -> dict:
     credential_id = int(body.get("credential_id") or body.get("credentialId") or 0)
     market = (body.get("market") or "").strip()
@@ -264,6 +268,16 @@ def _place_live_order(*, body: dict, user_id: int) -> dict:
     reject = _reject_quick_trade_if_desktop_broker(exchange_id)
     if reject is not None:
         raise ValueError("Quick Trade currently supports crypto exchange API keys only.")
+
+    # Agent 快捷开仓复用网页入口的纪律规则，避免两个入口得出不同判定。
+    from app.trade_discipline.entry_guard import entry_discipline_rejection
+
+    rejection = entry_discipline_rejection(
+        user_id=user_id, credential_id=credential_id, symbol=symbol, side=side,
+        market_type=market_type, exchange_config=exchange_config,
+    )
+    if rejection:
+        raise EntryDisciplineBlocked(rejection)
 
     client = create_exchange_client(exchange_config, market_type=market_type)
 
@@ -525,6 +539,11 @@ def place_order():
             )
         try:
             result = _place_live_order(body=body, user_id=current_user_id())
+        except EntryDisciplineBlocked as exc:
+            from app.trade_discipline.entry_guard import BLOCKED
+
+            _finish_live_notional("failed")
+            return error(409, BLOCKED, details={"reason": str(exc)}, http=409)
         except ValueError as exc:
             _finish_live_notional("failed")
             return error(400, str(exc), http=400)
