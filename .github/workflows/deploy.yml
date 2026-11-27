@@ -65,7 +65,17 @@ on:
         default: "false"
         type: boolean
       discipline_observation_user_id:
-        description: "Optional account owner ID for a read-only trade-discipline preview."
+        description: "Account owner for discipline observation or explicitly enabled automatic exits."
+        required: false
+        default: ""
+        type: string
+      discipline_auto_exit_enabled:
+        description: "Enable real discipline exits for the specified user; adoption and entry guard stay off."
+        required: false
+        default: false
+        type: boolean
+      discipline_exit_from:
+        description: "Earliest included opening time with timezone; required for automatic exits."
         required: false
         default: ""
         type: string
@@ -155,6 +165,7 @@ jobs:
           fi
 
       - name: Build and push backend image
+        if: inputs.image_tag == ''
         uses: docker/build-push-action@v7
         with:
           context: ./backend_api_python
@@ -215,6 +226,8 @@ jobs:
           PRUNE: ${{ inputs.prune }}
           REPO_OWNER: ${{ github.repository_owner }}
           DISCIPLINE_OBSERVATION_USER_ID: ${{ inputs.discipline_observation_user_id }}
+          DISCIPLINE_AUTO_EXIT_ENABLED: ${{ inputs.discipline_auto_exit_enabled }}
+          DISCIPLINE_EXIT_FROM: ${{ inputs.discipline_exit_from }}
         with:
           host: ${{ inputs.host || secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
@@ -225,7 +238,7 @@ jobs:
           # appleboy/ssh-action: declare which step-level env vars to forward
           # into the remote shell's environment. Without this, $DEPLOY_DIR et al.
           # are unbound inside `set -u` and the script aborts.
-          envs: IMAGE_TAG,GHCR_IMAGE,DEPLOY_DIR,COMPOSE_FILE,PRUNE,REPO_OWNER,DISCIPLINE_OBSERVATION_USER_ID
+          envs: IMAGE_TAG,GHCR_IMAGE,DEPLOY_DIR,COMPOSE_FILE,PRUNE,REPO_OWNER,DISCIPLINE_OBSERVATION_USER_ID,DISCIPLINE_AUTO_EXIT_ENABLED,DISCIPLINE_EXIT_FROM
           script: |
             set -euo pipefail
             # appleboy/scp-action@v1 quirk: with source being a relative path

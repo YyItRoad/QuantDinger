@@ -30,6 +30,8 @@ set -euo pipefail
 : "${PRUNE:=false}"
 : "${REPO_OWNER:=OpenByteInc}"
 : "${DISCIPLINE_OBSERVATION_USER_ID:=}"
+: "${DISCIPLINE_AUTO_EXIT_ENABLED:=false}"
+: "${DISCIPLINE_EXIT_FROM:=}"
 # GHCR requires lowercase repo names. We lowercase in bash instead of using
 # the GitHub Actions `| lower` filter — that filter triggered a schema
 # fallback that hid the workflow name and the Run workflow button.
@@ -124,24 +126,52 @@ env_set() {
 
 ENV_FILE="$DEPLOY_DIR/.env"
 verify_discipline_preview() {
-  "$@" python - "$DISCIPLINE_OBSERVATION_USER_ID" <<'PY'
+  "$@" python - "$DISCIPLINE_OBSERVATION_USER_ID" "$DISCIPLINE_AUTO_EXIT_ENABLED" "$DISCIPLINE_EXIT_FROM" <<'PY'
 import os
 import sys
 from dotenv import load_dotenv
 
 load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
-disabled = ("TRADE_DISCIPLINE_AUTO_EXIT_ENABLED", "TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED",
-            "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED")
+disabled = ("TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED", "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED")
 expected = dict.fromkeys(disabled, "false")
 expected.update(TRADE_DISCIPLINE_USER_ID=sys.argv[1], TRADE_DISCIPLINE_OBSERVATION_ENABLED="true",
+                TRADE_DISCIPLINE_AUTO_EXIT_ENABLED=sys.argv[2],
+                TRADE_DISCIPLINE_EXIT_FROM=sys.argv[3] if sys.argv[2] == "true" else "",
                 TRADE_DISCIPLINE_EXTERNAL_OPENINGS_AS_MANUAL="true", TRADE_DISCIPLINE_PLAN_LOOKBACK_HOURS="24")
 mismatched = [name for name, value in expected.items() if os.getenv(name) != value]
 if mismatched:
     raise SystemExit("Unexpected trade-discipline preview configuration: " + ", ".join(mismatched))
-print("Trade-discipline observation on; external manual policy on; plan window 24h; automatic actions and entry guard off")
+if sys.argv[2] == "true":
+    from app.services.settings.capabilities import is_live_trading_enabled
+    from app.trade_discipline.exit import exit_start_from_env
+    if not is_live_trading_enabled() or exit_start_from_env() is None:
+        raise SystemExit("Discipline exits are not executable with the active global capability or cutoff")
+print("Trade-discipline configuration verified: auto_exit=" + sys.argv[2] + "; adoption=false; entry_guard=false")
 PY
 }
 preview_services=(backend scheduler-worker trading-worker)
+# 自动退出必须显式给出用户和含时区的起效范围，不代替用户启用全局实盘能力。
+[[ "$DISCIPLINE_AUTO_EXIT_ENABLED" == true || "$DISCIPLINE_AUTO_EXIT_ENABLED" == false ]] || die "Invalid automatic exit mode."
+if [[ "$DISCIPLINE_AUTO_EXIT_ENABLED" == true ]]; then
+  [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]] || die "Automatic exits require a discipline user id."
+  "${compose[@]}" exec -T backend python - "$DISCIPLINE_EXIT_FROM" <<'PY'
+import os
+import sys
+from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
+from app.services.settings.capabilities import is_live_trading_enabled
+try:
+    cutoff = datetime.fromisoformat(sys.argv[1])
+    if cutoff.utcoffset() is None:
+        raise ValueError()
+except ValueError:
+    raise SystemExit("Automatic exits require a timezone-aware opening cutoff")
+if not is_live_trading_enabled():
+    raise SystemExit("Global live-trading capability is off; deployment will not enable it")
+print("Automatic exit input and existing global capability verified")
+PY
+fi
 if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
   # 生产预览仅允许观察指定用户。先核实用户、现有计划事件表与数据库备份。
   [[ "$DISCIPLINE_OBSERVATION_USER_ID" =~ ^[1-9][0-9]{0,9}$ ]] || die "Invalid discipline observation user id."
@@ -185,7 +215,12 @@ log "Running database migration (idempotent — re-running is safe)..."
 
 if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
   env_set "$ENV_FILE" "TRADE_DISCIPLINE_USER_ID" "$DISCIPLINE_OBSERVATION_USER_ID"
-  env_set "$ENV_FILE" "TRADE_DISCIPLINE_AUTO_EXIT_ENABLED" "false"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_AUTO_EXIT_ENABLED" "$DISCIPLINE_AUTO_EXIT_ENABLED"
+  if [[ "$DISCIPLINE_AUTO_EXIT_ENABLED" == true ]]; then
+    env_set "$ENV_FILE" "TRADE_DISCIPLINE_EXIT_FROM" "$DISCIPLINE_EXIT_FROM"
+  else
+    env_set "$ENV_FILE" "TRADE_DISCIPLINE_EXIT_FROM" ""
+  fi
   env_set "$ENV_FILE" "TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED" "false"
   env_set "$ENV_FILE" "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED" "false"
   env_set "$ENV_FILE" "TRADE_DISCIPLINE_OBSERVATION_ENABLED" "true"
@@ -201,6 +236,7 @@ if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
 x-discipline-environment: &discipline-environment
   TRADE_DISCIPLINE_USER_ID: ${TRADE_DISCIPLINE_USER_ID:-}
   TRADE_DISCIPLINE_AUTO_EXIT_ENABLED: ${TRADE_DISCIPLINE_AUTO_EXIT_ENABLED:-false}
+  TRADE_DISCIPLINE_EXIT_FROM: ${TRADE_DISCIPLINE_EXIT_FROM:-}
   TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED: ${TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED:-false}
   TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED: ${TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED:-false}
   TRADE_DISCIPLINE_OBSERVATION_ENABLED: ${TRADE_DISCIPLINE_OBSERVATION_ENABLED:-false}
