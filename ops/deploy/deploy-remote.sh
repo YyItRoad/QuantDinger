@@ -65,6 +65,10 @@ if [ ! -f "$DEPLOY_DIR/$COMPOSE_FILE" ]; then
 fi
 
 compose=(docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE")
+preview_overlay="$DEPLOY_DIR/docker-compose.discipline-preview.yml"
+if [[ -f "$preview_overlay" ]]; then
+  compose+=(-f "$preview_overlay")
+fi
 backend_services=(backend trading-worker scheduler-worker celery-worker celery-backtest-worker celery-beat)
 configured_services=$("${compose[@]}" config --services) || die "Unable to resolve Compose services."
 for service in migration "${backend_services[@]}"; do
@@ -128,13 +132,15 @@ from dotenv import load_dotenv
 load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
 disabled = ("TRADE_DISCIPLINE_AUTO_EXIT_ENABLED", "TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED",
             "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED")
-if (os.getenv("TRADE_DISCIPLINE_USER_ID") != sys.argv[1]
-        or os.getenv("TRADE_DISCIPLINE_OBSERVATION_ENABLED") != "true"
-        or any(os.getenv(name) != "false" for name in disabled)):
-    raise SystemExit("Unexpected trade-discipline preview configuration")
+expected = dict.fromkeys(disabled, "false")
+expected.update(TRADE_DISCIPLINE_USER_ID=sys.argv[1], TRADE_DISCIPLINE_OBSERVATION_ENABLED="true")
+mismatched = [name for name, value in expected.items() if os.getenv(name) != value]
+if mismatched:
+    raise SystemExit("Unexpected trade-discipline preview configuration: " + ", ".join(mismatched))
 print("Trade-discipline observation on; automatic actions and entry guard off")
 PY
 }
+preview_services=(backend scheduler-worker trading-worker)
 if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
   # 生产预览仅允许观察指定用户。先核实用户、现有计划事件表与数据库备份。
   [[ "$DISCIPLINE_OBSERVATION_USER_ID" =~ ^[1-9][0-9]{0,9}$ ]] || die "Invalid discipline observation user id."
@@ -182,15 +188,44 @@ if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
   env_set "$ENV_FILE" "TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED" "false"
   env_set "$ENV_FILE" "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED" "false"
   env_set "$ENV_FILE" "TRADE_DISCIPLINE_OBSERVATION_ENABLED" "true"
+  # 直接向三个应用进程传递预览配置，兼容旧版 Compose 单独挂载 backend.env 的部署。
+  # 该覆盖文件只传这五个开关，运维脚本继续不修改 backend.env。
+  if [[ ! -f "$preview_overlay" ]]; then
+    preview_tmp=$(mktemp "$DEPLOY_DIR/.discipline-preview.XXXXXX")
+    cat > "$preview_tmp" <<'YAML'
+x-discipline-environment: &discipline-environment
+  TRADE_DISCIPLINE_USER_ID: ${TRADE_DISCIPLINE_USER_ID:-}
+  TRADE_DISCIPLINE_AUTO_EXIT_ENABLED: ${TRADE_DISCIPLINE_AUTO_EXIT_ENABLED:-false}
+  TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED: ${TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED:-false}
+  TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED: ${TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED:-false}
+  TRADE_DISCIPLINE_OBSERVATION_ENABLED: ${TRADE_DISCIPLINE_OBSERVATION_ENABLED:-false}
+services:
+  backend:
+    environment: *discipline-environment
+  scheduler-worker:
+    environment: *discipline-environment
+  trading-worker:
+    environment: *discipline-environment
+YAML
+    mv "$preview_tmp" "$preview_overlay"
+    compose+=(-f "$preview_overlay")
+  fi
+  "${compose[@]}" config --quiet
   # 先用候选容器核对应用将读到的实际配置，再重启服务。
-  verify_discipline_preview "${compose[@]}" run --rm --no-deps -T --entrypoint "" scheduler-worker
+  for service in "${preview_services[@]}"; do
+    log "Checking preview configuration for $service before startup"
+    verify_discipline_preview "${compose[@]}" run --rm --no-deps -T --entrypoint "" "$service"
+  done
 fi
 
 log "Restarting backend services..."
 "${compose[@]}" up -d "${backend_services[@]}"
 
 if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
-  verify_discipline_preview "${compose[@]}" exec -T scheduler-worker
+  for service in "${preview_services[@]}"; do
+    log "Checking active preview configuration for $service"
+    verify_discipline_preview "${compose[@]}" exec -T "$service"
+  done
 fi
 
 ###############################################################################
