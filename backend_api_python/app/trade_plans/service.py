@@ -50,7 +50,9 @@ class PlanService:
             return {'status': 'unavailable', 'reason': 'order_submission_time_unavailable'}
         if type(user_id) is not int or user_id <= 0 or direction not in {'long', 'short'}:
             raise PlanError('invalid_discipline_scope')
-        if lookback_hours is not None and (type(lookback_hours) is not int or lookback_hours <= 0):
+        if lookback_hours is None:
+            lookback_hours = 24
+        if type(lookback_hours) is not int or lookback_hours <= 0:
             raise PlanError('invalid_plan_lookback')
         # 计划必须对应同一原生产品，合约标识、交易所、结算币都参与比较。
         expected = _discipline_identity(instrument)
@@ -79,18 +81,19 @@ class PlanService:
             try:
                 if expires and timestamp(expires) <= cutoff:
                     continue
-                if not expires and lookback_hours is not None:
-                    recent_since = max(timestamp(row['version_created_at']), timestamp(row['observing_since']))
-                    if (cutoff - recent_since).total_seconds() > lookback_hours * 3600:
-                        continue
+                # 用户确认近期以进入观察中的时间计算，编辑版本不会刷新窗口。
+                # 有明确到期时间的计划也必须处于近期窗口内。
+                recent_since = timestamp(row.get('observing_since'))
+                if recent_since > cutoff:
+                    unresolved = unresolved or 'plan_timestamp_unavailable'
+                    continue
+                if (cutoff - recent_since).total_seconds() > lookback_hours * 3600:
+                    continue
             except PlanError:
                 unresolved = unresolved or 'plan_timestamp_unavailable'
                 continue
             if not all(identity.values()):
                 unresolved = unresolved or 'plan_identity_incomplete'
-                continue
-            if not expires and lookback_hours is None:
-                unresolved = unresolved or 'plan_lookback_not_configured'
                 continue
             return {'status': 'matched', 'plan_id': row['plan_id'], 'version_id': row['version_id'],
                     'version_no': row['version_no'], 'observing_since': row['observing_since'],

@@ -156,7 +156,7 @@ class PlanRepository:
                 ORDER BY recorded_at DESC, id DESC LIMIT 1
             ) state ON state.lifecycle='observing'
             WHERE p.user_id=%s AND p.created_at<=%s AND v.snapshot->>'direction'=%s
-            ORDER BY v.created_at DESC, p.id
+            ORDER BY state.recorded_at DESC, v.created_at DESC, p.id
         """, (cutoff, cutoff, uid, cutoff, direction))
         return [public(row) for row in cur.fetchall()]
 

@@ -28,16 +28,13 @@ def _entry_orders(evidence):
 
 
 def check_plans(inventory, lookback_hours):
-    from app.services.live_trading.records import normalize_strategy_symbol
     from app.trade_plans.service import PlanService
 
     evidence = inventory["evidence"]
-    # 计划按真实下单时刻匹配。这里目前仍把结算币固定为 USDT。
-    instrument = {
-        "market": "Crypto", "exchange_id": inventory["exchange_id"],
-        "market_type": inventory["market_type"], "instrument_id": evidence["instrument"],
-        "symbol": normalize_strategy_symbol(evidence["instrument"]), "settlement_ccy": "USDT",
-    }
+    # 计划按真实下单时刻和成交回放确认的原生产品查询，不能跨结算币匹配。
+    instrument = evidence.get("product")
+    if not instrument:
+        return []
     service = PlanService()
     checks = []
     for order_id, direction, submitted_at in _entry_orders(evidence):
@@ -50,15 +47,16 @@ def check_plans(inventory, lookback_hours):
 
 
 def check_ema(inventory):
-    from app.services.live_trading.records import normalize_strategy_symbol
     from app.trade_discipline.ema import check_ema25_at_order_time
 
     evidence = inventory["evidence"]
-    symbol = normalize_strategy_symbol(evidence["instrument"])
+    product = evidence.get("product")
+    if not product:
+        return []
     return [
         dict(check_ema25_at_order_time(
-            market="Crypto", symbol=symbol, exchange_id=inventory["exchange_id"],
-            market_type=inventory["market_type"], direction=direction, submitted_at=submitted_at,
+            market=product["market"], symbol=product["symbol"], exchange_id=product["exchange_id"],
+            market_type=product["market_type"], direction=direction, submitted_at=submitted_at,
         ), order_id=order_id)
         for order_id, direction, submitted_at in _entry_orders(evidence)
     ]
@@ -70,6 +68,7 @@ def _observe_position(inventory, position, evidence, observed_at, lookback_hours
     report = {
         "symbol": position["symbol"],
         "instrument": evidence["instrument"],
+        "product": evidence.get("product"),
         "side": side,
         "size": position["size"],
         "management_status": position["management_status"],
@@ -167,7 +166,7 @@ def observe_account(*, user_id, credential_id, observed_at, lookback_hours=None,
             evidence = read_position_evidence(inventory, symbol)
             if manual_only:
                 audit("fill_replay", user_id=user_id, credential_id=credential_id, round_at=observed_at,
-                      instrument=symbol, status=evidence["status"], issues=evidence["issues"],
+                      instrument=symbol, product=evidence.get("product"), status=evidence["status"], issues=evidence["issues"],
                       fill_count=len(evidence["events"]))
             results = [_observe_position(inventory, position, evidence, observed_at, lookback_hours, manual_only=manual_only)
                        for position in positions]
@@ -214,7 +213,8 @@ class HourlyDisciplineObserver:
                 from app.trade_discipline.manual import audit
 
                 accounts = list_position_inventory_accounts(user_id=self._account["user_id"])
-                audit("round_started", user_id=self._account["user_id"], round_at=now, account_count=len(accounts))
+                audit("round_started", user_id=self._account["user_id"], round_at=now, account_count=len(accounts),
+                      external_openings_as_manual=os.getenv("TRADE_DISCIPLINE_EXTERNAL_OPENINGS_AS_MANUAL", "false"))
                 for account in accounts:
                     if self._stopped.is_set():
                         break
@@ -237,6 +237,13 @@ class HourlyDisciplineObserver:
         report = observe_account(observed_at=now, **account)
         if account.get("manual_only"):
             from app.trade_discipline.manual import apply_poll_window, audit
+            from app.trade_discipline.notifications import notify_management_start_failures
+
+            # 已管理仓位仍跳过纪律重判，只检查本模块接管策略是否发生异步启动失败。
+            failed_candidates = {row["strategy_id"] for position in report["positions"]
+                                 for row in position.get("registrations", []) if row.get("discipline_adoption_key")}
+            notify_management_start_failures(user_id=report["user_id"], credential_id=report["credential_id"],
+                                             strategy_ids=failed_candidates)
 
             for position in report["positions"]:
                 if self._stopped.is_set():
@@ -284,7 +291,13 @@ class HourlyDisciplineObserver:
                               status=result.get("status"), reason=result.get("reason"),
                               request_id=result.get("request_id"), strategy_id=result.get("strategy_id"))
         if not self._stopped.is_set():
-            logger.info("Trade discipline observation %s", json.dumps(report, ensure_ascii=False))
+            # 完整客户端号码留在现有业务请求中用于恢复，汇总日志仅展示分支与来源线索。
+            logged = dict(report, positions=[
+                {key: value for key, value in position.items()
+                 if key not in {"entry_client_ids", "opening_client_order_id"}}
+                for position in report["positions"]
+            ])
+            logger.info("Trade discipline observation %s", json.dumps(logged, ensure_ascii=False))
 
     def stop(self):
         self._stopped.set()

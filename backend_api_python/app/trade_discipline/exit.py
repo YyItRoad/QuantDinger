@@ -15,9 +15,10 @@ from app.services.live_trading.execution_lock import TradeExecutionBusy, trade_e
 from app.services.live_trading.factory import create_client
 from app.trade_discipline.position_evidence import read_position_evidence
 from app.services.live_trading.position_management import _management_leg_lock, read_account_position_inventory
-from app.services.live_trading.records import normalize_strategy_symbol
+from app.services.live_trading.symbols import to_binance_futures_symbol
 from app.services.quick_trade.history import record_quick_trade
 from app.services.quick_trade.orders import quick_order_status, submit_market_close
+from app.services.settings.capabilities import is_live_trading_enabled
 from app.trade_discipline.observation import _next_hour, _observe_position
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
@@ -71,8 +72,12 @@ def queue_observed_exit(*, user_id, credential_id, position, observed_at, exit_f
     if not plan_checks or any(plan["status"] != expected_plan or not plan.get("submitted_at") for plan in plan_checks):
         return {"status": "deferred", "reason": "plan_evidence_unavailable"}
     side, instrument = position["side"], position["instrument"]
-    if (side not in {"long", "short"} or instrument == "USDT" or not instrument.endswith("USDT")
-            or not instrument.isascii() or not instrument.isalnum()):
+    # 退出使用回放已经确认的产品。登记前核对币对仍对应相同的原生交易所合约。
+    product = position.get("product") or {}
+    symbol = product.get("symbol", "")
+    if (side not in {"long", "short"} or product.get("instrument_id") != instrument
+            or not product.get("settlement_ccy") or product.get("market_type") != "swap"
+            or to_binance_futures_symbol(symbol) != instrument):
         return {"status": "deferred", "reason": "unsupported_position"}
     cap = Decimal(str(position["proposed_quantity"]))
     if not cap.is_finite() or cap <= 0:
@@ -82,6 +87,8 @@ def queue_observed_exit(*, user_id, credential_id, position, observed_at, exit_f
     ).hexdigest()
     # 本轮请求在下一整点过期，同一开仓成交与尾笔成交用同一键去重。
     meta = {name: position[name] for name in ("opened_at", "opening_fill_id", "last_fill_id", "instrument")}
+    # 原开仓及加仓的完整客户端号码随现有请求 JSON 持久化，不新增字段或来源表。
+    meta["entry_client_ids"] = position.get("entry_client_ids", {})
     meta.update(key=key, cap=str(cap), manual_opening=manual, reason=reason, expires_at=int(_next_hour(observed_at).timestamp()),
                 entry_order_times={str(plan["order_id"]): plan["submitted_at"] for plan in plan_checks})
     payload = {"_discipline_exit": meta, "_quick_trade": {"is_close": True, "close_side": side}}
@@ -90,12 +97,31 @@ def queue_observed_exit(*, user_id, credential_id, position, observed_at, exit_f
             (user_id, credential_id, exchange_id, market_type, symbol, side, source, status, raw_result)
             VALUES (%s, %s, 'binance', 'swap', %s, %s, '{_SOURCE}', '{_QUEUED}', %s::jsonb)
             ON CONFLICT (user_id, credential_id, (raw_result->'_discipline_exit'->>'key')) WHERE {_SCOPE}
-            DO UPDATE SET raw_result = EXCLUDED.raw_result
-            WHERE qd_quick_trades.status = '{_QUEUED}'
+            DO UPDATE SET status = '{_QUEUED}',
+                client_order_id = CASE WHEN qd_quick_trades.status = '{_QUEUED}'
+                    THEN qd_quick_trades.client_order_id ELSE '' END,
+                exchange_order_id = CASE WHEN qd_quick_trades.status = '{_QUEUED}'
+                    THEN qd_quick_trades.exchange_order_id ELSE '' END,
+                raw_result = jsonb_set(EXCLUDED.raw_result, '{{_discipline_exit}}',
+                    EXCLUDED.raw_result->'_discipline_exit' || jsonb_build_object(
+                        'submit_attempt', COALESCE((qd_quick_trades.raw_result->'_discipline_exit'->>'submit_attempt')::int,0)
+                            + CASE WHEN qd_quick_trades.status = '{_QUEUED}' THEN 0 ELSE 1 END,
+                        'attempt_history', COALESCE(qd_quick_trades.raw_result->'_discipline_exit'->'attempt_history','[]'::jsonb)
+                            || CASE WHEN qd_quick_trades.status = '{_QUEUED}' THEN '[]'::jsonb
+                               ELSE jsonb_build_array(jsonb_build_object(
+                                   'client_order_id', qd_quick_trades.client_order_id,
+                                   'exchange_order_id', qd_quick_trades.exchange_order_id,
+                                   'status', qd_quick_trades.raw_result->>'status',
+                                   'filled', qd_quick_trades.filled_amount)) END))
+            WHERE (qd_quick_trades.status = '{_QUEUED}' OR (
+                    qd_quick_trades.status IN ('cancelled', 'failed') AND qd_quick_trades.filled_amount = 0
+                    AND qd_quick_trades.raw_result->>'status' IN ('CANCELED','EXPIRED','EXPIRED_IN_MATCH','REJECTED')
+                    AND COALESCE(qd_quick_trades.client_order_id,'') <> ''
+                    AND COALESCE(qd_quick_trades.exchange_order_id,'') <> ''))
               AND (qd_quick_trades.raw_result->'_discipline_exit'->>'expires_at')::bigint
                    < (EXCLUDED.raw_result->'_discipline_exit'->>'expires_at')::bigint
             RETURNING id, status""",
-        (user_id, credential_id, normalize_strategy_symbol(instrument), "sell" if side == "long" else "buy",
+        (user_id, credential_id, symbol, "sell" if side == "long" else "buy",
          json.dumps(payload)),
     )
     return {"status": "queued", "request_id": row["id"]} if row else {"status": "existing", "key": key}
@@ -159,9 +185,12 @@ def _fresh_cap(row, meta, side, now, lookback_hours):
         return None
     # 只把已保存的下单时间回填给相同的交易所订单号，防止套用到新订单。
     order_times = meta["entry_order_times"]
-    evidence = dict(evidence, events=[dict(event, submitted_at=order_times.get(str(event["order_id"])))
+    client_ids = meta.get("entry_client_ids", {})
+    evidence = dict(evidence, events=[dict(event, submitted_at=order_times.get(str(event["order_id"])),
+                                         client_order_id=client_ids.get(str(event["order_id"]), ""))
                                       for event in evidence["events"]])
-    current = _observe_position(dict(inventory, exit_recheck=True), matches[0], evidence, now, lookback_hours, include_ema=False, manual_only=manual)
+    current = _observe_position(dict(inventory, exit_recheck=True, discipline_exit=meta), matches[0], evidence,
+                                now, lookback_hours, include_ema=False, manual_only=manual)
     if (current["outcome"] != "proposed_exit" or (manual and current.get("reason") != meta.get("reason"))
             or any(current[name] != meta[name] for name in ("opening_fill_id", "opened_at"))):
         return None
@@ -256,7 +285,8 @@ def _process_exit(row, *, exit_from, lookback_hours, still_active):
         if not row:
             return
         if (row["status"] == _QUEUED
-                and (not meta.get("manual_opening") or datetime.fromisoformat(meta["opened_at"]) < exit_from or _has_unresolved_exit(row))):
+                and (exit_from is None or not is_live_trading_enabled() or not meta.get("manual_opening")
+                     or datetime.fromisoformat(meta["opened_at"]) < exit_from or _has_unresolved_exit(row))):
             return
         cfg = resolve_exchange_config({"credential_id": credential_id}, user_id=user_id)
         client = create_client(cfg, market_type="swap")
@@ -270,10 +300,22 @@ def _process_exit(row, *, exit_from, lookback_hours, still_active):
         if row["status"] == _SENT:
             if meta.get("account_scope") == account_scope:
                 audit("exit_lookup", **context, client_order_id=row["client_order_id"])
-                raw = client.get_order(symbol=meta["instrument"], client_order_id=row["client_order_id"])
+                try:
+                    raw = client.get_order(symbol=meta["instrument"], client_order_id=row["client_order_id"])
+                except Exception:
+                    # 本地提交记录不能证明请求是否已抵达交易所。失败时保留原号继续
+                    # 回查，并通知人工，不能因查不到就生成另一笔平仓单。
+                    from app.trade_discipline.notifications import notify_unconfirmed_exit
+
+                    notify_unconfirmed_exit(row)
+                    raise
                 _save_order(row, raw)
             else:
                 audit("exit_deferred", **context, reason="exit_account_scope_unverified")
+            return
+        # 提交使用快捷交易币对，回查使用原生合约。提交前再次确认两者始终指向同一合约。
+        if to_binance_futures_symbol(symbol) != meta["instrument"]:
+            audit("exit_deferred", **context, reason="exit_product_mismatch")
             return
         with _management_leg_lock(credential_id=credential_id, market_type="swap", symbol=symbol, side=side):
             # 发送退出请求前复核当前仓位和归属，数量上限以本次核对结果为准。
@@ -287,14 +329,17 @@ def _process_exit(row, *, exit_from, lookback_hours, still_active):
             if not 0 < quantity <= cap or client.get_dual_side_position() is None:
                 return
             def authorized():
-                return still_active() and datetime.now(timezone.utc).timestamp() < meta["expires_at"]
+                return (still_active() and is_live_trading_enabled() and exit_start_from_env() is not None
+                        and datetime.now(timezone.utc).timestamp() < meta["expires_at"])
 
             if not authorized():
                 return
             client.strict_market_close_guard = authorized
             now = datetime.now(timezone.utc)
             # 请求发出前先保存客户端订单号，超时或重启后按原订单号回查。
-            client_order_id = client._format_client_order_id(f"qde{meta['key']}")
+            attempt = int(meta.get("submit_attempt", 0))
+            prefix = f"qde{attempt}_" if attempt else "qde"
+            client_order_id = client._format_client_order_id(f"{prefix}{meta['key']}")
             meta.update(submitted_qty=str(quantity), checked_at=int(now.timestamp()), account_scope=account_scope)
             tracked = _update_request(row, payload, status=_SENT, client_order_id=client_order_id)
             if tracked and authorized():
@@ -308,7 +353,8 @@ def _process_exit(row, *, exit_from, lookback_hours, still_active):
 
 def process_discipline_exits(*, still_active):
     exit_from = exit_start_from_env()
-    if exit_from is None or os.getenv("TRADE_DISCIPLINE_MARKET_TYPE", "swap").strip().lower() != "swap":
+    # 开关约束新提交，已经发出的请求仍由原 Worker 回查并更新本地状态。
+    if os.getenv("TRADE_DISCIPLINE_MARKET_TYPE", "swap").strip().lower() != "swap":
         return
     try:
         user_id = int(os.getenv("TRADE_DISCIPLINE_USER_ID", ""))

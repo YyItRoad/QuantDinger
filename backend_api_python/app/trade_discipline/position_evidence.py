@@ -1,4 +1,4 @@
-"""Read and reconcile Binance USDT futures execution evidence for one instrument."""
+"""Reconcile Binance linear perpetual execution evidence for one instrument."""
 
 from __future__ import annotations
 
@@ -9,7 +9,10 @@ from decimal import Decimal, InvalidOperation
 
 from app.services.exchange_execution import resolve_exchange_config
 from app.services.live_trading.factory import create_client
+from app.services.live_trading.records import normalize_strategy_symbol
 from app.services.live_trading.symbols import to_binance_futures_symbol
+from app.services.market.instrument_products import PRODUCT_CRYPTO
+from app.services.market.product_catalog import get_catalog_product
 from app.utils.db import get_db_connection
 
 _HISTORY_LIMIT = 1000
@@ -49,7 +52,7 @@ def _read_local_fills(user_id, credential_id, instrument):
         try:
             cur.execute(
                 """
-                SELECT exchange_fill_id, exchange_order_id, occurred_at, position_side,
+                SELECT exchange_fill_id, exchange_order_id, client_order_id, occurred_at, position_side,
                        side, quantity, cumulative_quantity
                 FROM qd_execution_events
                 WHERE user_id = %s AND credential_id = %s
@@ -71,14 +74,14 @@ def _read_local_orders(user_id, credential_id, instrument, order_ids):
         try:
             cur.execute(
                 """
-                SELECT exchange_order_id, exchange_response_json AS payload, 'pending_orders' AS source
+                SELECT exchange_order_id, client_order_id, exchange_response_json AS payload, 'pending_orders' AS source
                 FROM pending_orders
                 WHERE user_id = %s AND credential_id = %s AND exchange_id IN %s
                   AND market_type = 'swap' AND execution_mode = 'live'
                   AND (inst_id = %s OR (inst_id = '' AND UPPER(REPLACE(symbol, '/', '')) = %s))
                   AND exchange_order_id = ANY(%s)
                 UNION ALL
-                SELECT exchange_order_id, raw_result::text, 'qd_quick_trades'
+                SELECT exchange_order_id, client_order_id, raw_result::text, 'qd_quick_trades'
                 FROM qd_quick_trades
                 WHERE user_id = %s AND credential_id = %s AND exchange_id IN %s
                   AND market_type = 'swap' AND UPPER(REPLACE(symbol, '/', '')) = %s
@@ -178,7 +181,9 @@ def _replay(fills, expected):
     return events, {side: _iso(time_ms) for side, time_ms in current_opened.items()}
 
 
-def _order_time(payload, order_id, instrument):
+def _order_details(payload, order_id, instrument):
+    # 只接受当前账户查询或同账户本地记录中的同一原生合约、同一订单。
+    # 客户端订单号保留大小写和完整值，不能按前缀或截断后的号码做归属匹配。
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
@@ -190,7 +195,31 @@ def _order_time(payload, order_id, instrument):
         return None
     if str(payload.get("symbol") or "").upper() != instrument:
         return None
-    return _milliseconds(payload.get("time"))
+    return _milliseconds(payload.get("time")), str(payload.get("clientOrderId") or "")
+
+
+def _linear_perpetual_product(inventory, instrument, exchange_client):
+    # 用原生合约定位目录。目录可能还未同步到该报价币，允许用当前账户环境的合约资料补齐。
+    symbol = normalize_strategy_symbol(instrument)
+    catalog = get_catalog_product(market="Crypto", exchange_id="binance", market_type="swap",
+                                  symbol=symbol, instrument_id=instrument)
+    if catalog and catalog.get("product_type") not in {None, "", PRODUCT_CRYPTO}:
+        return None
+    settlement = str((catalog or {}).get("settle_currency") or "").upper()
+    if settlement:
+        if not symbol.endswith(f"/{settlement}"):
+            return None
+    else:
+        meta = exchange_client().get_symbol_filters(symbol=instrument).get("_meta") or {}
+        base, quote, settlement = (str(meta.get(field) or "").upper()
+                                   for field in ("baseAsset", "quoteAsset", "marginAsset"))
+        # exchangeInfo 可能返回多个合约，校验原生代码、产品类型和结算币后才使用这条记录。
+        if (meta.get("symbol") != instrument or meta.get("contractType") != "PERPETUAL"
+                or not base or not quote or quote != settlement or base + quote != instrument):
+            return None
+        symbol = f"{base}/{quote}"
+    return {"market": "Crypto", "exchange_id": inventory["exchange_id"], "market_type": inventory["market_type"],
+            "instrument_id": instrument, "symbol": symbol, "settlement_ccy": settlement}
 
 
 def read_position_evidence(inventory, symbol, *, verify_current=False):
@@ -204,9 +233,9 @@ def read_position_evidence(inventory, symbol, *, verify_current=False):
     if inventory["status"] != "ok":
         result["issues"].append("inventory_incomplete")
         return result
-    # 当前回溯入口只支持 USDT 永续，其他产品这里不会继续查成交。
-    if not instrument.isalnum() or not instrument.isascii() or not instrument.endswith("USDT") or instrument == "USDT":
-        raise ValueError("Evidence requires a Binance USDT futures instrument, for example BTC/USDT")
+    if not instrument.isascii() or not instrument.isalnum():
+        result["issues"].append("product_identity_unavailable")
+        return result
 
     snapshot_ms = int(inventory["fetched_at"]) * 1000 + 999
     expected = {"long": _ZERO, "short": _ZERO}
@@ -231,6 +260,15 @@ def read_position_evidence(inventory, symbol, *, verify_current=False):
             client = create_client(config, market_type="swap")
             client.timeout_sec = min(client.timeout_sec, 6.0)
         return client
+
+    try:
+        product = _linear_perpetual_product(inventory, instrument, exchange_client)
+    except Exception:
+        product = None
+    if not product:
+        result["issues"].append("product_identity_unavailable")
+        return result
+    result["product"] = product
 
     # 优先用本地成交回放并核对仓位数量，证据不足时再按合约补查交易所。
     fills = []
@@ -295,9 +333,26 @@ def read_position_evidence(inventory, symbol, *, verify_current=False):
         result["issues"].append("local_orders_unavailable")
 
     local_times = {}
+    client_ids = {}
+    for row in rows:
+        client_id = str(row.get("client_order_id") or "")
+        if client_id:
+            client_ids.setdefault(str(row["exchange_order_id"]), set()).add(client_id)
     for order in local_orders:
         order_id = order["exchange_order_id"]
-        time_ms = _order_time(order["payload"], order_id, instrument)
+        details = _order_details(order["payload"], order_id, instrument)
+        if not details:
+            continue
+        time_ms, client_id = details
+        stored_id = str(order.get("client_order_id") or "")
+        # 旧发单前记录可能保存格式化前的号码，原单保存实际发出的 broker 号码。
+        # 复用现有格式化方法验证两者对应关系，避免把正常加前缀误报成来源冲突。
+        if stored_id and client_id and stored_id != client_id:
+            if exchange_client()._format_client_order_id(stored_id) == client_id:
+                stored_id = client_id
+        for value in (client_id, stored_id):
+            if value:
+                client_ids.setdefault(order_id, set()).add(str(value))
         if time_ms and _iso(time_ms) <= first_fill[order_id]:
             local_times.setdefault(order_id, {})[time_ms] = order["source"]
     order_times = {}
@@ -306,18 +361,32 @@ def read_position_evidence(inventory, symbol, *, verify_current=False):
             order_times[order_id] = next(iter(candidates.items()))
 
     # 优先补查最近的缺失订单，并限制请求数量，避免单个品种占用整轮扫描。
-    missing = [order_id for order_id in reversed(first_fill) if order_id not in order_times]
+    missing = [order_id for order_id in reversed(first_fill)
+               if order_id not in order_times or not client_ids.get(order_id)]
     for order_id in missing[:_ORDER_LOOKUP_LIMIT]:
         try:
             payload = exchange_client().get_order(symbol=instrument, order_id=order_id)
         except Exception:
             continue
-        time_ms = _order_time(payload, order_id, instrument)
+        details = _order_details(payload, order_id, instrument)
+        if not details:
+            continue
+        time_ms, client_id = details
+        if client_id:
+            client_ids.setdefault(order_id, set()).add(client_id)
         if time_ms and _iso(time_ms) <= first_fill[order_id]:
+            if order_id in order_times and order_times[order_id][0] != time_ms:
+                result["issues"].append("order_submission_time_conflict")
+                order_times.pop(order_id)
+                continue
             order_times[order_id] = (time_ms, "exchange_order")
     for event in events:
         time_ms, source = order_times.get(event["order_id"], (None, None))
-        event.update(submitted_at=_iso(time_ms), order_time_source=source)
+        candidates = client_ids.get(event["order_id"], set())
+        if len(candidates) > 1:
+            result["issues"].append("order_client_id_conflict")
+        event.update(submitted_at=_iso(time_ms), order_time_source=source,
+                     client_order_id=next(iter(candidates)) if len(candidates) == 1 else "")
     if len(order_times) < len(first_fill):
         result["issues"].append("order_submission_time_unavailable")
 

@@ -2,13 +2,16 @@ import json
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
+from uuid import uuid4
 
 import pytest
+from psycopg2.extras import Json
 
 from app.trade_discipline import inventory_cli as trade_discipline_inventory
 from app.trade_discipline import position_evidence
 from app.trade_plans.repository import PlanRepository
 from app.trade_plans.service import PlanService
+from tests.test_trade_plan_app import full_app
 
 _ORDER_TIME = datetime(2026, 11, 21, 2, tzinfo=timezone.utc)
 _INSTRUMENT = {
@@ -17,12 +20,12 @@ _INSTRUMENT = {
 }
 
 
-def candidate(*, expires=_ORDER_TIME + timedelta(hours=1), **instrument_changes):
+def candidate(*, expires=_ORDER_TIME + timedelta(hours=1), order_time=_ORDER_TIME, **instrument_changes):
     return {
         "plan_id": "historical-plan", "version_id": "version-2", "version_no": 2,
         "snapshot": {"instrument": dict(_INSTRUMENT, **instrument_changes), "expires_at": expires.isoformat() if expires else None},
-        "version_created_at": (_ORDER_TIME - timedelta(hours=3)).isoformat(),
-        "observing_since": (_ORDER_TIME - timedelta(hours=6)).isoformat(),
+        "version_created_at": (order_time - timedelta(hours=3)).isoformat(),
+        "observing_since": (order_time - timedelta(hours=6)).isoformat(),
     }
 
 
@@ -90,21 +93,75 @@ def test_retrospective_or_empty_result_is_no_plan(lookup):
     assert match()["status"] == "no_plan"
 
 
-def test_unconfigured_lookback_and_missing_identity_are_unavailable(lookup):
+def test_default_lookback_is_one_day_and_missing_identity_is_unavailable(lookup):
     lookup.fetchall.side_effect = [[candidate(expires=None)], [candidate(instrument_id="")],
                                     [candidate(expires=None), candidate()]]
-    assert match() == {"status": "unavailable", "reason": "plan_lookback_not_configured"}
+    assert match()["status"] == "matched"
     assert match() == {"status": "unavailable", "reason": "plan_identity_incomplete"}
     assert match()["status"] == "matched"
 
 
-def test_lookback_counts_from_most_recent_version_or_observing_entry(lookup):
+def test_lookback_counts_only_from_observing_entry(lookup):
     row = candidate(expires=None)
     lookup.fetchall.return_value = [row]
-    assert match(lookback_hours=3)["status"] == "matched"
+    assert match(lookback_hours=3)["status"] == "no_plan"
+    assert match(lookback_hours=6)["status"] == "matched"
     assert match(lookback_hours=2)["status"] == "no_plan"
     row["observing_since"] = (_ORDER_TIME - timedelta(hours=1)).isoformat()
     assert match(lookback_hours=1)["status"] == "matched"
+
+
+@pytest.mark.parametrize("expires", [None, _ORDER_TIME + timedelta(days=2)])
+def test_editing_or_long_expiry_does_not_refresh_observing_window(lookup, expires):
+    row = candidate(expires=expires)
+    row["observing_since"] = (_ORDER_TIME - timedelta(days=1, seconds=1)).isoformat()
+    row["version_created_at"] = (_ORDER_TIME - timedelta(minutes=1)).isoformat()
+    lookup.fetchall.return_value = [row]
+    assert match()["status"] == "no_plan"
+
+
+def test_old_plan_newly_observing_is_effective_and_query_uses_observing_priority(lookup):
+    row = candidate()
+    row["version_created_at"] = (_ORDER_TIME - timedelta(days=2)).isoformat()
+    row["observing_since"] = (_ORDER_TIME - timedelta(hours=1)).isoformat()
+    lookup.fetchall.return_value = [row]
+    assert match()["status"] == "matched"
+    assert "ORDER BY state.recorded_at DESC, v.created_at DESC, p.id" in lookup.execute.call_args.args[0]
+
+
+@pytest.mark.parametrize("age_hours, matched", [(24, True), (24.001, False)])
+def test_one_day_observing_boundary(lookup, age_hours, matched):
+    row = candidate()
+    row["observing_since"] = (_ORDER_TIME - timedelta(hours=age_hours)).isoformat()
+    lookup.fetchall.return_value = [row]
+    assert (match()["status"] == "matched") is matched
+
+
+def test_real_sql_chooses_latest_observing_instead_of_latest_version(full_app):
+    _, db, _, _ = full_app
+    expected = None
+    with db.cursor() as cur:
+        for created_age, observing_age in ((4, 3), (48, 1)):
+            plan_id, version_id, event_id = (str(uuid4()) for _ in range(3))
+            created = _ORDER_TIME - timedelta(hours=created_age)
+            observing = _ORDER_TIME - timedelta(hours=observing_age)
+            snapshot = {"instrument": _INSTRUMENT, "direction": "long",
+                        "expires_at": (_ORDER_TIME + timedelta(days=1)).isoformat()}
+            cur.execute("""INSERT INTO qd_trade_plans(id,user_id,lifecycle,created_at)
+                VALUES (%s,1,'observing',%s)""", (plan_id, created))
+            cur.execute("""INSERT INTO qd_trade_plan_versions
+                (id,user_id,plan_id,version_no,snapshot,content_hash,change_reason,source,actor_id,created_at)
+                VALUES (%s,1,%s,1,%s,'fixture','fixture','system','fixture',%s)""",
+                        (version_id, plan_id, Json(snapshot), created))
+            cur.execute("""INSERT INTO qd_trade_plan_events
+                (id,user_id,plan_id,plan_version_id,event_type,payload,recorded_at,source,actor_id)
+                VALUES (%s,1,%s,%s,'state_changed','{"to":"observing"}',%s,'system','fixture')""",
+                        (event_id, plan_id, version_id, observing))
+            if observing_age == 1:
+                expected = plan_id
+    result = PlanService().match_at_order_time(1, instrument=_INSTRUMENT, direction="long",
+                                              submitted_at=_ORDER_TIME.isoformat())
+    assert result["status"] == "matched" and result["plan_id"] == expected
 
 
 def test_query_failure_is_distinct_from_no_plan(lookup):
@@ -136,7 +193,7 @@ def test_cli_uses_real_submission_time_once_per_entry_order(lookup, monkeypatch,
     }))
     second_time = _ORDER_TIME + timedelta(seconds=30)
     monkeypatch.setattr(position_evidence, "read_position_evidence", Mock(return_value={
-        "status": "partial", "instrument": "BTCUSDT",
+        "status": "partial", "instrument": "BTCUSDT", "product": _INSTRUMENT,
         "events": [
             event("1", "open", "buy", _ORDER_TIME.isoformat()),
             event("1", "add", "buy", _ORDER_TIME.isoformat()),

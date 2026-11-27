@@ -21,8 +21,11 @@ OPENED = "2026-11-21T02:05:00.000Z"
 SUBMITTED = "2026-11-21T02:04:00.000Z"
 START = datetime.fromisoformat("2026-11-21T02:00:00Z")
 ROUND = datetime.fromisoformat("2026-11-21T03:00:00Z")
+PRODUCT = dict(market="Crypto", exchange_id="binance", market_type="swap",
+               instrument_id="BTCUSDT", symbol="BTC/USDT", settlement_ccy="USDT")
 CANDIDATE = dict(manual_opening=True, outcome="proposed_exit", reason="no_plan", management_status="unregistered",
                  evidence_status="reconciled", instrument="BTCUSDT", symbol="BTC/USDT", side="long",
+                 product=PRODUCT,
                  opened_at=OPENED, opening_fill_id="10", last_fill_id="10", proposed_quantity="0.70",
                  plan_checks=[dict(status="no_plan", submitted_at=SUBMITTED, order_id="1")])
 
@@ -82,7 +85,7 @@ def runtime(monkeypatch):
     monkeypatch.setattr(exits, "read_account_position_inventory", inventory)
     monkeypatch.setattr(exits, "read_position_evidence", lambda *args, **kwargs: {
         "instrument": "BTCUSDT", "status": "reconciled", "opened_at": {"long": OPENED},
-        "events": deepcopy(state.fills),
+        "product": PRODUCT, "events": deepcopy(state.fills),
     })
     state.plan_lookup = Mock(side_effect=lambda *args, **kwargs: {"status": state.plan})
     monkeypatch.setattr(PlanService, "match_at_order_time", state.plan_lookup)
@@ -101,6 +104,18 @@ def runtime(monkeypatch):
             key = raw["_discipline_exit"]["key"]
             for row in state.rows.values():
                 if row["raw_result"]["_discipline_exit"]["key"] == key:
+                    old_meta = row["raw_result"]["_discipline_exit"]
+                    if (row["status"] in {"cancelled", "failed"} and row["filled_amount"] == 0
+                            and row["raw_result"].get("status") in {"CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}
+                            and row.get("client_order_id") and row.get("exchange_order_id")
+                            and old_meta["expires_at"] < raw["_discipline_exit"]["expires_at"]):
+                        raw["_discipline_exit"]["submit_attempt"] = old_meta.get("submit_attempt", 0) + 1
+                        raw["_discipline_exit"]["attempt_history"] = old_meta.get("attempt_history", []) + [{
+                            "client_order_id": row["client_order_id"], "exchange_order_id": row["exchange_order_id"],
+                            "status": row["raw_result"]["status"], "filled": 0,
+                        }]
+                        row.update(status=exits._QUEUED, client_order_id="", exchange_order_id="", raw_result=raw)
+                        return deepcopy(row)
                     return None
             row_id = len(state.rows) + 1
             state.rows[row_id] = dict(id=row_id, user_id=uid, credential_id=cred, symbol=symbol, side=side,
@@ -148,6 +163,16 @@ def worker():
     loop.lease_guard = lambda: True
     loop._stop_event = Event()
     loop._sync_discipline_exits()
+
+
+def test_exit_rejects_a_cross_settlement_symbol(runtime):
+    conflicting = dict(CANDIDATE, product=dict(PRODUCT, symbol="BTC/USDC"))
+    assert queue(conflicting) == {"status": "deferred", "reason": "unsupported_position"}
+
+    request_id = queue()["request_id"]
+    runtime.rows[request_id]["symbol"] = "BTC/USDC"
+    worker()
+    assert not runtime.posts
 
 
 def test_partial_does_not_retry_and_new_round_only_reduces_proven_residual(runtime):
@@ -223,13 +248,21 @@ def test_sent_exit_does_not_query_another_exchange_endpoint(runtime):
     assert runtime.rows[1]["status"] == "filled"
 
 
-@pytest.mark.parametrize("change, value", [("plan", "matched"), ("plan", "unavailable"),
-                                           ("managed", "registered"), ("qty", None)])
-def test_worker_rechecks_plan_and_live_ownership(runtime, change, value):
+@pytest.mark.parametrize("change, value", [("managed", "registered"), ("qty", None)])
+def test_worker_rechecks_live_ownership(runtime, change, value):
     queue()
     setattr(runtime, change, value)
     worker()
     assert runtime.posts == []
+
+
+@pytest.mark.parametrize("plan", ["matched", "unavailable"])
+def test_saved_exit_is_not_rejudged_by_later_plan_change(runtime, plan):
+    queue()
+    runtime.plan = plan
+    worker()
+    assert len(runtime.posts) == 1
+    runtime.plan_lookup.assert_not_called()
 
 
 def test_new_fill_requires_a_new_observation(runtime):
@@ -245,7 +278,7 @@ def test_size_is_capped_by_observed_attributable_and_exchange_lot(runtime):
     runtime.close_status, runtime.close_fill = "FILLED", "0.20"
     worker()
     assert [Decimal(quantity) for _, quantity in runtime.posts] == [Decimal("0.20")]
-    assert runtime.plan_lookup.call_args.kwargs["submitted_at"] == SUBMITTED
+    runtime.plan_lookup.assert_not_called()
 
 
 def test_scheduler_round_queues_exit_without_waiting_one_hour(runtime, monkeypatch):
@@ -271,6 +304,42 @@ def test_disabled_worker_and_unconfirmed_exit_never_submit(runtime, monkeypatch)
     assert runtime.posts == []
 
 
+def test_global_execution_disabled_blocks_new_submit(runtime, monkeypatch):
+    queue()
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "false")
+    worker()
+    assert runtime.posts == []
+
+
+@pytest.mark.parametrize("flag", ["LIVE_TRADING_ENABLED", "TRADE_DISCIPLINE_AUTO_EXIT_ENABLED",
+                                "TRADE_DISCIPLINE_OBSERVATION_ENABLED"])
+def test_submitted_exit_can_be_recovered_after_flags_disabled(runtime, monkeypatch, flag):
+    queue()
+    runtime.timeout = True
+    worker()
+    assert len(runtime.posts) == 1
+    original_id = runtime.posts[0][0]
+    runtime.now += timedelta(seconds=31)
+    monkeypatch.setenv(flag, "false")
+    worker()
+    assert runtime.reads == [original_id]
+    assert len(runtime.posts) == 1
+
+
+@pytest.mark.parametrize("terminal", ["CANCELED", "EXPIRED", "REJECTED"])
+def test_zero_fill_terminal_exit_retries_next_poll_using_same_request(runtime, terminal):
+    first = queue()
+    runtime.close_status, runtime.close_fill = terminal, "0"
+    worker()
+    original_client = runtime.posts[0][0]
+    runtime.now += timedelta(hours=1)
+    assert queue(now=runtime.now) == {"status": "queued", "request_id": first["request_id"]}
+    assert queue(now=runtime.now)["status"] == "existing"
+    runtime.close_status, runtime.close_fill = "FILLED", "0.70"
+    worker()
+    assert len(runtime.rows) == 1 and len(runtime.posts) == 2
+    assert runtime.posts[1][0] != original_client
+    assert runtime.rows[1]["raw_result"]["_discipline_exit"]["attempt_history"][0]["client_order_id"] == original_client
 @pytest.mark.parametrize("code", [-4061, -1021])
 def test_strict_binance_close_does_not_retry_mode_or_timestamp_errors(runtime, monkeypatch, code):
     rest = Mock(return_value=(400, {"code": code}, json.dumps({"code": code})))

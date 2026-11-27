@@ -41,3 +41,12 @@ def app():
 def client(app):
     """A test client for the app."""
     return app.test_client()
+
+
+@pytest.fixture
+def discipline_product_catalog(monkeypatch):
+    from app.trade_discipline import position_evidence
+
+    # 模拟目前只同步了 USDT 的目录，USDC 用各用例提供的交易所元数据。
+    monkeypatch.setattr(position_evidence, "get_catalog_product", lambda *, symbol, **scope:
+                        {"settle_currency": "USDT"} if symbol.endswith("/USDT") else None)

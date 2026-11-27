@@ -73,6 +73,24 @@ def test_swap_symbol_uses_settlement_suffix():
     assert source._symbol_for_scoped_market("BTC/USDT") == "BTC/USDT:USDT"
 
 
+def test_scoped_binance_usdc_never_falls_back_to_usdt():
+    source = object.__new__(CryptoDataSource)
+    source._allow_public_fallback = False
+    source._scoped_market_type = "swap"
+    source.exchange = SimpleNamespace(id="binance", timeframes={"4h": "4h"})
+    source._markets_loaded = True
+    source._markets_cache = {"BTC/USDT": {"active": True}}
+    requests = []
+
+    def fetch(symbol, *args, **kwargs):
+        requests.append(symbol)
+        return []
+
+    source._fetch_ohlcv = fetch
+    assert source.get_kline("BTC/USDC", "4H", 100) == []
+    assert requests == ["BTC/USDC:USDC"]
+
+
 def test_crypto_kline_is_pure_ohlcv_and_preserves_price_precision():
     now_s = int(datetime.now(timezone.utc).timestamp())
     source = object.__new__(CryptoDataSource)

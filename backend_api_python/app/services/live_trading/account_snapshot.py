@@ -697,6 +697,8 @@ def _parse_binance_orders(rows: List[Dict[str, Any]], *, market_type: str) -> Li
                 "amount": sz,
                 "filled": filled,
                 "exchange_order_id": str(o.get("orderId") or ""),
+                # 保留交易所原始客户端订单号，供纪律模块关联人工单和系统发单前记录。
+                "client_order_id": str(o.get("clientOrderId") or ""),
                 "status": str(o.get("status") or "NEW"),
                 "inst_id": sym,
             }

@@ -31,7 +31,7 @@ def _trade(trade_id=100, *, side="BUY", time=_OPENED):
 
 
 @pytest.fixture
-def runtime(monkeypatch):
+def runtime(monkeypatch, discipline_product_catalog):
     config = {"exchange_id": "binance", "api_key": "fixture", "secret_key": "fixture"}
     monkeypatch.setattr(exchange_execution, "resolve_exchange_config", Mock(return_value=config))
     monkeypatch.setattr(adoption, "resolve_exchange_config", Mock(return_value=config))
@@ -146,6 +146,12 @@ def test_adoption_reuses_existing_creation_registration_and_start_on_repeat(runt
     assert [call.args for call in runtime.request.call_args_list] == [
         ("GET", "/fapi/v1/userTrades"), ("GET", "/fapi/v1/openOrders"), ("GET", "/fapi/v1/openAlgoOrders"),
     ]
+
+
+def test_global_execution_disabled_defers_adoption(runtime, monkeypatch):
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "false")
+    assert adopt() == {"status": "deferred", "reason": "live_trading_disabled"}
+    runtime.service.create_strategy.assert_not_called()
 
 
 def test_concurrent_candidates_serialize_to_one_instance(runtime):

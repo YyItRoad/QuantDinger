@@ -46,7 +46,8 @@ def list_managed_positions_for_account(*, user_id: int, credential_id: int) -> l
             """
             SELECT p.strategy_id, s.strategy_name, s.status AS strategy_status,
                    s.execution_mode, p.symbol, p.symbol_canonical, p.side, p.size,
-                   p.market_type, p.credential_id, p.inst_id
+                   p.market_type, p.credential_id, p.inst_id,
+                   s.trading_config->'position_management'->>'discipline_adoption_key' AS discipline_adoption_key
             FROM qd_strategy_positions p
             JOIN qd_strategies_trading s ON s.id = p.strategy_id
             WHERE s.user_id = %s AND p.credential_id = %s AND p.size > 0
@@ -82,6 +83,7 @@ def list_managed_positions_for_account(*, user_id: int, credential_id: int) -> l
             "market_type": market_type,
             "credential_id": int(row.get("credential_id") or 0),
             "inst_id": str(row.get("inst_id") or ""),
+            "discipline_adoption_key": str(row.get("discipline_adoption_key") or ""),
         })
     return items
 

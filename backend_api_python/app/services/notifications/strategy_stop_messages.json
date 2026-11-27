@@ -1,5 +1,9 @@
 {
   "en-US": {
+    "discipline_start_failed_title": "{brand} | Position management failed to start",
+    "discipline_exit_unconfirmed_title": "{brand} | Exit order requires review",
+    "discipline_exit_unconfirmed_body": "The result of exit request #{id} for {symbol} is unconfirmed. The system continues checking the original order. Review its exchange status.",
+    "discipline_start_failed_body": "Position management strategy {name} (#{id}) failed to start. Review the strategy status and handle it manually.",
     "title": "{brand} | Strategy automatically stopped",
     "body": "Strategy: {name} (#{id})\nConsecutive order failures: {count}\nReason: {reason}\n\nThe strategy has stopped. This action does not liquidate existing positions. Review positions and exchange-side orders, correct the cause, and restart manually when ready.",
     "batch_body": "Strategy: {name} (#{id})\nConsecutive failed rebalance batches: {count}\nReason: {reason}\n\nNo order was accepted in these failed batches. The strategy has stopped without liquidating existing positions. Review positions and exchange-side orders, correct the cause, and restart manually when ready.",
@@ -34,6 +38,10 @@
     }
   },
   "zh-CN": {
+    "discipline_start_failed_title": "{brand} | 持仓管理策略启动失败",
+    "discipline_exit_unconfirmed_title": "{brand} | 平仓订单结果待核实",
+    "discipline_exit_unconfirmed_body": "{symbol} 的退出请求 #{id} 结果尚未确认，系统正在继续回查原订单，请核对交易所订单状态。",
+    "discipline_start_failed_body": "持仓管理策略 {name}（#{id}）启动失败，请检查策略状态并人工处理。",
     "title": "{brand} | 策略已自动停止",
     "body": "策略：{name}（#{id}）\n连续下单失败：{count} 次\n停止原因：{reason}\n\n策略已停止，本次操作不会自动平仓。请检查现有持仓和交易所挂单，解决上述问题后再手动启动。",
     "batch_body": "策略：{name}（#{id}）\n连续调仓批次失败：{count} 次\n停止原因：{reason}\n\n这些失败批次均无成功接单。策略已停止，不会自动平仓。请检查现有持仓和交易所挂单，解决上述问题后再手动启动。",
@@ -68,6 +76,10 @@
     }
   },
   "zh-TW": {
+    "discipline_start_failed_title": "{brand} | 持倉管理策略啟動失敗",
+    "discipline_start_failed_body": "持倉管理策略 {name}（#{id}）啟動失敗，請檢查策略狀態並人工處理。",
+    "discipline_exit_unconfirmed_title": "{brand} | 平倉訂單結果待核實",
+    "discipline_exit_unconfirmed_body": "{symbol} 的退出請求 #{id} 結果尚未確認，系統正在繼續查詢原訂單，請核對交易所訂單狀態。",
     "title": "{brand} | 策略已自動停止",
     "body": "策略: {name} (#{id})\n連續下單失敗: {count}\n停止原因: {reason}\n\n本次停止不會自動平倉。請檢查現有持倉和交易所掛單，解決問題後再手動啟動。",
     "batch_body": "策略: {name} (#{id})\n連續調倉批次失敗: {count}\n停止原因: {reason}\n\n這些失敗批次均無成功接單。 本次停止不會自動平倉。請檢查現有持倉和交易所掛單，解決問題後再手動啟動。",
@@ -102,6 +114,10 @@
     }
   },
   "ja-JP": {
+    "discipline_start_failed_title": "{brand} | ポジション管理戦略の起動に失敗",
+    "discipline_start_failed_body": "ポジション管理戦略 {name}（#{id}）を起動できませんでした。戦略の状態を確認し、手動で対応してください。",
+    "discipline_exit_unconfirmed_title": "{brand} | 決済注文の確認が必要",
+    "discipline_exit_unconfirmed_body": "{symbol} の決済リクエスト #{id} の結果が未確認です。システムは元の注文の照会を続けます。取引所の注文状態を確認してください。",
     "title": "{brand} | ストラテジーを自動停止しました",
     "body": "ストラテジー: {name} (#{id})\n連続注文失敗数: {count}\n停止理由: {reason}\n\n今回の停止では既存のポジションは決済されません。ポジションと取引所の未約定注文を確認し、原因を解消してから手動で再開してください。",
     "batch_body": "ストラテジー: {name} (#{id})\n連続リバランス失敗数: {count}\n停止理由: {reason}\n\nこれらの失敗したバッチでは、受け付けられた注文はありません。 今回の停止では既存のポジションは決済されません。ポジションと取引所の未約定注文を確認し、原因を解消してから手動で再開してください。",
@@ -136,6 +152,10 @@
     }
   },
   "ko-KR": {
+    "discipline_start_failed_title": "{brand} | 포지션 관리 전략 시작 실패",
+    "discipline_start_failed_body": "포지션 관리 전략 {name}(#{id})을 시작하지 못했습니다. 전략 상태를 확인하고 수동으로 처리하세요.",
+    "discipline_exit_unconfirmed_title": "{brand} | 청산 주문 확인 필요",
+    "discipline_exit_unconfirmed_body": "{symbol}의 청산 요청 #{id} 결과가 확인되지 않았습니다. 시스템은 원래 주문을 계속 조회합니다. 거래소 주문 상태를 확인하세요.",
     "title": "{brand} | 전략이 자동으로 중지되었습니다",
     "body": "전략: {name} (#{id})\n연속 주문 실패 횟수: {count}\n중지 사유: {reason}\n\n이번 중지로 기존 포지션이 자동 청산되지는 않습니다. 보유 포지션과 거래소 미체결 주문을 확인하고 원인을 해결한 뒤 수동으로 다시 시작하세요.",
     "batch_body": "전략: {name} (#{id})\n연속 리밸런싱 배치 실패 횟수: {count}\n중지 사유: {reason}\n\n실패한 이 배치들에서는 접수된 주문이 없습니다. 이번 중지로 기존 포지션이 자동 청산되지는 않습니다. 보유 포지션과 거래소 미체결 주문을 확인하고 원인을 해결한 뒤 수동으로 다시 시작하세요.",
@@ -170,6 +190,10 @@
     }
   },
   "de-DE": {
+    "discipline_start_failed_title": "{brand} | Positionsverwaltung konnte nicht starten",
+    "discipline_start_failed_body": "Die Positionsverwaltungsstrategie {name} (#{id}) konnte nicht gestartet werden. Prüfen Sie den Strategiestatus und greifen Sie manuell ein.",
+    "discipline_exit_unconfirmed_title": "{brand} | Schließungsauftrag prüfen",
+    "discipline_exit_unconfirmed_body": "Das Ergebnis der Schließungsanfrage #{id} für {symbol} ist unbestätigt. Das System fragt den ursprünglichen Auftrag weiter ab. Prüfen Sie den Auftragsstatus an der Börse.",
     "title": "{brand} | Strategie automatisch gestoppt",
     "body": "Strategie: {name} (#{id})\nAufeinanderfolgende Orderfehler: {count}\nGrund: {reason}\n\nBestehende Positionen wurden durch diesen Stopp nicht geschlossen. Prüfen Sie Positionen und offene Orders an der Börse, beheben Sie die Ursache und starten Sie die Strategie anschließend manuell neu.",
     "batch_body": "Strategie: {name} (#{id})\nAufeinanderfolgende fehlgeschlagene Batches: {count}\nGrund: {reason}\n\nIn diesen fehlgeschlagenen Batches wurde keine Order angenommen. Bestehende Positionen wurden durch diesen Stopp nicht geschlossen. Prüfen Sie Positionen und offene Orders an der Börse, beheben Sie die Ursache und starten Sie die Strategie anschließend manuell neu.",
@@ -204,6 +228,10 @@
     }
   },
   "fr-FR": {
+    "discipline_start_failed_title": "{brand} | Échec du démarrage de la gestion de position",
+    "discipline_start_failed_body": "La stratégie de gestion de position {name} (#{id}) n’a pas démarré. Vérifiez son état et intervenez manuellement.",
+    "discipline_exit_unconfirmed_title": "{brand} | Ordre de clôture à vérifier",
+    "discipline_exit_unconfirmed_body": "Le résultat de la demande de clôture #{id} pour {symbol} reste non confirmé. Le système continue de consulter l’ordre initial. Vérifiez son état sur la plateforme.",
     "title": "{brand} | Stratégie arrêtée automatiquement",
     "body": "Stratégie: {name} (#{id})\nÉchecs d’ordres consécutifs: {count}\nMotif: {reason}\n\nCet arrêt ne clôture pas les positions existantes. Vérifiez vos positions et les ordres ouverts sur la plateforme, corrigez la cause, puis redémarrez manuellement la stratégie.",
     "batch_body": "Stratégie: {name} (#{id})\nLots de rééquilibrage en échec consécutifs: {count}\nMotif: {reason}\n\nAucun ordre n’a été accepté dans ces lots en échec. Cet arrêt ne clôture pas les positions existantes. Vérifiez vos positions et les ordres ouverts sur la plateforme, corrigez la cause, puis redémarrez manuellement la stratégie.",
@@ -238,6 +266,10 @@
     }
   },
   "ru-RU": {
+    "discipline_start_failed_title": "{brand} | Не удалось запустить управление позицией",
+    "discipline_start_failed_body": "Не удалось запустить стратегию управления позицией {name} (#{id}). Проверьте её состояние и выполните необходимые действия вручную.",
+    "discipline_exit_unconfirmed_title": "{brand} | Требуется проверка ордера на закрытие",
+    "discipline_exit_unconfirmed_body": "Результат запроса на закрытие #{id} для {symbol} не подтверждён. Система продолжает проверять исходный ордер. Проверьте его состояние на бирже.",
     "title": "{brand} | Стратегия автоматически остановлена",
     "body": "Стратегия: {name} (#{id})\nНеудачных заявок подряд: {count}\nПричина: {reason}\n\nЭта остановка не закрывает существующие позиции. Проверьте позиции и открытые заявки на бирже, устраните причину и затем перезапустите стратегию вручную.",
     "batch_body": "Стратегия: {name} (#{id})\nНеудачных пакетов ребалансировки подряд: {count}\nПричина: {reason}\n\nВ этих неудачных пакетах не было принято ни одной заявки. Эта остановка не закрывает существующие позиции. Проверьте позиции и открытые заявки на бирже, устраните причину и затем перезапустите стратегию вручную.",
@@ -272,6 +304,10 @@
     }
   },
   "vi-VN": {
+    "discipline_start_failed_title": "{brand} | Không thể khởi động quản lý vị thế",
+    "discipline_start_failed_body": "Không thể khởi động chiến lược quản lý vị thế {name} (#{id}). Hãy kiểm tra trạng thái chiến lược và xử lý thủ công.",
+    "discipline_exit_unconfirmed_title": "{brand} | Cần kiểm tra lệnh đóng vị thế",
+    "discipline_exit_unconfirmed_body": "Kết quả yêu cầu đóng #{id} cho {symbol} chưa được xác nhận. Hệ thống tiếp tục kiểm tra lệnh ban đầu. Hãy kiểm tra trạng thái lệnh trên sàn.",
     "title": "{brand} | Chiến lược đã tự động dừng",
     "body": "Chiến lược: {name} (#{id})\nSố lệnh thất bại liên tiếp: {count}\nLý do: {reason}\n\nViệc dừng này không tự động đóng các vị thế hiện có. Hãy kiểm tra vị thế và lệnh đang mở trên sàn, khắc phục nguyên nhân rồi khởi động lại chiến lược theo cách thủ công.",
     "batch_body": "Chiến lược: {name} (#{id})\nSố đợt tái cân bằng thất bại liên tiếp: {count}\nLý do: {reason}\n\nKhông có lệnh nào được chấp nhận trong các đợt thất bại này. Việc dừng này không tự động đóng các vị thế hiện có. Hãy kiểm tra vị thế và lệnh đang mở trên sàn, khắc phục nguyên nhân rồi khởi động lại chiến lược theo cách thủ công.",
@@ -306,6 +342,10 @@
     }
   },
   "th-TH": {
+    "discipline_start_failed_title": "{brand} | เริ่มกลยุทธ์จัดการสถานะไม่สำเร็จ",
+    "discipline_start_failed_body": "เริ่มกลยุทธ์จัดการสถานะ {name} (#{id}) ไม่สำเร็จ โปรดตรวจสอบสถานะกลยุทธ์และดำเนินการด้วยตนเอง",
+    "discipline_exit_unconfirmed_title": "{brand} | ต้องตรวจสอบคำสั่งปิดสถานะ",
+    "discipline_exit_unconfirmed_body": "ยังไม่ยืนยันผลคำขอปิดสถานะ #{id} สำหรับ {symbol} ระบบจะตรวจสอบคำสั่งเดิมต่อไป โปรดตรวจสอบสถานะคำสั่งที่ตลาดซื้อขาย",
     "title": "{brand} | กลยุทธ์หยุดทำงานโดยอัตโนมัติ",
     "body": "กลยุทธ์: {name} (#{id})\nจำนวนคำสั่งที่ล้มเหลวติดต่อกัน: {count}\nเหตุผล: {reason}\n\nการหยุดครั้งนี้จะไม่ปิดสถานะที่มีอยู่โดยอัตโนมัติ โปรดตรวจสอบสถานะและคำสั่งที่ค้างอยู่ในตลาด แก้ไขสาเหตุ แล้วเริ่มกลยุทธ์ใหม่ด้วยตนเอง",
     "batch_body": "กลยุทธ์: {name} (#{id})\nจำนวนชุดปรับพอร์ตที่ล้มเหลวติดต่อกัน: {count}\nเหตุผล: {reason}\n\nไม่มีคำสั่งใดได้รับการยอมรับในชุดที่ล้มเหลวเหล่านี้ การหยุดครั้งนี้จะไม่ปิดสถานะที่มีอยู่โดยอัตโนมัติ โปรดตรวจสอบสถานะและคำสั่งที่ค้างอยู่ในตลาด แก้ไขสาเหตุ แล้วเริ่มกลยุทธ์ใหม่ด้วยตนเอง",
@@ -340,6 +380,10 @@
     }
   },
   "ar-SA": {
+    "discipline_start_failed_title": "{brand} | تعذر بدء إدارة المركز",
+    "discipline_start_failed_body": "تعذر بدء استراتيجية إدارة المركز {name} (#{id}). راجع حالة الاستراتيجية وتعامل معها يدويًا.",
+    "discipline_exit_unconfirmed_title": "{brand} | يلزم التحقق من أمر الإغلاق",
+    "discipline_exit_unconfirmed_body": "لم يتم تأكيد نتيجة طلب الإغلاق #{id} للرمز {symbol}. يواصل النظام التحقق من الأمر الأصلي. راجع حالة الأمر في المنصة.",
     "title": "{brand} | تم إيقاف الاستراتيجية تلقائيًا",
     "body": "الاستراتيجية: {name} (#{id})\nعدد الأوامر الفاشلة المتتالية: {count}\nالسبب: {reason}\n\nهذا الإيقاف لا يغلق المراكز الحالية تلقائيًا. راجع المراكز والأوامر المفتوحة في منصة التداول، وعالج السبب، ثم أعد تشغيل الاستراتيجية يدويًا.",
     "batch_body": "الاستراتيجية: {name} (#{id})\nعدد دفعات إعادة الموازنة الفاشلة المتتالية: {count}\nالسبب: {reason}\n\nلم يُقبل أي أمر في هذه الدفعات الفاشلة. هذا الإيقاف لا يغلق المراكز الحالية تلقائيًا. راجع المراكز والأوامر المفتوحة في منصة التداول، وعالج السبب، ثم أعد تشغيل الاستراتيجية يدويًا.",

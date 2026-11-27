@@ -4,6 +4,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from unittest.mock import Mock
 
+import pytest
+
 import app
 from app import startup
 from app.commands import scheduler
@@ -15,6 +17,8 @@ from app.trade_discipline import position_evidence
 from app.services import strategy_command_repository
 from app.trade_plans.repository import PlanRepository
 from tests.test_trade_discipline_inventory import inventory_sources
+
+pytestmark = pytest.mark.usefixtures("discipline_product_catalog")
 
 
 def at(hour, minute=0):
@@ -43,7 +47,8 @@ def stub_existing_reads(monkeypatch, inventory_sources):
     def local_orders(_user, _credential, symbol, ids):
         assert ids == ["11"]
         return [{"exchange_order_id": "11", "source": "pending_orders",
-                 "payload": {"symbol": symbol, "orderId": 11, "time": order_time}}]
+                 "payload": {"symbol": symbol, "orderId": 11, "time": order_time,
+                             "clientOrderId": "system_order_11"}}]
 
     monkeypatch.setattr(position_evidence, "_read_local_fills", local_fills)
     monkeypatch.setattr(position_evidence, "_read_local_orders", local_orders)

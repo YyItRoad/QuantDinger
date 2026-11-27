@@ -18,6 +18,7 @@ from app.services.live_trading.position_management import (
     find_discipline_adoption,
 )
 from app.utils.logger import get_logger
+from app.services.settings.capabilities import is_live_trading_enabled
 
 logger = get_logger(__name__)
 
@@ -46,6 +47,9 @@ def adopt_observed_position(*, user_id, credential_id, position, now, settings, 
     """Recheck one current leg and create at most one manager for its opening fill."""
     if position.get("outcome") != "proposed_adoption" or not still_active():
         return {"status": "deferred", "reason": "adoption_not_eligible"}
+    # 复用原系统全局执行权限。已有观察结果不能绕过当前关闭的执行开关。
+    if not is_live_trading_enabled():
+        return {"status": "deferred", "reason": "live_trading_disabled"}
     side = position["side"]
     template = settings["templates"].get(side)
     if not template:
@@ -99,7 +103,7 @@ def adopt_observed_position(*, user_id, credential_id, position, now, settings, 
         orders_checked = True
         if pending:
             raise AdoptionDeferred("entry_order_pending")
-        if not still_active():
+        if not still_active() or not is_live_trading_enabled():
             raise AdoptionDeferred("scheduler_stopped")
 
     # 使用开仓判定通过时记录的计划版本生成并校验接管参数。
@@ -147,6 +151,11 @@ def adopt_observed_position(*, user_id, credential_id, position, now, settings, 
         if existing:
             return dict(existing, adoption_key=key)
         return {"status": "needs_review", "reason": "adoption_failed", "adoption_key": key}
+    if result.get("status") == "stopped" and result.get("strategy_id"):
+        from app.trade_discipline.notifications import notify_management_start_failures
+
+        notify_management_start_failures(user_id=user_id, credential_id=credential_id,
+                                         strategy_ids=[result["strategy_id"]])
     return dict(result, adoption_key=key, **({"pending_entry_orders_checked": True} if orders_checked else {}))
 
 

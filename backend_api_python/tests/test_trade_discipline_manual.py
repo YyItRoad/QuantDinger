@@ -7,7 +7,7 @@ import pytest
 
 from app.trade_discipline import manual as manual
 from app.trade_discipline import observation as observation
-from app.services.execution_streams.repository import ExecutionEventRepository
+from app.trade_discipline import origin
 from app.services.live_trading import position_management
 from app.trade_discipline import position_evidence
 from app.services.llm import LLMService
@@ -45,16 +45,31 @@ def test_origin_gates_discipline(monkeypatch, origins, outcome):
 
 
 def test_attestation_is_exact_and_cannot_override_system_binding(monkeypatch):
-    binding = Mock(return_value=None)
-    monkeypatch.setattr(ExecutionEventRepository, "resolve_binding", binding)
-    monkeypatch.setattr(position_evidence, "_read_local_orders", Mock(return_value=[]))
+    binding = Mock(return_value=([], False))
+    monkeypatch.setattr(origin, "read_system_orders", binding)
     assert manual.opening_order_origin(INVENTORY, "BTCUSDT", "1") == "unknown"
     monkeypatch.setenv("TRADE_DISCIPLINE_MANUAL_ORDERS_JSON", json.dumps([[3, 7, "binance", "swap", "BTCUSDT", "1"]]))
     assert manual.opening_order_origin(INVENTORY, "BTCUSDT", "1") == "manual"
     assert manual.opening_order_origin(dict(INVENTORY, environment="live"), "BTCUSDT", "1") == "unknown"
     assert manual.opening_order_origin(dict(INVENTORY, credential_id=8), "BTCUSDT", "1") == "unknown"
-    binding.return_value = dict(user_id=3, strategy_id=42)
+    binding.return_value = ([dict(id=1, source="binding", strategy_id=42)], False)
     assert manual.opening_order_origin(INVENTORY, "BTCUSDT", "1") == "strategy"
+
+
+@pytest.mark.parametrize("client_id", ["ios_im_manual_123", "web_manual_123", "android_manual_123"])
+def test_external_order_uses_confirmed_account_policy(monkeypatch, client_id):
+    monkeypatch.setattr(origin, "read_system_orders", Mock(return_value=([], False)))
+    monkeypatch.setenv("TRADE_DISCIPLINE_EXTERNAL_OPENINGS_AS_MANUAL", "true")
+    assert manual.opening_order_origin(dict(INVENTORY, environment="live"), "BTCUSDT", "1", client_id) == "manual"
+    assert manual.opening_order_origin(dict(INVENTORY, environment="live"), "BTCUSDT", "1") == "unknown"
+    monkeypatch.setattr(origin, "read_system_orders", Mock(side_effect=RuntimeError("synthetic read failure")))
+    assert manual.opening_order_origin(INVENTORY, "BTCUSDT", "1", client_id) == "unknown"
+
+
+def test_unresolved_system_submission_never_becomes_manual(monkeypatch):
+    monkeypatch.setenv("TRADE_DISCIPLINE_EXTERNAL_OPENINGS_AS_MANUAL", "true")
+    monkeypatch.setattr(origin, "read_system_orders", Mock(return_value=([], True)))
+    assert manual.opening_order_origin(INVENTORY, "BTCUSDT", "1", "ios_im_test") == "unknown"
 
 
 @pytest.mark.parametrize("plan, ema, outcome, reason", [
@@ -111,6 +126,32 @@ def test_llm_output_must_match_pinned_plan_stop(monkeypatch, model_output, accep
         with pytest.raises(ValueError):
             manual.load_plan_parameters(*args)
     assert json.loads(llm.call_args.args[0][1]["content"])["risk_inputs"]["stop_price"] == "90"
+
+
+@pytest.mark.parametrize("quote, price, accepted", [
+    ("止损设在90", "90", True),
+    ("止损设在90", "89", False),
+    ("止损设在89", "89", False),
+    (None, "90", False),
+])
+def test_llm_can_extract_stop_from_pinned_plan_text(monkeypatch, quote, price, accepted):
+    @contextmanager
+    def transaction(self):
+        yield None
+
+    monkeypatch.setattr(PlanRepository, "transaction", transaction)
+    monkeypatch.setattr(PlanRepository, "versions", Mock(return_value=[
+        {"id": "v1", "snapshot": {"direction": "long", "risk_inputs": {},
+                                 "invalidation": "跌破支撑退出，止损设在90。"}},
+    ]))
+    llm = Mock(return_value=json.dumps({"fixed_stop_price": price, "stop_evidence": quote}))
+    monkeypatch.setattr(LLMService, "call_llm_api", llm)
+    if accepted:
+        assert manual.load_plan_parameters(3, {"plan_id": "p", "version_id": "v1"}, {}, "long") == {"fixed_stop_price": 90.0}
+    else:
+        with pytest.raises(ValueError):
+            manual.load_plan_parameters(3, {"plan_id": "p", "version_id": "v1"}, {}, "long")
+    assert llm.call_args.args[0][0]["content"] == manual.PLAN_MANAGEMENT_PROMPT
 
 
 def test_saved_pass_does_not_rejudge_plan_or_count_same_round(monkeypatch, caplog):

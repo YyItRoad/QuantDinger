@@ -8,6 +8,7 @@ import pytest
 
 from app.trade_discipline import inventory_cli as trade_discipline_inventory
 from app.trade_discipline import position_evidence as evidence
+from app.services.live_trading.binance import BinanceFuturesClient
 
 _BASE = 1795226400000
 
@@ -28,7 +29,8 @@ def remote(i, delta, *, order=None):
 
 
 def order_payload(order_id, i):
-    return {"symbol": "BTCUSDT", "orderId": order_id, "time": _BASE + i * 60000 - 30000}
+    return {"symbol": "BTCUSDT", "orderId": order_id, "time": _BASE + i * 60000 - 30000,
+            "clientOrderId": f"ios_im_test_{order_id}"}
 
 
 def order(i, source="pending_orders"):
@@ -46,7 +48,7 @@ def inventory(*positions):
 
 
 @pytest.fixture
-def inputs(monkeypatch):
+def inputs(monkeypatch, discipline_product_catalog):
     sources = SimpleNamespace(fills=[], orders=[], cursor=Mock(), exchange=Mock(timeout_sec=15))
     sources.cursor.fetchall.side_effect = lambda: (
         sources.fills if "qd_execution_events" in sources.cursor.execute.call_args.args[0] else sources.orders
@@ -64,6 +66,70 @@ def inputs(monkeypatch):
     monkeypatch.setattr(evidence, "resolve_exchange_config", sources.resolve)
     monkeypatch.setattr(evidence, "create_client", sources.factory)
     return sources
+
+
+@pytest.mark.parametrize("metadata_change", [
+    {"symbol": "BTCUSDT"}, {"contractType": "CURRENT_QUARTER"}, {"marginAsset": "USDT"}, {},
+])
+def test_usdc_evidence_requires_exact_perpetual_product(inputs, metadata_change):
+    snapshot = inventory(("long", 1))
+    snapshot["positions"][0].update(symbol="BTC/USDC", inst_id="BTCUSDC")
+    meta = dict(symbol="BTCUSDC", contractType="PERPETUAL", baseAsset="BTC", quoteAsset="USDC", marginAsset="USDC")
+    inputs.exchange.get_symbol_filters.return_value = {"_meta": dict(meta, **metadata_change)}
+    inputs.exchange.get_user_trades.return_value = [dict(remote(1, 1), symbol="BTCUSDC")]
+    inputs.exchange.get_order.return_value = dict(order_payload(101, 1), symbol="BTCUSDC")
+
+    report = evidence.read_position_evidence(snapshot, "BTCUSDC")
+
+    if metadata_change:
+        assert report["issues"] == ["product_identity_unavailable"]
+        assert report["status"] == "unverified"
+        inputs.exchange.get_user_trades.assert_not_called()
+        return
+    assert report["status"] == "reconciled"
+    assert (report["product"]["symbol"], report["product"]["settlement_ccy"]) == ("BTC/USDC", "USDC")
+    inputs.exchange.get_user_trades.assert_called_once_with(symbol="BTCUSDC", limit=1000)
+    inputs.exchange.get_order.assert_called_once_with(symbol="BTCUSDC", order_id="101")
+
+
+def test_client_identity_is_preserved_locally_and_backfilled_only_when_missing(inputs):
+    inputs.fills = [fill(1, 1)]
+    inputs.orders = [order(1)]
+    result = evidence.read_position_evidence(inventory(("long", 1)), "BTCUSDT")
+    assert result["events"][0]["client_order_id"] == "ios_im_test_101"
+    inputs.exchange.get_order.assert_not_called()
+
+    payload = order_payload(101, 1)
+    payload.pop("clientOrderId")
+    inputs.orders = [dict(order(1), payload=payload)]
+    inputs.exchange.get_order.return_value = order_payload(101, 1)
+    result = evidence.read_position_evidence(inventory(("long", 1)), "BTCUSDT")
+    assert result["events"][0]["client_order_id"] == "ios_im_test_101"
+    inputs.exchange.get_order.assert_called_once_with(symbol="BTCUSDT", order_id="101")
+
+
+def test_conflicting_client_ids_make_evidence_incomplete(inputs):
+    inputs.fills = [dict(fill(1, 1), client_order_id="system-before-submit")]
+    inputs.orders = [order(1)]
+    result = evidence.read_position_evidence(inventory(("long", 1)), "BTCUSDT")
+    assert result["status"] == "partial"
+    assert "order_client_id_conflict" in result["issues"]
+    assert result["events"][0]["client_order_id"] == ""
+
+
+def test_pre_submit_id_and_formatted_exchange_id_are_same_order(inputs):
+    client = BinanceFuturesClient(api_key="fixture", secret_key="fixture")
+    original_id = "qd_42_101_mkt"
+    wire_id = client._format_client_order_id(original_id)
+    inputs.exchange._format_client_order_id.side_effect = client._format_client_order_id
+    inputs.fills = [dict(fill(1, 1), client_order_id=wire_id)]
+    inputs.orders = [dict(order(1), client_order_id=original_id,
+                         payload=dict(order_payload(101, 1), clientOrderId=wire_id))]
+
+    result = evidence.read_position_evidence(inventory(("long", 1)), "BTCUSDT")
+    assert result["status"] == "reconciled"
+    assert result["events"][0]["client_order_id"] == wire_id
+    inputs.exchange.get_order.assert_not_called()
 
 
 def test_cli_replays_local_fills_and_reads_local_order_times(inputs, monkeypatch, capsys):

@@ -344,6 +344,9 @@ class BinanceFuturesClient(BaseRestClient):
             meta = {
                 "symbol": str(first.get("symbol") or "") if isinstance(first, dict) else "",
                 "contractType": str(first.get("contractType") or "") if isinstance(first, dict) else "",
+                "baseAsset": str(first.get("baseAsset") or ""),
+                "quoteAsset": str(first.get("quoteAsset") or ""),
+                "marginAsset": str(first.get("marginAsset") or ""),
                 "quantityPrecision": int(qty_prec) if qty_prec is not None else None,
                 "pricePrecision": int(price_prec) if price_prec is not None else None,
             }

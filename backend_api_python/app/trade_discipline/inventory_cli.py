@@ -35,7 +35,7 @@ def main() -> int:
     )
     parser.add_argument("--all-accounts", action="store_true",
                         help="Read the user's saved accounts and classify coverage without taking actions.")
-    parser.add_argument("--evidence-symbol", help="Reconcile read-only Binance USDT futures fills for one instrument.")
+    parser.add_argument("--evidence-symbol", help="Reconcile read-only Binance linear perpetual fills for one instrument.")
     parser.add_argument("--check-plan", action="store_true", help="Check plans at the evidenced order submission times.")
     parser.add_argument("--check-ema", action="store_true", help="Check EMA25 at the evidenced order submission times.")
     args = parser.parse_args()
@@ -51,7 +51,7 @@ def main() -> int:
         accounts = read_user_position_inventory(user_id=user_id)
         for account in accounts:
             account["discipline_coverage"] = (
-                "binance_usdt_swap" if account["exchange_id"] in {"binance", "binanceusdm", "binancefutures"}
+                "binance_linear_perpetual" if account["exchange_id"] in {"binance", "binanceusdm", "binancefutures"}
                 else "inventory_only"
             )
             for position in account["positions"]:

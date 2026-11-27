@@ -117,7 +117,7 @@ def check_ema25_at_order_time(
     ema = ema_series_sma_seed(prices, _PERIOD)[-1]
     if not math.isfinite(ema):
         return dict(result, reason="invalid_ema")
-    # 收盘价与 EMA25 相等时没有允许的开仓方向。
+    # 用户确认相等满足条件，多空都通过。allowed_direction 为 None 表示没有单向限制。
     if math.isclose(close, ema, rel_tol=1e-12, abs_tol=0):
         relation, allowed = "equal", None
     elif close > ema:
@@ -125,6 +125,6 @@ def check_ema25_at_order_time(
     else:
         relation, allowed = "below", "short"
     opened, closed = windows[-1]
-    return dict(result, status="allowed" if direction == allowed else "blocked",
+    return dict(result, status="allowed" if relation == "equal" or direction == allowed else "blocked",
                 relation=relation, allowed_direction=allowed, close=close, ema25=ema, bar_count=len(prices),
                 bar_opened_at=to_utc_iso(opened), bar_closed_at=to_utc_iso(closed))

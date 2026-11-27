@@ -30,7 +30,7 @@ def runtime(monkeypatch, lookup):
     monkeypatch.setattr(discipline, "get_catalog_product", Mock(return_value=product))
     monkeypatch.setattr(quick_trade, "_build_product_aware_config", lambda *a, **k: (config, None))
     monkeypatch.setattr(credentials, "build_exchange_config", Mock(return_value=config))
-    lookup.fetchall.return_value = [candidate(expires=now + timedelta(hours=1))]
+    lookup.fetchall.return_value = [candidate(expires=now + timedelta(hours=1), order_time=now)]
     order = SimpleNamespace(exchange_order_id="sim-42", filled=0, avg_price=0, raw={})
     client = Mock(place_limit_order=Mock(return_value=order))
     factory = Mock(return_value=client)
@@ -73,7 +73,7 @@ def submit(**changes):
 
 
 @pytest.mark.parametrize("order_type", ["market", "limit"])
-@pytest.mark.parametrize(("side", "last_close"), [("buy", 120), ("sell", 80)])
+@pytest.mark.parametrize(("side", "last_close"), [("buy", 120), ("sell", 80), ("buy", 100), ("sell", 100)])
 def test_valid_directional_plan_continues_to_normal_quick_order(runtime, order_type, side, last_close):
     runtime.quotes.return_value = bars(last_close)
     status, body = submit(order_type=order_type, side=side)
@@ -89,20 +89,20 @@ def test_valid_directional_plan_continues_to_normal_quick_order(runtime, order_t
 @pytest.mark.parametrize(("failure", "expected"), [
     ("missing", "no_effective_plan"), ("expired", "no_effective_plan"),
     ("other_product", "no_effective_plan"), ("plan_error", "plan_check_unavailable"),
-    ("opposite", "ema25_direction_blocked"), ("equal", "ema25_direction_blocked"),
+    ("opposite", "ema25_direction_blocked"),
     ("no_bars", "ema25_check_unavailable"),
 ])
 def test_guard_blocks_entries_before_exchange_side_effects(runtime, failure, expected):
     if failure == "missing":
         runtime.lookup.fetchall.return_value = []
     elif failure == "expired":
-        runtime.lookup.fetchall.return_value = [candidate(expires=runtime.now)]
+        runtime.lookup.fetchall.return_value = [candidate(expires=runtime.now, order_time=runtime.now)]
     elif failure == "other_product":
         runtime.lookup.fetchall.return_value = [candidate(market_type="spot")]
     elif failure == "plan_error":
         runtime.lookup.execute.side_effect = TimeoutError()
     else:
-        runtime.quotes.return_value = {"opposite": bars(80), "equal": bars(100), "no_bars": []}[failure]
+        runtime.quotes.return_value = {"opposite": bars(80), "no_bars": []}[failure]
 
     status, body = submit(order_type="limit")
     assert (status, body["data"]["reason"]) == (409, expected)
@@ -117,7 +117,7 @@ def test_stock_product_uses_underlying_one_hour_and_matches_traded_product(runti
                            api_family="swap", underlying_market="USStock", underlying_symbol="AAPL")
     runtime.now = datetime(2026, 11, 18, 17, 42, tzinfo=timezone.utc)
     monkeypatch.setattr(discipline.datetime, "now", Mock(return_value=runtime.now))
-    runtime.lookup.fetchall.return_value = [candidate(
+    runtime.lookup.fetchall.return_value = [candidate(order_time=runtime.now,
         expires=runtime.now + timedelta(hours=1), symbol="AAPL/USDT", instrument_id="AAPLUSDT")]
     windows = equity_hourly_bar_windows("USStock", runtime.now - timedelta(days=30), runtime.now)
     latest = max(end for _, end in windows if end <= runtime.now.timestamp())
@@ -162,7 +162,7 @@ def test_agent_live_entry_uses_same_guard(runtime):
     with pytest.raises(agent_trade.EntryDisciplineBlocked, match="no_effective_plan"):
         agent_trade._place_live_order(body=body, user_id=7)
     runtime.market_order.assert_not_called()
-    runtime.lookup.fetchall.return_value = [candidate(expires=runtime.now + timedelta(hours=1))]
+    runtime.lookup.fetchall.return_value = [candidate(expires=runtime.now + timedelta(hours=1), order_time=runtime.now)]
     agent_trade._place_live_order(body=body, user_id=7)
     runtime.market_order.assert_called_once()
 

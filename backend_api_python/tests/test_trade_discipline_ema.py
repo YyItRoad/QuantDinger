@@ -33,8 +33,8 @@ def crypto(direction="long", submitted_at="2026-11-18T12:00:00Z"):
     (120, "short", "above", "blocked", "long"),
     (80, "long", "below", "blocked", "short"),
     (80, "short", "below", "allowed", "short"),
-    (100, "long", "equal", "blocked", None),
-    (100, "short", "equal", "blocked", None),
+    (100, "long", "equal", "allowed", None),
+    (100, "short", "equal", "allowed", None),
 ])
 def test_4h_ema25_uses_last_closed_bar(monkeypatch, last_close, direction, relation, status, allowed):
     provider = Mock(return_value=bars(last_close))
@@ -138,7 +138,10 @@ def test_inventory_uses_actual_order_time_and_checks_partial_fills_once(monkeypa
     order = {"order_id": "101", "side": "sell", "action": "open",
              "submitted_at": "2026-11-18T12:00:00Z", "filled_at": "2026-11-18T16:01:00Z"}
     monkeypatch.setattr(position_evidence, "read_position_evidence", Mock(return_value={
-        "status": "reconciled", "instrument": "BTCUSDT", "events": [
+        "status": "reconciled", "instrument": "BTCUSDT",
+        "product": dict(market="Crypto", exchange_id="binance", market_type="swap", instrument_id="BTCUSDT",
+                        symbol="BTC/USDT", settlement_ccy="USDT"),
+        "events": [
             order, dict(order, action="add"), dict(order, order_id="102", action="close"),
         ],
     }))
