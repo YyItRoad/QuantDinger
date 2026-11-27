@@ -14,12 +14,15 @@ from tests.test_trade_plan_app import full_app
 @pytest.mark.parametrize("command_type,status,expected", [
     ("start", "failed", 1), ("start", "succeeded", 0), ("stop", "succeeded", 0), (None, None, 1),
 ])
-def test_failure_notice_is_scoped_and_deduplicated(source_db, command_type, status, expected):
+@pytest.mark.parametrize("discipline_owned", [True, False])
+def test_failure_notice_is_scoped_and_deduplicated(source_db, command_type, status, expected, discipline_owned):
     with source_db.cursor() as cur:
         cur.execute("""UPDATE qd_strategies_trading SET status='stopped',
             notification_config='{"language":"zh-CN"}',
             trading_config='{"position_management":{"discipline_adoption_key":"fixture"}}'
             WHERE id=42""")
+        if not discipline_owned:
+            cur.execute("UPDATE qd_strategies_trading SET trading_config='{}' WHERE id=42")
         if command_type:
             cur.execute("""INSERT INTO qd_strategy_commands
                 (user_id,strategy_id,command_type,status,idempotency_key)
@@ -29,7 +32,7 @@ def test_failure_notice_is_scoped_and_deduplicated(source_db, command_type, stat
     notify_management_start_failures(user_id=2, credential_id=901, strategy_ids=[42])
     with source_db.cursor() as cur:
         cur.execute("SELECT count(*) FROM qd_strategy_notifications WHERE signal_type='discipline_start_failed'")
-        assert cur.fetchone()[0] == expected
+        assert cur.fetchone()[0] == (expected if discipline_owned else 0)
         cur.execute("SELECT count(*) FROM qd_strategy_commands")
         assert cur.fetchone()[0] == (1 if command_type else 0)
 

@@ -239,9 +239,10 @@ class HourlyDisciplineObserver:
             from app.trade_discipline.manual import apply_poll_window, audit
             from app.trade_discipline.notifications import notify_management_start_failures
 
-            # 已管理仓位仍跳过纪律重判，只检查本模块接管策略是否发生异步启动失败。
+            # 已管理仓位仍跳过纪律重判。沿用原管理列表返回值，通知查询内部再限定
+            # 本模块的接管标记，避免为通知改动持仓页和 Agent API 的返回字段。
             failed_candidates = {row["strategy_id"] for position in report["positions"]
-                                 for row in position.get("registrations", []) if row.get("discipline_adoption_key")}
+                                 for row in position.get("registrations", [])}
             notify_management_start_failures(user_id=report["user_id"], credential_id=report["credential_id"],
                                              strategy_ids=failed_candidates)
 
