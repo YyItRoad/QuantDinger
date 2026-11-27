@@ -138,6 +138,7 @@ PY
 if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
   # 生产预览仅允许观察指定用户。先核实用户、现有计划事件表与数据库备份。
   [[ "$DISCIPLINE_OBSERVATION_USER_ID" =~ ^[1-9][0-9]{0,9}$ ]] || die "Invalid discipline observation user id."
+  [[ -w "$DEPLOY_DIR" && -w "$ENV_FILE" ]] || die "Deploy account cannot atomically update the active .env."
   observation_ready=$("${compose[@]}" exec -T postgres sh -c '
     PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=5000" \
       psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
@@ -145,8 +146,10 @@ if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
                  COALESCE(has_table_privilege(to_regclass(\$\$public.qd_trade_plan_events\$\$), \$\$SELECT\$\$), false)"
   ' sh "$DISCIPLINE_OBSERVATION_USER_ID")
   [[ "$observation_ready" == "t" ]] || die "Discipline preview user or existing plan-event table unavailable."
-  backup_dir="$DEPLOY_DIR/backups/discipline-preview-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  (umask 077; mkdir -p "$backup_dir"
+  # 使用部署账号的持久目录，避免依赖旧部署目录中的备份目录权限。
+  backup_root="${XDG_STATE_HOME:-$HOME/.local/state}/quantdinger/backups"
+  backup_dir=$(umask 077; mkdir -p "$backup_root"; mktemp -d "$backup_root/discipline-preview-XXXXXX")
+  (umask 077
     "${compose[@]}" exec -T postgres sh -c 'pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > "$backup_dir/postgres.dump"
   )
   "${compose[@]}" exec -T postgres pg_restore --list < "$backup_dir/postgres.dump" > /dev/null
