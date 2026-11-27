@@ -9,7 +9,10 @@ import math
 import uuid
 from typing import Any, Callable, Dict, Iterator
 
-from app.services.live_trading.account_snapshot import fetch_target_position_snapshot
+from app.services.live_trading.account_snapshot import (
+    fetch_managed_positions_snapshot,
+    fetch_target_position_snapshot,
+)
 from app.services.live_trading.records import normalize_strategy_symbol, upsert_position
 from app.services.strategy import get_strategy_service
 from app.services.strategy_command_repository import StrategyCommandRepository
@@ -103,6 +106,115 @@ def _same_leg(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
         == str(right.get("side") or "").strip().lower()
         and _market_type(left.get("market_type")) == _market_type(right.get("market_type"))
     )
+
+
+def list_position_inventory_accounts(*, user_id: int) -> list[Dict[str, Any]]:
+    """List tenant-scoped account identities without loading their credentials."""
+    if user_id <= 0:
+        raise ValueError("Invalid position inventory user")
+    with get_db_connection() as db:
+        cur = db.cursor()
+        try:
+            cur.execute(
+                "SELECT id, exchange_id FROM qd_exchange_credentials WHERE user_id = %s ORDER BY id",
+                (user_id,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+        finally:
+            cur.close()
+
+
+def read_user_position_inventory(*, user_id: int) -> list[Dict[str, Any]]:
+    """Read each account independently through the position page's snapshot service."""
+    inventories = []
+    for account in list_position_inventory_accounts(user_id=user_id):
+        credential_id = int(account["id"])
+        try:
+            inventory = read_account_position_inventory(
+                user_id=user_id, credential_id=credential_id, market_type="swap",
+            )
+            if not inventory["exchange_id"]:
+                inventory["exchange_id"] = account["exchange_id"]
+        except Exception:
+            inventory = {
+                "user_id": user_id, "credential_id": credential_id, "market_type": "swap",
+                "exchange_id": account["exchange_id"], "status": "unavailable",
+                "issues": ["position_inventory_failed"], "fetched_at": None, "positions": [],
+            }
+        inventories.append(inventory)
+    return inventories
+
+
+def read_account_position_inventory(
+    *, user_id: int, credential_id: int, market_type: str = "swap",
+) -> Dict[str, Any]:
+    """Read current positions and their existing management registrations."""
+    if user_id <= 0 or credential_id <= 0 or market_type not in {"swap", "spot", "all"}:
+        raise ValueError("Invalid position inventory scope")
+
+    result: Dict[str, Any] = {
+        "user_id": user_id,
+        "credential_id": credential_id,
+        "market_type": market_type,
+        "source": "position_snapshot",
+        "status": "unavailable",
+        "exchange_id": "",
+        "fetched_at": None,
+        "issues": [],
+        "positions": [],
+    }
+    try:
+        if market_type == "all":
+            snapshot = fetch_managed_positions_snapshot(user_id=user_id, credential_id=credential_id)
+        else:
+            snapshot = fetch_target_position_snapshot(
+                user_id=user_id, credential_id=credential_id, market_type=market_type,
+                request_timeout_sec=6.0,
+            )
+    except Exception:
+        result["issues"].append("position_snapshot_unavailable")
+        return result
+
+    result["exchange_id"] = snapshot.get("exchange_id") or ""
+    result["environment"] = snapshot.get("environment") or ""
+    result["fetched_at"] = snapshot.get("fetched_at")
+    if snapshot.get("error") or not result["exchange_id"]:
+        result["issues"].append("position_snapshot_unavailable")
+        return result
+
+    if snapshot.get("partial") or snapshot.get("warnings"):
+        result["issues"].append("position_snapshot_partial")
+
+    markets = ("swap", "spot") if market_type == "all" else (market_type,)
+    positions = [
+        dict(row, market_type=market)
+        for market in markets
+        for row in snapshot[f"{market}_positions"]
+    ]
+    management_rows = []
+    management_available = True
+    if positions:
+        try:
+            management_rows = list_managed_positions_for_account(user_id=user_id, credential_id=credential_id)
+        except Exception:
+            management_available = False
+            result["issues"].append("management_registrations_unavailable")
+
+    for position in positions:
+        inst_id = str(position.get("inst_id") or "").strip()
+        registrations = [
+            row for row in management_rows
+            if _same_leg(row, position)
+            and (not inst_id or not row["inst_id"] or row["inst_id"].strip() == inst_id)
+        ]
+        position["management_status"] = (
+            "unknown" if not management_available else "registered" if registrations else "unregistered"
+        )
+        position["registrations"] = registrations
+
+    result["positions"] = positions
+    result["status"] = "partial" if result["issues"] else "ok"
+    return result
 
 
 def _fresh_position(snapshot: Dict[str, Any], position_ref: Dict[str, Any]) -> Dict[str, Any]:
@@ -398,12 +510,42 @@ def _strategy_monitors_position(
     return False
 
 
+def find_discipline_adoption(*, user_id: int, adoption_key: str) -> Dict[str, Any] | None:
+    """Find the original instance even if it never reached position registration."""
+    with get_db_connection() as db:
+        cur = db.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT s.id AS strategy_id, s.status, command.status AS start_command_status
+                FROM qd_strategies_trading s
+                LEFT JOIN LATERAL (
+                    SELECT status FROM qd_strategy_commands
+                    WHERE strategy_id=s.id AND user_id=s.user_id AND command_type='start'
+                    ORDER BY id DESC LIMIT 1
+                ) command ON TRUE
+                WHERE s.user_id=%s AND s.trading_config->'position_management'->>'discipline_adoption_key'=%s
+                LIMIT 2
+                """,
+                (user_id, adoption_key),
+            )
+            rows = cur.fetchall()
+        finally:
+            cur.close()
+    if len(rows) > 1:
+        raise PositionManagementError("持仓接管标识对应多个策略，请核查", status_code=409)
+    return dict(rows[0], recovered=True) if rows else None
+
+
 def create_managed_strategy(
     *,
     user_id: int,
     position_ref: Dict[str, Any],
     strategy_payload: Dict[str, Any],
     authorize_position: Callable[[Dict[str, Any]], None] | None = None,
+    verify_snapshot: Callable[[Dict[str, Any], Dict[str, Any]], None] | None = None,
+    discipline_adoption_key: str = "",
+    expected_source_version_id: int | None = None,
 ) -> Dict[str, Any]:
     """重新读取交易所仓位，创建标准停止策略实例并登记整笔仓位。"""
     uid = int(user_id or 0)
@@ -412,6 +554,11 @@ def create_managed_strategy(
     credential_id = int(position_ref.get("credential_id") or 0)
     if uid <= 0 or credential_id <= 0:
         raise PositionManagementError("缺少有效的账户凭证")
+
+    if discipline_adoption_key:
+        existing = find_discipline_adoption(user_id=uid, adoption_key=discipline_adoption_key)
+        if existing:
+            return existing
 
     # Refresh exchange state before taking a DB-backed adoption lock. Network
     # latency must never occupy a connection from the application DB pool.
@@ -433,13 +580,26 @@ def create_managed_strategy(
         symbol=_symbol(fresh.get("symbol") or fresh.get("symbol_canonical")),
         side=str(fresh.get("side") or "").strip().lower(),
     ):
+        if discipline_adoption_key:
+            existing = find_discipline_adoption(user_id=uid, adoption_key=discipline_adoption_key)
+            if existing:
+                return existing
+
+        def authorize_fresh(position):
+            if verify_snapshot is not None:
+                verify_snapshot(snapshot, position)
+            if authorize_position is not None:
+                authorize_position(position)
+
         return _create_managed_strategy_locked(
             user_id=uid,
             credential_id=credential_id,
             position_ref=position_ref,
             strategy_payload=strategy_payload,
             fresh=fresh,
-            authorize_position=authorize_position,
+            authorize_position=authorize_fresh if verify_snapshot is not None else authorize_position,
+            discipline_adoption_key=discipline_adoption_key,
+            expected_source_version_id=expected_source_version_id,
         )
 
 
@@ -451,6 +611,8 @@ def _create_managed_strategy_locked(
     strategy_payload: Dict[str, Any],
     fresh: Dict[str, Any],
     authorize_position: Callable[[Dict[str, Any]], None] | None = None,
+    discipline_adoption_key: str = "",
+    expected_source_version_id: int | None = None,
 ) -> Dict[str, Any]:
     uid = int(user_id)
     existing = list_managed_positions_for_account(user_id=uid, credential_id=credential_id)
@@ -506,6 +668,7 @@ def _create_managed_strategy_locked(
             "side": side,
             **({"entry_reason": entry_reason.strip()} if entry_reason.strip() else {}),
             **({"timeframe": managed_timeframe} if managed_timeframe else {}),
+            **({"discipline_adoption_key": discipline_adoption_key} if discipline_adoption_key else {}),
         },
     })
     service = get_strategy_service()
@@ -515,6 +678,10 @@ def _create_managed_strategy_locked(
         authorize_position(fresh)
     strategy_id = int(service.create_strategy(payload))
     strategy = service.get_strategy(strategy_id, user_id=uid) or {}
+    if expected_source_version_id is not None and int(strategy.get("source_version_id") or 0) != expected_source_version_id:
+        cleaned = _delete_created_strategy(service, strategy_id=strategy_id, user_id=uid, reason="source_version_changed")
+        suffix = _cleanup_failure_suffix(cleaned=cleaned, strategy_id=strategy_id)
+        raise PositionManagementError(f"接管策略源码版本已变更{suffix}", status_code=409 if cleaned else 500)
     if not _strategy_monitors_position(strategy, symbol, market_type, side):
         cleaned = _delete_created_strategy(
             service,

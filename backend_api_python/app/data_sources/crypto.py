@@ -257,10 +257,19 @@ class CryptoDataSource(BaseDataSource):
 
     def _symbol_for_scoped_market(self, symbol: str) -> str:
         """Perpetual symbols use ``BASE/QUOTE:QUOTE`` (for example BTC/USDT:USDT)."""
+        mt = getattr(self, "_scoped_market_type", "") or "spot"
+        # 币安账户指定了完整永续币对时，另一个结算币的行情不能用于这笔仓位。
+        # 保留显式币对，原合约查询失败时让调用方处理缺失行情。
+        if (mt == "swap" and getattr(self.exchange, "id", "") == "binance"
+                and not getattr(self, "_allow_public_fallback", False) and "/" in symbol):
+            pair, separator, settlement = symbol.strip().upper().partition(":")
+            base, _, quote = pair.partition("/")
+            if base and quote and (not separator or settlement == quote):
+                return f"{pair}:{quote}"
+            return ""
         normalized = self._normalize_symbol_for_exchange(symbol)
         if not normalized:
             return symbol
-        mt = getattr(self, "_scoped_market_type", "") or "spot"
         if mt != "swap":
             return normalized
         if ":" in normalized:

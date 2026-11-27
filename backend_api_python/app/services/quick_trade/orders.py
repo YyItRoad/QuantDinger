@@ -9,6 +9,16 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def submit_market_close(*, client, position_side, symbol, amount, market_type, exchange_config, client_order_id):
+    from app.services.live_trading.execution import place_order_from_signal
+
+    return place_order_from_signal(
+        client=client, signal_type=f"close_{position_side}", symbol=symbol, amount=amount,
+        market_type=market_type, exchange_config=exchange_config, client_order_id=client_order_id,
+        quote_amount=0,
+    )
+
+
 def normalize_order_status(status: str, order: Any = None) -> str:
     """Use native terminal evidence before comparing pre-rounding quantities."""
     status = str(status or "").strip().lower()
@@ -182,7 +192,7 @@ def quick_order_status(
     status = str(exchange_status or "").strip().lower().replace("-", "_")
     if status in {"filled", "closed", "complete", "completed", "full_fill"}:
         return "filled"
-    if status in {"cancelled", "canceled", "expired"}:
+    if status in {"cancelled", "canceled", "expired", "expired_in_match"}:
         return "cancelled"
     if status in {"rejected", "failed"}:
         return "failed"

@@ -275,6 +275,16 @@ def place_order(body):
         qt_rej = _reject_quick_trade_if_desktop_broker(exchange_id)
         if qt_rej is not None:
             return qt_rej
+        # 网页快捷开仓在进入下单流程前检查计划和 EMA。快捷平仓走独立入口。
+        from app.trade_discipline.entry_guard import BLOCKED, entry_discipline_rejection
+
+        rejection = entry_discipline_rejection(
+            user_id=user_id, credential_id=credential_id, symbol=symbol, side=side,
+            market_type=market_type, exchange_config=exchange_config, resolved_product=resolved_product,
+        )
+        if rejection:
+            return jsonify({"code": 0, "msg": BLOCKED, "data": {"reason": rejection}}), 409
+
         client = create_exchange_client(exchange_config, market_type=market_type)
 
         strategy_conflict = _recent_strategy_conflict(
@@ -1394,39 +1404,15 @@ def close_position(body):
             (time.monotonic() - request_started) * 1000,
         )
         
-        # ---- determine signal type based on position side ----
-        if market_type == "spot":
-            # Spot only supports long positions
-            if position_side != "long":
-                return jsonify({"code": 0, "msg": "Spot market only supports closing long positions"}), 400
-            signal_type = "close_long"
-        else:
-            # Swap: close_long or close_short
-            if position_side == "long":
-                signal_type = "close_long"
-            elif position_side == "short":
-                signal_type = "close_short"
-            else:
-                return jsonify({"code": 0, "msg": f"Unknown position side: {position_side}"}), 400
-        
-        # ---- place close order ----
-        from app.services.live_trading.execution import place_order_from_signal
-        
-        # Generate client_order_id
+        if market_type == "spot" and position_side != "long":
+            return jsonify({"code": 0, "msg": "Spot market only supports closing long positions"}), 400
+        if position_side not in {"long", "short"}:
+            return jsonify({"code": 0, "msg": f"Unknown position side: {position_side}"}), 400
+
         timestamp_suffix = str(int(time.time()))[-6:]
         uuid_suffix = uuid.uuid4().hex[:8]
-        client_order_id = f"qtc{timestamp_suffix}{uuid_suffix}"  # 'c' for close
-        
-        order_args = dict(
-            client=client,
-            signal_type=signal_type,
-            symbol=symbol,
-            amount=actual_close_size,  # Use position size directly (already in base qty)
-            market_type=market_type,
-            exchange_config=exchange_config,
-            client_order_id=client_order_id,
-            quote_amount=0,
-        )
+        client_order_id = f"qtc{timestamp_suffix}{uuid_suffix}"
+
         if order_type == "limit":
             from app.services.pending_orders.live_order_phases import place_live_limit_order
             result = place_live_limit_order(
@@ -1436,7 +1422,12 @@ def close_position(body):
                 exchange_config=exchange_config, leverage=float(position.get("leverage") or 1), order_mode="gtc",
             )
         else:
-            result = place_order_from_signal(**order_args)
+            from app.services.quick_trade.orders import submit_market_close
+
+            result = submit_market_close(
+                client=client, position_side=position_side, symbol=symbol, amount=actual_close_size,
+                market_type=market_type, exchange_config=exchange_config, client_order_id=client_order_id,
+            )
         logger.info(
             "Quick Trade close acknowledged exchange=%s fast=%s elapsed_ms=%.1f",
             exchange_id,

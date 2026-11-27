@@ -214,7 +214,8 @@ class PendingOrderWorker(
                     WHERE (
                             status IN ('submitted', 'partially_filled')
                             OR (
-                                status = 'filled'
+                                (status = 'filled' OR (status = 'cancelled' AND source = 'trade_discipline'
+                                    AND (raw_result->'_discipline_exit'->>'key') IS NOT NULL))
                                 AND COALESCE(filled_amount, 0) > 0
                                 AND COALESCE(commission_quote, 0) <= 0
                                 AND COALESCE(raw_result->'_quick_trade'->>'fee_status', 'pending') = 'pending'
@@ -336,7 +337,9 @@ class PendingOrderWorker(
             filled_qty=cumulative_filled,
             exchange_status=str(enrich.get("status") or ""),
         )
-        metadata["exchange_status"] = str(enrich.get("status") or "")
+        if row.get("status") == "cancelled" and stored_raw.get("_discipline_exit"):
+            status = "cancelled"
+        metadata["exchange_status"] = str(enrich.get("status") or metadata.get("exchange_status") or "")
         metadata["last_reconciled_at"] = int(time.time())
         stored_raw["_quick_trade"] = metadata
         avg_to_store = cumulative_avg or float(row.get("avg_fill_price") or 0.0)
@@ -395,7 +398,8 @@ class PendingOrderWorker(
                     error_msg = %s,
                     raw_result = %s
                 WHERE id = %s
-                  AND status IN ('submitted', 'partially_filled', 'filled')
+                  AND (status IN ('submitted', 'partially_filled', 'filled')
+                       OR (status = 'cancelled' AND source = 'trade_discipline' AND (raw_result->'_discipline_exit'->>'key') IS NOT NULL))
                 """,
                 (
                     status,

@@ -34,8 +34,26 @@ Read only the documentation relevant to the change:
 - Do not weaken live-trading safeguards or bypass explicit authorization and human review unless the user requests and scopes that change.
 - Do not add upgrade-time data rewrites for one-off local cleanup. Use an explicit, reviewed migration only when shipped user data must change.
 - Preserve unrelated working-tree changes.
-- Use English for source-code comments. Keep user-facing application copy in the existing localization system rather than hardcoding it in source files.
+- Keep user-facing application copy in the existing localization system rather than hardcoding it in source files.
 - Keep machine-readable contracts and identifiers in English. When a human guide has English and `_CN` editions, update both when the change affects both audiences.
+
+## 业务代码开发前置条件
+
+新增功能、修改业务行为、调整架构或重构跨模块调用前，必须先调研现有系统，并在 `docs/` 下写出中文 Markdown 设计文档。以下四项齐全且由需求方确认后，才能开始写业务代码。
+
+1. **需求与验收**。写清使用场景、触发条件、业务规则、异常分支和功能边界。区分已确认需求、待核实假设和待决定问题。每个步骤都要有可独立验证的输入、预期结果和验收方式。
+2. **架构图与调用流程**。标出实际入口、运行进程、模块职责、调用顺序、数据来源及写入点。跨进程或涉及关键分支时，用流程图或时序图标明分支去向、进程间交接和失败后的恢复路径。
+3. **详细设计与复用清单**。逐项核对现有代码，列出可直接复用的服务和函数、确需调整的接入点、计划删除的旧逻辑，以及新增部分的必要性。涉及配置、权限、交易或持久化时，说明默认值、作用范围、执行权限、幂等与回查方式。
+4. **关键流程的伪代码**。按实际调用顺序写出输入、分支条件、返回结果和副作用。伪代码、架构图和验收项应能相互对照。
+
+审核前先完成只读调研和关键假设的核实。涉及交易所、订单归属、权限或其他影响执行的证据缺口，先验证或明确标为待决，再进入实现。需求有变化时先更新受影响的设计与验收项并重新确认，再继续按可独立验收的步骤实施。
+
+## 自研模块的中文注释
+
+- 本仓库自研业务模块必须添加详细中文源码注释。现有交易纪律和交易计划模块、新增自研模块，以及 Scheduler、Trading Worker、网页和 Agent API 中接入这些模块的关键调用点都适用。
+- 模块入口必须说明触发方、运行进程和后续调用。关键业务分支必须解释判断依据和先后顺序、数据来源和时间口径、通过或跳过的条件，以及证据不足或调用失败时如何处理。涉及写库、下单、接管和重试时，必须说明执行边界、重启后的恢复方式和幂等依据。
+- 改动业务流程时同步更新相关注释和中文 Markdown 导读。注释应解释代码为何这样判定并帮助定位断点，命名和逐行翻译可以省略。沿用的上游代码继续遵循原有注释风格，接口字段、日志事件和机器可读标识继续使用英文。
+- 交易纪律的进程入口、调用顺序、分支及 VS Code 调试位置见[交易纪律代码导读](docs/trading/交易纪律代码导读.md)。
 
 ## Verification
 

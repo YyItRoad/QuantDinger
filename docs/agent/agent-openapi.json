@@ -1766,11 +1766,11 @@
     "/api/agent/v1/quick-trade/orders": {
       "post": {
         "summary": "Place a quick order (paper by default; live only when fully unlocked)",
-        "description": "Requires T scope. Paper-only tokens record qd_agent_paper_orders. Live execution requires token paper_only=false, AGENT_LIVE_TRADING_ENABLED=true, and credential_id. Live orders reuse the same execution path as human Quick Trade.",
+        "description": "Requires T scope. Paper-only tokens record qd_agent_paper_orders. Live execution requires token paper_only=false, AGENT_LIVE_TRADING_ENABLED=true, and credential_id. When TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED applies to the configured user and credential, live market and limit orders that may increase exposure require an effective directional plan and EMA25 confirmation. The guard does not apply to paper orders or spot sells.",
         "x-scope-class": "T",
         "parameters": [{ "in": "header", "name": "Idempotency-Key", "required": true, "schema": { "type": "string", "maxLength": 120 } }],
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/OrderRequest" } } } },
-        "responses": { "200": { "description": "OK (paper fill or live order)" }, "400": { "description": "Invalid order payload" }, "403": { "description": "Scope/instrument denied" }, "501": { "description": "Live-capable token used while AGENT_LIVE_TRADING_ENABLED is disabled" } }
+        "responses": { "200": { "description": "OK (paper fill or live order)" }, "400": { "description": "Invalid order payload" }, "403": { "description": "Scope/instrument denied" }, "409": { "description": "Entry blocked by trade discipline. details.reason identifies the failed check." }, "501": { "description": "Live-capable token used while AGENT_LIVE_TRADING_ENABLED is disabled" } }
       }
     },
     "/api/agent/v1/quick-trade/kill-switch": {

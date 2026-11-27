@@ -4,6 +4,14 @@ from app.services.live_trading import account_snapshot
 from app.services.live_trading.account_snapshot import _parse_binance_futures_positions
 
 
+def test_binance_order_snapshot_preserves_full_client_order_id():
+    rows = account_snapshot._parse_binance_orders([
+        dict(symbol="TRXUSDC", orderId=101, clientOrderId="ios_im_Test_MixedCase_1234567")
+    ], market_type="swap")
+    assert rows[0]["client_order_id"] == "ios_im_Test_MixedCase_1234567"
+    assert rows[0]["exchange_order_id"] == "101"
+
+
 def test_parse_binance_futures_position_keeps_mark_price():
     rows = _parse_binance_futures_positions(
         [

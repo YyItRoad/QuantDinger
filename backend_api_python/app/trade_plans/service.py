@@ -14,6 +14,21 @@ def uid():
     return str(uuid4())
 
 
+def _discipline_identity(instrument):
+    identity = {key: str(instrument.get(key) or '').strip().upper() for key in INSTRUMENT_KEYS}
+    if identity['exchange_id'] in {'BINANCEUSDM', 'BINANCEFUTURES'}:
+        identity['exchange_id'] = 'BINANCE'
+    if identity['market'] == 'CRYPTO':
+        symbol, separator, suffix = identity['symbol'].partition(':')
+        settlement = identity['settlement_ccy']
+        if separator and not settlement:
+            identity['settlement_ccy'] = suffix
+        elif separator and suffix != settlement:
+            symbol = identity['symbol']
+        identity['symbol'] = symbol.replace('/', '')
+    return identity
+
+
 class PlanService:
     def __init__(self, repository=None, scope=None, now=None):
         self.repo = repository or PlanRepository()
@@ -26,6 +41,67 @@ class PlanService:
     def effective_state(self, row):
         expires = row['snapshot'].get('expires_at')
         return 'expired' if row['lifecycle'] in ACTIVE and expires and timestamp(expires) <= self.now() else row['lifecycle']
+
+    def match_at_order_time(self, user_id, *, instrument, direction, submitted_at, lookback_hours=None):
+        """Find a recent directional plan using only facts stored by order submission."""
+        try:
+            cutoff = timestamp(submitted_at)
+        except PlanError:
+            return {'status': 'unavailable', 'reason': 'order_submission_time_unavailable'}
+        if type(user_id) is not int or user_id <= 0 or direction not in {'long', 'short'}:
+            raise PlanError('invalid_discipline_scope')
+        if lookback_hours is None:
+            lookback_hours = 24
+        if type(lookback_hours) is not int or lookback_hours <= 0:
+            raise PlanError('invalid_plan_lookback')
+        # 计划必须对应同一原生产品，合约标识、交易所、结算币都参与比较。
+        expected = _discipline_identity(instrument)
+        if not all(expected.values()) or not self.visible({'instrument': instrument}):
+            return {'status': 'unavailable', 'reason': 'order_identity_unavailable'}
+
+        try:
+            # 只读取下单时刻以前已保存且已进入观察状态的计划版本。
+            with self.repo.transaction() as cur:
+                rows = self.repo.observing_at(cur, user_id, cutoff, direction)
+        except Exception:
+            return {'status': 'unavailable', 'reason': 'plan_query_failed'}
+
+        unresolved = None
+        for row in rows:
+            snapshot = row['snapshot']
+            if snapshot.get('retrospective'):
+                continue
+            identity = _discipline_identity(snapshot.get('instrument') or {})
+            if any(value and value != expected[key] for key, value in identity.items()):
+                continue
+            if not self.visible(snapshot):
+                unresolved = unresolved or 'plan_identity_unavailable'
+                continue
+            expires = snapshot.get('expires_at')
+            try:
+                if expires and timestamp(expires) <= cutoff:
+                    continue
+                # 用户确认近期以进入观察中的时间计算，编辑版本不会刷新窗口。
+                # 有明确到期时间的计划也必须处于近期窗口内。
+                recent_since = timestamp(row.get('observing_since'))
+                if recent_since > cutoff:
+                    unresolved = unresolved or 'plan_timestamp_unavailable'
+                    continue
+                if (cutoff - recent_since).total_seconds() > lookback_hours * 3600:
+                    continue
+            except PlanError:
+                unresolved = unresolved or 'plan_timestamp_unavailable'
+                continue
+            if not all(identity.values()):
+                unresolved = unresolved or 'plan_identity_incomplete'
+                continue
+            return {'status': 'matched', 'plan_id': row['plan_id'], 'version_id': row['version_id'],
+                    'version_no': row['version_no'], 'observing_since': row['observing_since'],
+                    'version_created_at': row['version_created_at'], 'expires_at': expires}
+        # 无法判定的候选计划必须与确认无计划区分开，避免误触发退出。
+        if unresolved:
+            return {'status': 'unavailable', 'reason': unresolved}
+        return {'status': 'no_plan', 'reason': 'no_matching_plan_at_order_time'}
 
     def require_plan(self, cur, user_id, plan_id, lock=False):
         row = self.repo.plan(cur, user_id, plan_id, lock)

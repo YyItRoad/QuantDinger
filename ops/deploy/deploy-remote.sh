@@ -29,6 +29,7 @@ set -euo pipefail
 : "${COMPOSE_FILE:=docker-compose.ghcr.yml}"
 : "${PRUNE:=false}"
 : "${REPO_OWNER:=OpenByteInc}"
+: "${DISCIPLINE_OBSERVATION_USER_ID:=}"
 # GHCR requires lowercase repo names. We lowercase in bash instead of using
 # the GitHub Actions `| lower` filter — that filter triggered a schema
 # fallback that hid the workflow name and the Run workflow button.
@@ -64,6 +65,10 @@ if [ ! -f "$DEPLOY_DIR/$COMPOSE_FILE" ]; then
 fi
 
 compose=(docker compose -f "$DEPLOY_DIR/$COMPOSE_FILE")
+preview_overlay="$DEPLOY_DIR/docker-compose.discipline-preview.yml"
+if [[ -f "$preview_overlay" ]]; then
+  compose+=(-f "$preview_overlay")
+fi
 backend_services=(backend trading-worker scheduler-worker celery-worker celery-backtest-worker celery-beat)
 configured_services=$("${compose[@]}" config --services) || die "Unable to resolve Compose services."
 for service in migration "${backend_services[@]}"; do
@@ -118,6 +123,45 @@ env_set() {
 }
 
 ENV_FILE="$DEPLOY_DIR/.env"
+verify_discipline_preview() {
+  "$@" python - "$DISCIPLINE_OBSERVATION_USER_ID" <<'PY'
+import os
+import sys
+from dotenv import load_dotenv
+
+load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
+disabled = ("TRADE_DISCIPLINE_AUTO_EXIT_ENABLED", "TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED",
+            "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED")
+expected = dict.fromkeys(disabled, "false")
+expected.update(TRADE_DISCIPLINE_USER_ID=sys.argv[1], TRADE_DISCIPLINE_OBSERVATION_ENABLED="true",
+                TRADE_DISCIPLINE_EXTERNAL_OPENINGS_AS_MANUAL="true", TRADE_DISCIPLINE_PLAN_LOOKBACK_HOURS="24")
+mismatched = [name for name, value in expected.items() if os.getenv(name) != value]
+if mismatched:
+    raise SystemExit("Unexpected trade-discipline preview configuration: " + ", ".join(mismatched))
+print("Trade-discipline observation on; external manual policy on; plan window 24h; automatic actions and entry guard off")
+PY
+}
+preview_services=(backend scheduler-worker trading-worker)
+if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
+  # 生产预览仅允许观察指定用户。先核实用户、现有计划事件表与数据库备份。
+  [[ "$DISCIPLINE_OBSERVATION_USER_ID" =~ ^[1-9][0-9]{0,9}$ ]] || die "Invalid discipline observation user id."
+  [[ -w "$DEPLOY_DIR" && -w "$ENV_FILE" ]] || die "Deploy account cannot atomically update the active .env."
+  observation_ready=$("${compose[@]}" exec -T postgres sh -c '
+    PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=5000" \
+      psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      -c "SELECT EXISTS (SELECT 1 FROM qd_users WHERE id=$1) AND
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_trade_plan_events\$\$), \$\$SELECT\$\$), false)"
+  ' sh "$DISCIPLINE_OBSERVATION_USER_ID")
+  [[ "$observation_ready" == "t" ]] || die "Discipline preview user or existing plan-event table unavailable."
+  # 使用部署账号的持久目录，避免依赖旧部署目录中的备份目录权限。
+  backup_root="${XDG_STATE_HOME:-$HOME/.local/state}/quantdinger/backups"
+  backup_dir=$(umask 077; mkdir -p "$backup_root"; mktemp -d "$backup_root/discipline-preview-XXXXXX")
+  (umask 077
+    "${compose[@]}" exec -T postgres sh -c 'pg_dump -Fc -U "$POSTGRES_USER" -d "$POSTGRES_DB"' > "$backup_dir/postgres.dump"
+  )
+  "${compose[@]}" exec -T postgres pg_restore --list < "$backup_dir/postgres.dump" > /dev/null
+  log "Verified preview PostgreSQL backup: $backup_dir"
+fi
 env_set "$ENV_FILE" "BACKEND_TAG" "$IMAGE_TAG"
 log "Pinned BACKEND_TAG=$IMAGE_TAG in $ENV_FILE."
 
@@ -139,8 +183,59 @@ log "Pulling backend image for services that share quantdinger-backend:$IMAGE_TA
 log "Running database migration (idempotent — re-running is safe)..."
 "${compose[@]}" run --rm migration
 
+if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_USER_ID" "$DISCIPLINE_OBSERVATION_USER_ID"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_AUTO_EXIT_ENABLED" "false"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED" "false"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED" "false"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_OBSERVATION_ENABLED" "true"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_EXTERNAL_OPENINGS_AS_MANUAL" "true"
+  env_set "$ENV_FILE" "TRADE_DISCIPLINE_PLAN_LOOKBACK_HOURS" "24"
+  # 直接向三个应用进程传递预览配置，兼容旧版 Compose 单独挂载 backend.env 的部署。
+  # 重写脚本拥有的专用覆盖文件，保证旧版预览也获得最新业务配置，不修改 backend.env。
+  overlay_existed=false
+  [[ ! -f "$preview_overlay" ]] || overlay_existed=true
+  {
+    preview_tmp=$(mktemp "$DEPLOY_DIR/.discipline-preview.XXXXXX")
+    cat > "$preview_tmp" <<'YAML'
+x-discipline-environment: &discipline-environment
+  TRADE_DISCIPLINE_USER_ID: ${TRADE_DISCIPLINE_USER_ID:-}
+  TRADE_DISCIPLINE_AUTO_EXIT_ENABLED: ${TRADE_DISCIPLINE_AUTO_EXIT_ENABLED:-false}
+  TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED: ${TRADE_DISCIPLINE_AUTO_ADOPT_ENABLED:-false}
+  TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED: ${TRADE_DISCIPLINE_ENTRY_GUARD_ENABLED:-false}
+  TRADE_DISCIPLINE_OBSERVATION_ENABLED: ${TRADE_DISCIPLINE_OBSERVATION_ENABLED:-false}
+  TRADE_DISCIPLINE_EXTERNAL_OPENINGS_AS_MANUAL: ${TRADE_DISCIPLINE_EXTERNAL_OPENINGS_AS_MANUAL:-false}
+  TRADE_DISCIPLINE_PLAN_LOOKBACK_HOURS: ${TRADE_DISCIPLINE_PLAN_LOOKBACK_HOURS:-24}
+services:
+  backend:
+    environment: *discipline-environment
+  scheduler-worker:
+    environment: *discipline-environment
+  trading-worker:
+    environment: *discipline-environment
+YAML
+    mv "$preview_tmp" "$preview_overlay"
+  }
+  if [[ "$overlay_existed" == false ]]; then
+    compose+=(-f "$preview_overlay")
+  fi
+  "${compose[@]}" config --quiet
+  # 先用候选容器核对应用将读到的实际配置，再重启服务。
+  for service in "${preview_services[@]}"; do
+    log "Checking preview configuration for $service before startup"
+    verify_discipline_preview "${compose[@]}" run --rm --no-deps -T --entrypoint "" "$service"
+  done
+fi
+
 log "Restarting backend services..."
 "${compose[@]}" up -d "${backend_services[@]}"
+
+if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
+  for service in "${preview_services[@]}"; do
+    log "Checking active preview configuration for $service"
+    verify_discipline_preview "${compose[@]}" exec -T "$service"
+  done
+fi
 
 ###############################################################################
 # 8. Wait for backend /api/health to come up                                ##
@@ -157,6 +252,43 @@ for i in $(seq 1 30); do
 done
 if [ "$healthy" != "true" ]; then
   die "Backend did not become healthy within 60s. Inspect: docker compose -f $DEPLOY_DIR/$COMPOSE_FILE logs backend"
+fi
+
+if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
+  # 用实际 Scheduler 数据库角色只读核对复用表和既有幂等索引，不写测试业务记录。
+  log "Checking active discipline schema with the Scheduler database role"
+  "${compose[@]}" exec -T scheduler-worker python - <<'PY'
+import os
+from dotenv import load_dotenv
+load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
+from app.utils.db import get_db_connection
+from app.trade_discipline import origin, notifications
+with get_db_connection() as conn:
+    cur = conn.cursor()
+    try:
+        cur.execute("SET TRANSACTION READ ONLY")
+        cur.execute("""SELECT
+            has_table_privilege('public.qd_trade_plan_events', 'SELECT') AS can_read,
+            has_table_privilege('public.qd_trade_plan_events', 'INSERT') AS can_append,
+            EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public'
+                AND table_name='qd_trade_plan_events' AND column_name='payload' AND data_type='jsonb') AS payload_jsonb,
+            EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.qd_trade_plan_events'::regclass
+                AND contype='p') AS event_primary_key,
+            EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.qd_trade_plan_events'::regclass
+                AND contype='f' AND confrelid='public.qd_trade_plan_versions'::regclass) AS version_foreign_key,
+            EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('public.uq_strategy_discipline_adoption')
+                AND indisunique AND indisvalid) AS adoption_idempotency,
+            EXISTS (SELECT 1 FROM pg_index WHERE indexrelid=to_regclass('public.uq_quick_trade_discipline_exit')
+                AND indisunique AND indisvalid) AS exit_idempotency""")
+        checks = dict(cur.fetchone())
+        if not all(checks.values()):
+            raise SystemExit("Active discipline schema check failed: " + str(checks))
+        print("Active discipline schema checks passed: " + str(checks))
+        conn.rollback()
+    finally:
+        cur.close()
+print("Active origin and notification modules imported")
+PY
 fi
 
 ###############################################################################
