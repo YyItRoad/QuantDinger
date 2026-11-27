@@ -264,7 +264,8 @@ load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
 from app.utils.db import get_db_connection
 from app.trade_discipline import origin, notifications
 with get_db_connection() as conn:
-    with conn.cursor() as cur:
+    cur = conn.cursor()
+    try:
         cur.execute("SET TRANSACTION READ ONLY")
         cur.execute("""SELECT
             has_table_privilege('public.qd_trade_plan_events', 'SELECT') AS can_read,
@@ -284,6 +285,8 @@ with get_db_connection() as conn:
             raise SystemExit("Active discipline schema check failed: " + str(checks))
         print("Active discipline schema checks passed: " + str(checks))
         conn.rollback()
+    finally:
+        cur.close()
 print("Active origin and notification modules imported")
 PY
 fi
