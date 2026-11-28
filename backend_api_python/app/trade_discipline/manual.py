@@ -165,18 +165,7 @@ def assess_manual_opening(inventory, position, events, report, observed_at, look
 
 def apply_poll_window(report, position, now, *, adoption=None):
     if position["outcome"] == "notify_only":
-        from app.services.signal_notifier import SignalNotifier
-
-        delivered, _ = SignalNotifier()._notify_browser(
-            user_id=report["user_id"], symbol=position["symbol"], signal_type="discipline_mixed_exposure",
-            channels=["browser"], title="Trade discipline: mixed exposure",
-            message="Position contains strategy exposure. Automation deferred.",
-            payload={"credential_id": report["credential_id"], "instrument": position["instrument"],
-                     "side": position["side"], "opening_fill_id": position.get("opening_fill_id")},
-        )
-        audit("mixed_exposure_notification", user_id=report["user_id"], credential_id=report["credential_id"],
-              instrument=position["instrument"], side=position["side"], delivered=delivered)
-        position["notification_delivered"] = delivered
+        # 统一在关键事件入口去重、持久化并异步投递，避免逐轮重复写站内消息。
         return
     if position["outcome"] != "opening_passed":
         return

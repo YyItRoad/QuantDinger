@@ -125,7 +125,7 @@ env_set() {
 }
 
 ENV_FILE="$DEPLOY_DIR/.env"
-verify_discipline_preview() {
+verify_discipline_configuration() {
   "$@" python - "$DISCIPLINE_OBSERVATION_USER_ID" "$DISCIPLINE_AUTO_EXIT_ENABLED" "$DISCIPLINE_EXIT_FROM" <<'PY'
 import os
 import sys
@@ -180,9 +180,12 @@ if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
     PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=5000" \
       psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
       -c "SELECT EXISTS (SELECT 1 FROM qd_users WHERE id=$1) AND
-                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_trade_plan_events\$\$), \$\$SELECT\$\$), false)"
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_trade_plan_events\$\$), \$\$SELECT\$\$), false) AND
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_strategy_notifications\$\$), \$\$SELECT\$\$), false) AND
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_strategy_notifications\$\$), \$\$INSERT\$\$), false) AND
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_strategy_notifications\$\$), \$\$UPDATE\$\$), false)"
   ' sh "$DISCIPLINE_OBSERVATION_USER_ID")
-  [[ "$observation_ready" == "t" ]] || die "Discipline preview user or existing plan-event table unavailable."
+  [[ "$observation_ready" == "t" ]] || die "Discipline user, plan-event table or notification persistence unavailable."
   # 使用部署账号的持久目录，避免依赖旧部署目录中的备份目录权限。
   backup_root="${XDG_STATE_HOME:-$HOME/.local/state}/quantdinger/backups"
   backup_dir=$(umask 077; mkdir -p "$backup_root"; mktemp -d "$backup_root/discipline-preview-XXXXXX")
@@ -258,8 +261,8 @@ YAML
   "${compose[@]}" config --quiet
   # 先用候选容器核对应用将读到的实际配置，再重启服务。
   for service in "${preview_services[@]}"; do
-    log "Checking preview configuration for $service before startup"
-    verify_discipline_preview "${compose[@]}" run --rm --no-deps -T --entrypoint "" "$service"
+    log "Checking discipline configuration for $service before startup"
+    verify_discipline_configuration "${compose[@]}" run --rm --no-deps -T --entrypoint "" "$service"
   done
 fi
 
@@ -268,8 +271,8 @@ log "Restarting backend services..."
 
 if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
   for service in "${preview_services[@]}"; do
-    log "Checking active preview configuration for $service"
-    verify_discipline_preview "${compose[@]}" exec -T "$service"
+    log "Checking active discipline configuration for $service"
+    verify_discipline_configuration "${compose[@]}" exec -T "$service"
   done
 fi
 
@@ -306,6 +309,9 @@ with get_db_connection() as conn:
         cur.execute("""SELECT
             has_table_privilege('public.qd_trade_plan_events', 'SELECT') AS can_read,
             has_table_privilege('public.qd_trade_plan_events', 'INSERT') AS can_append,
+            (has_table_privilege('public.qd_strategy_notifications', 'SELECT')
+             AND has_table_privilege('public.qd_strategy_notifications', 'INSERT')
+             AND has_table_privilege('public.qd_strategy_notifications', 'UPDATE')) AS notices_durable,
             EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public'
                 AND table_name='qd_trade_plan_events' AND column_name='payload' AND data_type='jsonb') AS payload_jsonb,
             EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.qd_trade_plan_events'::regclass
@@ -324,6 +330,44 @@ with get_db_connection() as conn:
     finally:
         cur.close()
 print("Active origin and notification modules imported")
+PY
+  log "Checking discipline notification delivery (aggregate health only)"
+  "${compose[@]}" exec -T scheduler-worker python - "$DISCIPLINE_OBSERVATION_USER_ID" <<'PY'
+import json
+import os
+import sys
+import time
+from dotenv import load_dotenv
+load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
+from app.utils.db import get_db_connection
+from app.services.user_preferences import get_notification_settings, VALID_NOTIFICATION_CHANNELS
+user_id = int(sys.argv[1])
+settings = get_notification_settings(user_id) or {}
+selected = settings.get("default_channels") or []
+selected = selected if isinstance(selected, list) else []
+external = any(isinstance(ch,str) and ch.strip().lower() in VALID_NOTIFICATION_CHANNELS-{"browser"} for ch in selected)
+for attempt in range(20):
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SET TRANSACTION READ ONLY")
+            cur.execute("""SELECT NULLIF(payload_json,'')::jsonb->'_discipline_notice' AS meta
+                FROM qd_strategy_notifications WHERE user_id=%s
+                AND NULLIF(payload_json,'')::jsonb->'_discipline_notice' IS NOT NULL
+                ORDER BY id DESC LIMIT 20""", (user_id,))
+            metadata = [row["meta"] for row in cur.fetchall()]
+            conn.rollback()
+        finally:
+            cur.close()
+    pending = [m for m in metadata if any(ch not in m["delivered"] + m.get("skipped", []) for ch in m["channels"])]
+    summary = {"records_present": bool(metadata), "external_channels_configured": external,
+               "external_acknowledged": any(m["delivered"] for m in metadata),
+               "pending": bool(pending), "failed": any(m["attempts"]>=3 for m in pending)}
+    if metadata and (not pending or summary["failed"]):
+        break
+    time.sleep(3)
+# 不输出个人目标、密钥、具体持仓或消息正文；渠道接收不等同于人已经阅读。
+print("Discipline notification delivery check: " + json.dumps(summary, sort_keys=True))
 PY
 fi
 

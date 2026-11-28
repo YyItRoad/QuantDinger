@@ -16,7 +16,8 @@ class PendingOrderLoops:
     def _run_sync_loop(self) -> None:
         while not self._stop_event.is_set():
             for sync in (self._sync_discipline_exits, self._sync_quick_trade_orders,
-                         self._sync_alpaca_sent_orders, self._sync_live_sent_orders, self._maybe_sync_positions):
+                         self._sync_alpaca_sent_orders, self._sync_live_sent_orders, self._maybe_sync_positions,
+                         self._sync_discipline_notices):
                 if self._stop_event.is_set() or (self.lease_guard and not self.lease_guard()):
                     break
                 try:
@@ -43,6 +44,14 @@ class PendingOrderLoops:
         from app.trade_discipline.exit import process_discipline_exits
 
         process_discipline_exits(still_active=lambda: not self._stop_event.is_set() and self.lease_guard())
+
+    def _sync_discipline_notices(self) -> None:
+        # 只登记通知与补入有限任务队列，通知渠道的网络请求不在交易循环中运行。
+        if self.lease_guard is None:
+            return
+        from app.trade_discipline.notifications import process_discipline_notices
+
+        process_discipline_notices(still_active=lambda: not self._stop_event.is_set() and self.lease_guard())
 
     def _tick(self) -> None:
         if self.lease_guard and not self.lease_guard():

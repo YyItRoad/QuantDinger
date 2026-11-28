@@ -234,13 +234,17 @@ def _save_order(row, raw):
                                    fee_status="pending")
     if not terminal:
         # The execution stream binds only after the original request is terminal.
-        _write(
+        saved = _write(
             f"""UPDATE qd_quick_trades SET raw_result = %s::jsonb,
                     filled_amount = %s, avg_fill_price = %s, exchange_order_id = %s
                 WHERE id = %s AND user_id = %s AND credential_id = %s AND status = '{_SENT}' AND {_SCOPE}
                 RETURNING id""",
             (json.dumps(payload), filled, price, str(raw["orderId"]), row["id"], row["user_id"], row["credential_id"]),
         )
+        if saved:
+            from app.trade_discipline.notifications import notify_exit_request
+
+            notify_exit_request(row["user_id"], row["credential_id"], row["id"])
         return
     status = quick_order_status(requested_qty=float(requested), filled_qty=float(filled), exchange_status=native_status)
     trade_id = record_quick_trade(
@@ -252,8 +256,10 @@ def _save_order(row, raw):
         connection_factory=get_db_connection, logger=logger,
     )
     if trade_id:
+        from app.trade_discipline.notifications import notify_exit_request
         from app.trade_discipline.manual import audit
 
+        notify_exit_request(row["user_id"], row["credential_id"], trade_id)
         audit("exit_reconciled", user_id=row["user_id"], credential_id=row["credential_id"],
               instrument=meta["instrument"], side=payload["_quick_trade"]["close_side"],
               request_id=trade_id, client_order_id=row["client_order_id"], status=status, filled=filled)

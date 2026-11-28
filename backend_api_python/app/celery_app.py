@@ -51,12 +51,14 @@ celery_app.conf.update(
         "app.tasks.fast_analysis",
         "app.tasks.indicator_translation",
         "app.tasks.maintenance",
+        "app.tasks.trade_discipline",
         "app.tasks.fundamental_sync",
         "app.market_state.tasks",
 
         "app.tasks.reported_pnl",
     ),
     task_routes={
+        "quantdinger.tasks.trade_discipline_notice": {"queue": "maintenance"},
         "quantdinger.tasks.market_state_tick": {"queue": "maintenance"},
         "quantdinger.tasks.market_state_execute": {"queue": "ai"},
         "quantdinger.tasks.fast_analysis": {"queue": "ai"},

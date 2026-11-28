@@ -224,6 +224,9 @@ class HourlyDisciplineObserver:
                     except Exception:
                         audit("account_failed", user_id=self._account["user_id"], credential_id=account["id"],
                               round_at=now, reason="account_observation_failed")
+                        from app.trade_discipline.notifications import notify_account_failure
+
+                        notify_account_failure(self._account["user_id"], account["id"], "account_observation_failed")
                         logger.exception("Trade discipline account observation failed credential=%s", account["id"])
                 audit("round_finished", user_id=self._account["user_id"], round_at=now,
                       stopped=self._stopped.is_set())
@@ -235,6 +238,10 @@ class HourlyDisciplineObserver:
     def _observe(self, now, account):
         # 顺序是读取和判定、记录首轮通过或发送通知，再按开关执行后续动作。
         report = observe_account(observed_at=now, **account)
+        if report.get("inventory_status") not in {"ok", None}:
+            from app.trade_discipline.notifications import notify_account_failure
+
+            notify_account_failure(report["user_id"], report["credential_id"])
         if account.get("manual_only"):
             from app.trade_discipline.manual import apply_poll_window, audit
             from app.trade_discipline.notifications import notify_management_start_failures
@@ -283,7 +290,10 @@ class HourlyDisciplineObserver:
                     position["pending_entry_orders_checked"] = result.pop("pending_entry_orders_checked", False)
                     position["adoption"] = result
         if account.get("manual_only"):
+            from app.trade_discipline.notifications import notify_observation
+
             for position in report["positions"]:
+                notify_observation(report, position)
                 for action in ("exit", "adoption"):
                     if action in position:
                         result = position[action]
