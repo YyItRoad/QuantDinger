@@ -50,6 +50,20 @@ jobs:
             queues=inspector.active_queues() or {}
             flags["notice_task_registered"]=any("quantdinger.tasks.trade_discipline_notice" in names for names in registered.values())
             flags["maintenance_consumed"]=any(item["name"]=="maintenance" for items in queues.values() for item in items)
+            from app.services.signal_notifier import SignalNotifier, _validate_outbound_http_url
+            notifier=SignalNotifier()
+            flags["email_selected"]="email" in channels
+            flags["webhook_selected"]="webhook" in channels
+            flags["telegram_selected"]="telegram" in channels
+            flags["smtp_configured"]=bool(notifier.smtp_host and notifier.smtp_from)
+            flags["telegram_token_present"]=bool((cfg.get("targets") or {}).get("telegram_bot_token"))
+            if "webhook" in channels:
+                _,error=_validate_outbound_http_url((cfg.get("targets") or {}).get("webhook"))
+                flags["webhook_validation_passed"]=not bool(error)
+                flags["webhook_dns_failed"]=error=="webhook_host_unresolvable"
+                flags["webhook_private_blocked"]=error=="webhook_private_address_blocked"
+            for channel in ("email","webhook","telegram","discord","phone"):
+                flags["failed_"+channel]=any(m.get("results",{}).get(channel,{}).get("ok") is False and not m.get("results",{}).get(channel,{}).get("skipped") for m in metadata)
             print("NOTIFICATION_AGGREGATE",json.dumps(flags,sort_keys=True))
             PYREMOTE
-            docker compose -f docker-compose.ghcr.yml logs --no-color --since 15m --tail 300 trading-worker celery-worker 2>/dev/null | python3 -c 'import sys,json; t=sys.stdin.read(); print("NOTICE_LOG_FLAGS",json.dumps({"queue_unavailable":"trade_discipline notice_queue_unavailable" in t,"record_failed":"trade_discipline notice_record_failed" in t,"poll_unavailable":"trade_discipline notice_poll_unavailable" in t,"unregistered_task":"Received unregistered task" in t,"delivery_logged":"trade_discipline notice_delivery" in t},sort_keys=True))'
+            docker compose -f docker-compose.ghcr.yml logs --no-color --since 15m --tail 300 trading-worker celery-worker 2>/dev/null | python3 -c 'import sys,json; t=sys.stdin.read(); print("NOTICE_LOG_FLAGS",json.dumps({"queue_unavailable":"trade_discipline notice_queue_unavailable" in t,"record_failed":"trade_discipline notice_record_failed" in t,"poll_unavailable":"trade_discipline notice_poll_unavailable" in t,"unregistered_task":"Received unregistered task" in t,"delivery_logged":"trade_discipline notice_delivery" in t,"smtp_missing":"SMTP_HOST not configured" in t or "SMTP_FROM not configured" in t,"email_error":"email.error" in t,"webhook_timeout":"webhook.timeout" in t,"webhook_connection_error":"webhook.connection_error" in t,"webhook_error":"webhook.error" in t,"telegram_error":"telegram.error" in t},sort_keys=True))'
