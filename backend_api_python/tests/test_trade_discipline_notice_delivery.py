@@ -3,12 +3,14 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from app.trade_discipline import notifications
 from app.trade_discipline.notice_delivery import record_notice, deliver_notice, publish_pending_notices, _delivery_result
 from app.services.signal_notifier import SignalNotifier
+from app.services.notifications.email_templates import _catalog, strategy_messages
 from tests.test_trade_discipline_origin import source_db
 from tests.test_trade_plan_app import full_app
 
@@ -67,12 +69,62 @@ def test_concurrent_business_event_creates_one_record_without_secrets(notice_db)
     assert ids[0] == ids[1] and ids[0]
     uid, raw = read_notice(notice_db, ids[0])
     assert uid == 1 and raw["filled"] == "82"
-    assert raw["title"] == "纪律退出已全部成交"
+    assert raw["title"] == strategy_messages("zh-CN")["discipline"]["events"]["exit_filled"]
     assert "fixture-secret" not in json.dumps(raw)
     assert "example.invalid" not in json.dumps(raw)
     with notice_db.cursor() as cur:
         cur.execute("SELECT count(*) FROM qd_strategy_notifications")
         assert cur.fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("locale", list(_catalog("strategy_stop_messages.json")))
+def test_discipline_events_use_existing_dynamic_brand_in_every_locale(monkeypatch, locale):
+    monkeypatch.setenv("BRAND_APP_NAME", "Fixture Brand")
+    events = strategy_messages(locale)["discipline"]["events"]
+    assert events and all(title.startswith("Fixture Brand | ") for title in events.values())
+    monkeypatch.setenv("BRAND_APP_NAME", "Another Brand")
+    assert all(title.startswith("Another Brand | ")
+               for title in strategy_messages(locale)["discipline"]["events"].values())
+
+
+@pytest.mark.parametrize("legacy_unbranded", [False, True])
+def test_dingtalk_keyword_gate_uses_existing_brand_and_records_vendor_rejection(notice_db, monkeypatch, legacy_unbranded):
+    from app.services import signal_notifier
+
+    monkeypatch.setenv("BRAND_APP_NAME", "Fixture Brand")
+    with notice_db.cursor() as cur:
+        cur.execute("UPDATE qd_users SET notification_settings=%s WHERE id=1", (json.dumps({
+            "language": "zh-CN", "default_channels": ["webhook"],
+            "webhook_url": "https://oapi.dingtalk.com/robot/send?access_token=fixture-only",
+        }),))
+    monkeypatch.setattr(signal_notifier, "_validate_outbound_http_url", lambda url: (url, ""))
+    sent = []
+
+    def post(url, *, json, **kwargs):
+        text = json["text"]["content"]
+        sent.append(text)
+        return SimpleNamespace(status_code=200, text=(
+            '{"errcode":0}' if "Fixture Brand" in text else
+            '{"errcode":310000,"errmsg":"安全设置：关键词不匹配 private-response-token"}'))
+
+    monkeypatch.setattr(signal_notifier.requests, "post", post)
+    notice_id = create_notice()
+    if legacy_unbranded:
+        _, payload = read_notice(notice_db, notice_id)
+        payload["display"]["plain"] = payload["display"]["plain"].replace("Fixture Brand | ", "", 1)
+        with notice_db.cursor() as cur:
+            cur.execute("UPDATE qd_strategy_notifications SET payload_json=%s WHERE id=%s",
+                        (json.dumps(payload), notice_id))
+    result = deliver_notice(1, notice_id)
+    _, saved = read_notice(notice_db, notice_id)
+    assert len(sent) == 1 and "TRX/USDC" in sent[0]
+    assert result["status"] == ("pending" if legacy_unbranded else "delivered")
+    details = saved["_discipline_notice"]["results"]["webhook"]
+    if legacy_unbranded:
+        assert details["diagnostic"] == "keyword_rejected" and details["provider_code"] == "vendor_310000"
+    else:
+        assert details["ok"] is True and saved["_discipline_notice"]["delivered"] == ["webhook"]
+    assert "private-response-token" not in json.dumps(saved)
 
 
 def test_wrong_user_cannot_deliver_another_users_notice(notice_db, monkeypatch):

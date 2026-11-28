@@ -38,17 +38,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "Opening passed; management on next poll",
-        "exit_queued": "Discipline exit registered; fill not confirmed",
-        "exit_filled": "Discipline exit filled",
-        "exit_partial": "Discipline exit partially filled",
-        "exit_failed": "Discipline exit ended without a full fill",
-        "exit_unconfirmed": "Discipline exit outcome unknown",
-        "adoption_queued": "Management registered; startup pending",
-        "start_succeeded": "Management strategy started",
-        "start_failed": "Management startup failed; manual action required",
-        "mixed_exposure": "Mixed strategy exposure; manual action required",
-        "needs_review": "Trading discipline requires manual review"
+        "opening_passed": "{brand} | Opening passed; management on next poll",
+        "exit_queued": "{brand} | Discipline exit registered; fill not confirmed",
+        "exit_filled": "{brand} | Discipline exit filled",
+        "exit_partial": "{brand} | Discipline exit partially filled",
+        "exit_failed": "{brand} | Discipline exit ended without a full fill",
+        "exit_unconfirmed": "{brand} | Discipline exit outcome unknown",
+        "adoption_queued": "{brand} | Management registered; startup pending",
+        "start_succeeded": "{brand} | Management strategy started",
+        "start_failed": "{brand} | Management startup failed; manual action required",
+        "mixed_exposure": "{brand} | Mixed strategy exposure; manual action required",
+        "needs_review": "{brand} | Trading discipline requires manual review"
       },
       "fields": {
         "credential_id": "Account",
@@ -135,17 +135,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "手动仓位通过纪律检查，下轮接管管理",
-        "exit_queued": "纪律退出已登记，尚未确认成交",
-        "exit_filled": "纪律退出已全部成交",
-        "exit_partial": "纪律退出部分成交",
-        "exit_failed": "纪律退出终止，尚未全部成交",
-        "exit_unconfirmed": "纪律退出结果不明，正在回查",
-        "adoption_queued": "已登记持仓接管，等待策略启动",
-        "start_succeeded": "持仓管理策略已启动",
-        "start_failed": "持仓管理启动失败，需要人工处理",
-        "mixed_exposure": "混入策略敞口，需要人工处理",
-        "needs_review": "交易纪律需要人工复核"
+        "opening_passed": "{brand} | 手动仓位通过纪律检查，下轮接管管理",
+        "exit_queued": "{brand} | 纪律退出已登记，尚未确认成交",
+        "exit_filled": "{brand} | 纪律退出已全部成交",
+        "exit_partial": "{brand} | 纪律退出部分成交",
+        "exit_failed": "{brand} | 纪律退出终止，尚未全部成交",
+        "exit_unconfirmed": "{brand} | 纪律退出结果不明，正在回查",
+        "adoption_queued": "{brand} | 已登记持仓接管，等待策略启动",
+        "start_succeeded": "{brand} | 持仓管理策略已启动",
+        "start_failed": "{brand} | 持仓管理启动失败，需要人工处理",
+        "mixed_exposure": "{brand} | 混入策略敞口，需要人工处理",
+        "needs_review": "{brand} | 交易纪律需要人工复核"
       },
       "fields": {
         "credential_id": "账户",
@@ -232,17 +232,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "手動倉位通過紀律檢查，下輪接管管理",
-        "exit_queued": "紀律退出已登記，尚未確認成交",
-        "exit_filled": "紀律退出已全部成交",
-        "exit_partial": "紀律退出部分成交",
-        "exit_failed": "紀律退出終止，尚未全部成交",
-        "exit_unconfirmed": "紀律退出結果不明，正在回查",
-        "adoption_queued": "已登記持倉接管，等待策略啟動",
-        "start_succeeded": "持倉管理策略已啟動",
-        "start_failed": "持倉管理啟動失敗，需要人工處理",
-        "mixed_exposure": "混入策略曝險，需要人工處理",
-        "needs_review": "交易紀律需要人工覆核"
+        "opening_passed": "{brand} | 手動倉位通過紀律檢查，下輪接管管理",
+        "exit_queued": "{brand} | 紀律退出已登記，尚未確認成交",
+        "exit_filled": "{brand} | 紀律退出已全部成交",
+        "exit_partial": "{brand} | 紀律退出部分成交",
+        "exit_failed": "{brand} | 紀律退出終止，尚未全部成交",
+        "exit_unconfirmed": "{brand} | 紀律退出結果不明，正在回查",
+        "adoption_queued": "{brand} | 已登記持倉接管，等待策略啟動",
+        "start_succeeded": "{brand} | 持倉管理策略已啟動",
+        "start_failed": "{brand} | 持倉管理啟動失敗，需要人工處理",
+        "mixed_exposure": "{brand} | 混入策略曝險，需要人工處理",
+        "needs_review": "{brand} | 交易紀律需要人工覆核"
       },
       "fields": {
         "credential_id": "帳戶",
@@ -329,17 +329,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "新規建玉の規律確認済み・次回管理開始",
-        "exit_queued": "決済要求を登録・約定未確認",
-        "exit_filled": "規律決済が全約定",
-        "exit_partial": "規律決済が一部約定",
-        "exit_failed": "規律決済終了・全約定なし",
-        "exit_unconfirmed": "決済結果不明・照合中",
-        "adoption_queued": "管理を登録・起動待ち",
-        "start_succeeded": "ポジション管理が起動",
-        "start_failed": "管理の起動失敗・手動確認が必要",
-        "mixed_exposure": "戦略の建玉が混在・手動確認が必要",
-        "needs_review": "取引規律の手動確認が必要"
+        "opening_passed": "{brand} | 新規建玉の規律確認済み・次回管理開始",
+        "exit_queued": "{brand} | 決済要求を登録・約定未確認",
+        "exit_filled": "{brand} | 規律決済が全約定",
+        "exit_partial": "{brand} | 規律決済が一部約定",
+        "exit_failed": "{brand} | 規律決済終了・全約定なし",
+        "exit_unconfirmed": "{brand} | 決済結果不明・照合中",
+        "adoption_queued": "{brand} | 管理を登録・起動待ち",
+        "start_succeeded": "{brand} | ポジション管理が起動",
+        "start_failed": "{brand} | 管理の起動失敗・手動確認が必要",
+        "mixed_exposure": "{brand} | 戦略の建玉が混在・手動確認が必要",
+        "needs_review": "{brand} | 取引規律の手動確認が必要"
       },
       "fields": {
         "credential_id": "口座",
@@ -426,17 +426,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "진입 규율 통과, 다음 조회에서 관리",
-        "exit_queued": "청산 요청 등록, 체결 미확인",
-        "exit_filled": "규율 청산 전량 체결",
-        "exit_partial": "규율 청산 부분 체결",
-        "exit_failed": "규율 청산 종료, 전량 미체결",
-        "exit_unconfirmed": "청산 결과 불명, 조회 중",
-        "adoption_queued": "관리 등록, 시작 대기",
-        "start_succeeded": "포지션 관리 시작됨",
-        "start_failed": "관리 시작 실패, 수동 확인 필요",
-        "mixed_exposure": "전략 포지션 혼합, 수동 확인 필요",
-        "needs_review": "거래 규율 수동 검토 필요"
+        "opening_passed": "{brand} | 진입 규율 통과, 다음 조회에서 관리",
+        "exit_queued": "{brand} | 청산 요청 등록, 체결 미확인",
+        "exit_filled": "{brand} | 규율 청산 전량 체결",
+        "exit_partial": "{brand} | 규율 청산 부분 체결",
+        "exit_failed": "{brand} | 규율 청산 종료, 전량 미체결",
+        "exit_unconfirmed": "{brand} | 청산 결과 불명, 조회 중",
+        "adoption_queued": "{brand} | 관리 등록, 시작 대기",
+        "start_succeeded": "{brand} | 포지션 관리 시작됨",
+        "start_failed": "{brand} | 관리 시작 실패, 수동 확인 필요",
+        "mixed_exposure": "{brand} | 전략 포지션 혼합, 수동 확인 필요",
+        "needs_review": "{brand} | 거래 규율 수동 검토 필요"
       },
       "fields": {
         "credential_id": "계정",
@@ -523,17 +523,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "Einstieg geprüft; Verwaltung beim nächsten Lauf",
-        "exit_queued": "Ausstieg registriert; Ausführung unbestätigt",
-        "exit_filled": "Disziplin-Ausstieg vollständig ausgeführt",
-        "exit_partial": "Disziplin-Ausstieg teilweise ausgeführt",
-        "exit_failed": "Ausstieg beendet, nicht vollständig ausgeführt",
-        "exit_unconfirmed": "Ausstieg unklar; Abgleich läuft",
-        "adoption_queued": "Verwaltung registriert; Start ausstehend",
-        "start_succeeded": "Positionsverwaltung gestartet",
-        "start_failed": "Verwaltungsstart fehlgeschlagen; Prüfung nötig",
-        "mixed_exposure": "Gemischte Strategieposition; Prüfung nötig",
-        "needs_review": "Handelsdisziplin erfordert manuelle Prüfung"
+        "opening_passed": "{brand} | Einstieg geprüft; Verwaltung beim nächsten Lauf",
+        "exit_queued": "{brand} | Ausstieg registriert; Ausführung unbestätigt",
+        "exit_filled": "{brand} | Disziplin-Ausstieg vollständig ausgeführt",
+        "exit_partial": "{brand} | Disziplin-Ausstieg teilweise ausgeführt",
+        "exit_failed": "{brand} | Ausstieg beendet, nicht vollständig ausgeführt",
+        "exit_unconfirmed": "{brand} | Ausstieg unklar; Abgleich läuft",
+        "adoption_queued": "{brand} | Verwaltung registriert; Start ausstehend",
+        "start_succeeded": "{brand} | Positionsverwaltung gestartet",
+        "start_failed": "{brand} | Verwaltungsstart fehlgeschlagen; Prüfung nötig",
+        "mixed_exposure": "{brand} | Gemischte Strategieposition; Prüfung nötig",
+        "needs_review": "{brand} | Handelsdisziplin erfordert manuelle Prüfung"
       },
       "fields": {
         "credential_id": "Konto",
@@ -620,17 +620,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "Entrée validée ; gestion au prochain passage",
-        "exit_queued": "Sortie enregistrée ; exécution non confirmée",
-        "exit_filled": "Sortie de discipline entièrement exécutée",
-        "exit_partial": "Sortie de discipline partiellement exécutée",
-        "exit_failed": "Sortie terminée sans exécution complète",
-        "exit_unconfirmed": "Résultat de sortie inconnu ; vérification en cours",
-        "adoption_queued": "Gestion enregistrée ; démarrage en attente",
-        "start_succeeded": "Gestion de position démarrée",
-        "start_failed": "Échec du démarrage ; intervention nécessaire",
-        "mixed_exposure": "Exposition mixte ; intervention nécessaire",
-        "needs_review": "Examen manuel de la discipline requis"
+        "opening_passed": "{brand} | Entrée validée ; gestion au prochain passage",
+        "exit_queued": "{brand} | Sortie enregistrée ; exécution non confirmée",
+        "exit_filled": "{brand} | Sortie de discipline entièrement exécutée",
+        "exit_partial": "{brand} | Sortie de discipline partiellement exécutée",
+        "exit_failed": "{brand} | Sortie terminée sans exécution complète",
+        "exit_unconfirmed": "{brand} | Résultat de sortie inconnu ; vérification en cours",
+        "adoption_queued": "{brand} | Gestion enregistrée ; démarrage en attente",
+        "start_succeeded": "{brand} | Gestion de position démarrée",
+        "start_failed": "{brand} | Échec du démarrage ; intervention nécessaire",
+        "mixed_exposure": "{brand} | Exposition mixte ; intervention nécessaire",
+        "needs_review": "{brand} | Examen manuel de la discipline requis"
       },
       "fields": {
         "credential_id": "Compte",
@@ -717,17 +717,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "Вход проверен; управление в следующем цикле",
-        "exit_queued": "Выход зарегистрирован; исполнение не подтверждено",
-        "exit_filled": "Выход по дисциплине полностью исполнен",
-        "exit_partial": "Выход по дисциплине частично исполнен",
-        "exit_failed": "Выход завершён без полного исполнения",
-        "exit_unconfirmed": "Результат выхода неизвестен; идёт сверка",
-        "adoption_queued": "Управление зарегистрировано; ожидается запуск",
-        "start_succeeded": "Управление позицией запущено",
-        "start_failed": "Ошибка запуска; требуется проверка",
-        "mixed_exposure": "Смешанная позиция; требуется проверка",
-        "needs_review": "Требуется ручная проверка дисциплины"
+        "opening_passed": "{brand} | Вход проверен; управление в следующем цикле",
+        "exit_queued": "{brand} | Выход зарегистрирован; исполнение не подтверждено",
+        "exit_filled": "{brand} | Выход по дисциплине полностью исполнен",
+        "exit_partial": "{brand} | Выход по дисциплине частично исполнен",
+        "exit_failed": "{brand} | Выход завершён без полного исполнения",
+        "exit_unconfirmed": "{brand} | Результат выхода неизвестен; идёт сверка",
+        "adoption_queued": "{brand} | Управление зарегистрировано; ожидается запуск",
+        "start_succeeded": "{brand} | Управление позицией запущено",
+        "start_failed": "{brand} | Ошибка запуска; требуется проверка",
+        "mixed_exposure": "{brand} | Смешанная позиция; требуется проверка",
+        "needs_review": "{brand} | Требуется ручная проверка дисциплины"
       },
       "fields": {
         "credential_id": "Счёт",
@@ -814,17 +814,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "Lệnh mở đạt quy tắc; quản lý ở lần kiểm tra sau",
-        "exit_queued": "Đã ghi nhận yêu cầu thoát; chưa xác nhận khớp",
-        "exit_filled": "Thoát theo kỷ luật đã khớp toàn bộ",
-        "exit_partial": "Thoát theo kỷ luật đã khớp một phần",
-        "exit_failed": "Thoát kết thúc, chưa khớp toàn bộ",
-        "exit_unconfirmed": "Chưa rõ kết quả thoát; đang đối soát",
-        "adoption_queued": "Đã đăng ký quản lý; đang chờ khởi động",
-        "start_succeeded": "Quản lý vị thế đã khởi động",
-        "start_failed": "Khởi động quản lý thất bại; cần kiểm tra",
-        "mixed_exposure": "Vị thế lẫn chiến lược; cần kiểm tra",
-        "needs_review": "Cần kiểm tra thủ công quy tắc giao dịch"
+        "opening_passed": "{brand} | Lệnh mở đạt quy tắc; quản lý ở lần kiểm tra sau",
+        "exit_queued": "{brand} | Đã ghi nhận yêu cầu thoát; chưa xác nhận khớp",
+        "exit_filled": "{brand} | Thoát theo kỷ luật đã khớp toàn bộ",
+        "exit_partial": "{brand} | Thoát theo kỷ luật đã khớp một phần",
+        "exit_failed": "{brand} | Thoát kết thúc, chưa khớp toàn bộ",
+        "exit_unconfirmed": "{brand} | Chưa rõ kết quả thoát; đang đối soát",
+        "adoption_queued": "{brand} | Đã đăng ký quản lý; đang chờ khởi động",
+        "start_succeeded": "{brand} | Quản lý vị thế đã khởi động",
+        "start_failed": "{brand} | Khởi động quản lý thất bại; cần kiểm tra",
+        "mixed_exposure": "{brand} | Vị thế lẫn chiến lược; cần kiểm tra",
+        "needs_review": "{brand} | Cần kiểm tra thủ công quy tắc giao dịch"
       },
       "fields": {
         "credential_id": "Tài khoản",
@@ -911,17 +911,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "ผ่านกฎการเปิดสถานะ รอจัดการรอบถัดไป",
-        "exit_queued": "บันทึกคำขอปิดแล้ว ยังไม่ยืนยันการจับคู่",
-        "exit_filled": "ปิดสถานะตามวินัยครบแล้ว",
-        "exit_partial": "ปิดสถานะตามวินัยได้บางส่วน",
-        "exit_failed": "การปิดสิ้นสุดแต่ยังไม่ครบ",
-        "exit_unconfirmed": "ไม่ทราบผลการปิด กำลังตรวจสอบ",
-        "adoption_queued": "ลงทะเบียนจัดการแล้ว รอเริ่มกลยุทธ์",
-        "start_succeeded": "เริ่มการจัดการสถานะแล้ว",
-        "start_failed": "เริ่มการจัดการไม่สำเร็จ ต้องตรวจสอบ",
-        "mixed_exposure": "มีสถานะกลยุทธ์ปะปน ต้องตรวจสอบ",
-        "needs_review": "ต้องตรวจสอบวินัยการซื้อขายด้วยตนเอง"
+        "opening_passed": "{brand} | ผ่านกฎการเปิดสถานะ รอจัดการรอบถัดไป",
+        "exit_queued": "{brand} | บันทึกคำขอปิดแล้ว ยังไม่ยืนยันการจับคู่",
+        "exit_filled": "{brand} | ปิดสถานะตามวินัยครบแล้ว",
+        "exit_partial": "{brand} | ปิดสถานะตามวินัยได้บางส่วน",
+        "exit_failed": "{brand} | การปิดสิ้นสุดแต่ยังไม่ครบ",
+        "exit_unconfirmed": "{brand} | ไม่ทราบผลการปิด กำลังตรวจสอบ",
+        "adoption_queued": "{brand} | ลงทะเบียนจัดการแล้ว รอเริ่มกลยุทธ์",
+        "start_succeeded": "{brand} | เริ่มการจัดการสถานะแล้ว",
+        "start_failed": "{brand} | เริ่มการจัดการไม่สำเร็จ ต้องตรวจสอบ",
+        "mixed_exposure": "{brand} | มีสถานะกลยุทธ์ปะปน ต้องตรวจสอบ",
+        "needs_review": "{brand} | ต้องตรวจสอบวินัยการซื้อขายด้วยตนเอง"
       },
       "fields": {
         "credential_id": "บัญชี",
@@ -1008,17 +1008,17 @@
     },
     "discipline": {
       "events": {
-        "opening_passed": "اجتاز الدخول الفحص؛ الإدارة في الجولة التالية",
-        "exit_queued": "سُجل طلب الخروج؛ التنفيذ غير مؤكد",
-        "exit_filled": "اكتمل تنفيذ الخروج الانضباطي",
-        "exit_partial": "نُفذ الخروج الانضباطي جزئياً",
-        "exit_failed": "انتهى الخروج دون تنفيذ كامل",
-        "exit_unconfirmed": "نتيجة الخروج غير معروفة؛ جارٍ التحقق",
-        "adoption_queued": "سُجلت الإدارة؛ بدء التشغيل معلق",
-        "start_succeeded": "بدأت إدارة المركز",
-        "start_failed": "فشل بدء الإدارة؛ يلزم التدخل",
-        "mixed_exposure": "انكشاف مختلط باستراتيجية؛ يلزم التدخل",
-        "needs_review": "يلزم فحص يدوي لانضباط التداول"
+        "opening_passed": "{brand} | اجتاز الدخول الفحص؛ الإدارة في الجولة التالية",
+        "exit_queued": "{brand} | سُجل طلب الخروج؛ التنفيذ غير مؤكد",
+        "exit_filled": "{brand} | اكتمل تنفيذ الخروج الانضباطي",
+        "exit_partial": "{brand} | نُفذ الخروج الانضباطي جزئياً",
+        "exit_failed": "{brand} | انتهى الخروج دون تنفيذ كامل",
+        "exit_unconfirmed": "{brand} | نتيجة الخروج غير معروفة؛ جارٍ التحقق",
+        "adoption_queued": "{brand} | سُجلت الإدارة؛ بدء التشغيل معلق",
+        "start_succeeded": "{brand} | بدأت إدارة المركز",
+        "start_failed": "{brand} | فشل بدء الإدارة؛ يلزم التدخل",
+        "mixed_exposure": "{brand} | انكشاف مختلط باستراتيجية؛ يلزم التدخل",
+        "needs_review": "{brand} | يلزم فحص يدوي لانضباط التداول"
       },
       "fields": {
         "credential_id": "الحساب",
