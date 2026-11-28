@@ -1,77 +1,23 @@
-name: Verify original notice with existing system branding
+name: Preload candidate image without activation
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  inspect:
+  preload:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 25
     steps:
-      - name: Verify existing brand on the original failed notice
+      - name: Cache immutable candidate image without starting services
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
-          command_timeout: 3m
+          command_timeout: 20m
           script: |
             set -euo pipefail
-            cd /opt/quantdinger
-            docker compose -f docker-compose.ghcr.yml exec -T celery-worker python - <<'PYREMOTE'
-            import json, os, time
-            from dotenv import load_dotenv
-            load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
-            from app.utils.db import get_db_connection
-            from app.services.user_preferences import get_notification_settings
-            from app.services.portfolio_monitor_notifications import resolve_notification_delivery
-            from app.services.signal_notifier import SignalNotifier, _detect_webhook_dialect
-            from app.services.notifications.email_templates import render_detail_email, _brand_name
-            with get_db_connection() as db:
-                cur=db.cursor()
-                cur.execute("""SELECT id,symbol,signal_type,payload_json FROM qd_strategy_notifications
-                    WHERE user_id=1 AND NULLIF(payload_json,'')::jsonb->'_discipline_notice'->>'kind'='exit_filled'
-                      AND (payload_json::jsonb->'_discipline_notice'->>'attempts')::int>=3
-                      AND NOT((payload_json::jsonb->'_discipline_notice'->'delivered') @> '["webhook"]'::jsonb)
-                      AND COALESCE((payload_json::jsonb->'_discipline_notice'->>'manual_retries')::int,0)=1
-                    ORDER BY id DESC LIMIT 1""")
-                row=cur.fetchone()
-                if not row:
-                    print("ORIGINAL_RETRY",json.dumps({"eligible_original_notice":False})); raise SystemExit(0)
-                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",(f"discipline-delivery:1:{row['id']}",))
-                cur.execute("SELECT payload_json FROM qd_strategy_notifications WHERE id=%s AND user_id=1",(row["id"],))
-                payload=json.loads(cur.fetchone()["payload_json"])
-                meta=payload["_discipline_notice"]
-                settings=get_notification_settings(1) or {}
-                cfg=resolve_notification_delivery(1,{"channels":["webhook"],"language":meta["language"]})
-                assert "webhook" in settings.get("default_channels",[]) and "webhook" in meta["channels"]
-                assert "webhook" not in meta["delivered"] and meta.get("manual_retries")==1
-                assert (cfg.get("targets") or {}).get("webhook")
-                # 单独记人工诊断重试，不重置自动重试次数，也不改原消息和事件号。
-                # 复用已有系统品牌，与原通知测试/交易信号格式一致；保留原业务事件及目标。
-                brand=_brand_name()
-                if not payload["title"].startswith(brand+" | "):
-                    payload["title"]=brand+" | "+payload["title"]
-                payload["display"]["plain"]=payload["title"]+"\n"+payload["message"]
-                meta["manual_retries"]=2
-                meta["manual_retry_action"]="existing_brand_format"
-                meta["manual_retry_at"]=int(time.time())
-                cur.execute("UPDATE qd_strategy_notifications SET payload_json=%s WHERE id=%s AND user_id=1",(json.dumps(payload,ensure_ascii=False),row["id"]))
-                db.commit()
-            result=SignalNotifier()._deliver_channels(strategy_id=None,symbol=row["symbol"],signal_type=row["signal_type"],cfg=cfg,channels=["webhook"],payload={k:v for k,v in payload.items() if k!="_discipline_notice"},rendered={"title":payload["title"],"plain":payload["message"],"email_html":render_detail_email(payload["title"],payload.get("details") or [],language=meta["language"])})["webhook"]
-            err=str(result.get("error") or "").casefold()
-            dialect=_detect_webhook_dialect(cfg["targets"]["webhook"])
-            flags={"accepted":bool(result.get("ok")),"keyword_rejected":"keyword" in err or "关键词" in err,"signature_rejected":"signature" in err or "签名" in err,"authorization_rejected":err.startswith(("http_401:","http_403:")),"vendor_rejection":err.startswith("vendor_"),"feishu":dialect=="feishu","dingtalk":dialect=="dingtalk","wecom":dialect=="wecom","generic":dialect=="generic"}
-            for code in (400,401,403,404,405,429,500,502,503,504): flags["http_"+str(code)]=err.startswith("http_"+str(code)+":")
-            if result.get("ok"):
-                meta["delivered"].append("webhook")
-            meta["results"]["webhook"]={"ok":bool(result.get("ok")),"skipped":False,"diagnostic":"accepted" if result.get("ok") else "manual_retry_rejected"}
-            meta["manual_retry_flags"]=flags
-            with get_db_connection() as db:
-                cur=db.cursor()
-                cur.execute("UPDATE qd_strategy_notifications SET payload_json=%s WHERE id=%s AND user_id=1",(json.dumps(payload,ensure_ascii=False),row["id"]))
-                db.commit()
-                cur.close()
-            print("ORIGINAL_RETRY",json.dumps(flags,sort_keys=True))
-            PYREMOTE
+            docker image pull ghcr.io/yyitroad/quantdinger-backend:manual-83d5a00
+            docker image inspect ghcr.io/yyitroad/quantdinger-backend:manual-83d5a00 >/dev/null
+            echo "Candidate image cached; running services unchanged."
