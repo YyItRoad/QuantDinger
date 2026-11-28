@@ -200,3 +200,33 @@ def test_mixed_exposure_is_recorded_once_for_the_opening(notice_db):
     with notice_db.cursor() as cur:
         cur.execute("SELECT user_id,signal_type FROM qd_strategy_notifications")
         assert cur.fetchall() == [(1, "discipline_mixed_exposure")]
+
+
+def test_production_probe_reports_actual_ack_without_private_details(notice_db, monkeypatch, capsys):
+    import sys
+    from pathlib import Path
+
+    notice_id = create_notice()
+    monkeypatch.setattr(SignalNotifier, "_deliver_channels", lambda self, **kw:
+                        {kw["channels"][0]: {"ok": True}})
+    assert deliver_notice(1, notice_id)["status"] == "delivered"
+    script = (Path(__file__).resolve().parents[2] / "ops/deploy/deploy-remote.sh").read_text()
+    probe = script.split('log "Checking discipline notification delivery (aggregate health only)"', 1)[1]
+    probe = probe.split("<<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
+    monkeypatch.setattr(sys, "argv", ["-", "1"])
+    exec(compile(probe, "production-notification-probe", "exec"), {})
+    text = capsys.readouterr().out
+    assert '"external_acknowledged": true' in text and '"pending": false' in text
+    assert "example.invalid" not in text and "TRX" not in text and "fixture-secret" not in text
+
+
+def test_missing_personal_target_never_falls_back_to_global_target(notice_db, monkeypatch):
+    with notice_db.cursor() as cur:
+        cur.execute("UPDATE qd_users SET notification_settings=%s WHERE id=1",
+                    (json.dumps({"default_channels": ["webhook"]}),))
+    monkeypatch.setenv("WEBHOOK_URL", "https://example.invalid/global-operations")
+    monkeypatch.setattr(SignalNotifier, "_deliver_channels", lambda *a, **k: pytest.fail("不能发送到全局运维目标"))
+    notice_id = create_notice()
+    assert deliver_notice(1, notice_id)["status"] == "pending"
+    result = read_notice(notice_db, notice_id)[1]["_discipline_notice"]["results"]["webhook"]
+    assert result == {"ok": False, "skipped": False, "diagnostic": "target_not_configured"}

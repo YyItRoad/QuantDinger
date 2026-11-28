@@ -331,6 +331,44 @@ with get_db_connection() as conn:
         cur.close()
 print("Active origin and notification modules imported")
 PY
+  log "Checking discipline notification delivery (aggregate health only)"
+  "${compose[@]}" exec -T scheduler-worker python - "$DISCIPLINE_OBSERVATION_USER_ID" <<'PY'
+import json
+import os
+import sys
+import time
+from dotenv import load_dotenv
+load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
+from app.utils.db import get_db_connection
+from app.services.user_preferences import get_notification_settings, VALID_NOTIFICATION_CHANNELS
+user_id = int(sys.argv[1])
+settings = get_notification_settings(user_id) or {}
+selected = settings.get("default_channels") or []
+selected = selected if isinstance(selected, list) else []
+external = any(isinstance(ch,str) and ch.strip().lower() in VALID_NOTIFICATION_CHANNELS-{"browser"} for ch in selected)
+for attempt in range(20):
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("SET TRANSACTION READ ONLY")
+            cur.execute("""SELECT NULLIF(payload_json,'')::jsonb->'_discipline_notice' AS meta
+                FROM qd_strategy_notifications WHERE user_id=%s
+                AND NULLIF(payload_json,'')::jsonb->'_discipline_notice' IS NOT NULL
+                ORDER BY id DESC LIMIT 20""", (user_id,))
+            metadata = [row["meta"] for row in cur.fetchall()]
+            conn.rollback()
+        finally:
+            cur.close()
+    pending = [m for m in metadata if any(ch not in m["delivered"] + m.get("skipped", []) for ch in m["channels"])]
+    summary = {"records_present": bool(metadata), "external_channels_configured": external,
+               "external_acknowledged": any(m["delivered"] for m in metadata),
+               "pending": bool(pending), "failed": any(m["attempts"]>=3 for m in pending)}
+    if metadata and (not pending or summary["failed"]):
+        break
+    time.sleep(3)
+# 不输出个人目标、密钥、具体持仓或消息正文；渠道接收不等同于人已经阅读。
+print("Discipline notification delivery check: " + json.dumps(summary, sort_keys=True))
+PY
 fi
 
 ###############################################################################

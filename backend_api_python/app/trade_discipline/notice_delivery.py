@@ -142,6 +142,10 @@ def deliver_notice(user_id, notice_id):
                 if channel not in enabled:
                     results[channel] = {"ok": True, "skipped": True}
                     continue
+                # 没有个人目标时不能回落到发送器的全局运维目标，避免跨用户泄露通知。
+                if not (cfg.get("targets") or {}).get(channel):
+                    results[channel] = {"ok": False, "diagnostic": "target_not_configured"}
+                    continue
                 results.update(SignalNotifier()._deliver_channels(
                     strategy_id=None, symbol=row["symbol"], signal_type=row["signal_type"],
                     cfg=cfg, channels=[channel], payload={k: v for k, v in payload.items() if k != _META},
@@ -155,7 +159,12 @@ def deliver_notice(user_id, notice_id):
             meta["skipped"] = list(dict.fromkeys([*meta.get("skipped", []),
                 *(ch for ch, result in results.items() if result.get("skipped"))]))
             meta["results"] = {**meta.get("results", {}),
-                **{ch: {"ok": bool(result.get("ok")) and not result.get("skipped"), "skipped": bool(result.get("skipped"))}
+                **{ch: {"ok": bool(result.get("ok")) and not result.get("skipped"),
+                        "skipped": bool(result.get("skipped")),
+                        "diagnostic": "channel_disabled" if result.get("skipped") else
+                        "accepted" if result.get("ok") else
+                        "target_not_configured" if result.get("diagnostic") == "target_not_configured" else
+                        "delivery_failed_or_unknown"}
                    for ch, result in results.items()}}
             meta["next_at"] = int(time.time()) + 60
             _update(cur, user_id, notice_id, payload)
