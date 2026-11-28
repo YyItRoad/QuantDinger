@@ -40,8 +40,15 @@ def test_origin_gates_discipline(monkeypatch, origins, outcome):
         sender = Mock(return_value=(True, ""))
         monkeypatch.setattr(SignalNotifier, "_notify_browser", sender)
         manual.apply_poll_window(INVENTORY, result, None)
-        assert result["notification_delivered"]
-        assert sender.call_args.kwargs["user_id"] == 3
+        # 判定阶段不直接发网络或重复写站内；交由统一关键事件入口持久化。
+        sender.assert_not_called()
+        from app.trade_discipline import notifications
+
+        recorder = Mock(return_value=1)
+        monkeypatch.setattr(notifications, "record_notice", recorder)
+        notifications.notify_observation(INVENTORY, result)
+        assert recorder.call_args.kwargs["user_id"] == 3
+        assert recorder.call_args.kwargs["kind"] == "mixed_exposure"
 
 
 def test_attestation_is_exact_and_cannot_override_system_binding(monkeypatch):

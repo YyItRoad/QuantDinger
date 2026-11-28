@@ -125,7 +125,7 @@ env_set() {
 }
 
 ENV_FILE="$DEPLOY_DIR/.env"
-verify_discipline_preview() {
+verify_discipline_configuration() {
   "$@" python - "$DISCIPLINE_OBSERVATION_USER_ID" "$DISCIPLINE_AUTO_EXIT_ENABLED" "$DISCIPLINE_EXIT_FROM" <<'PY'
 import os
 import sys
@@ -180,9 +180,12 @@ if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
     PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=5000" \
       psql -X -qAt -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
       -c "SELECT EXISTS (SELECT 1 FROM qd_users WHERE id=$1) AND
-                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_trade_plan_events\$\$), \$\$SELECT\$\$), false)"
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_trade_plan_events\$\$), \$\$SELECT\$\$), false) AND
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_strategy_notifications\$\$), \$\$SELECT\$\$), false) AND
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_strategy_notifications\$\$), \$\$INSERT\$\$), false) AND
+                 COALESCE(has_table_privilege(to_regclass(\$\$public.qd_strategy_notifications\$\$), \$\$UPDATE\$\$), false)"
   ' sh "$DISCIPLINE_OBSERVATION_USER_ID")
-  [[ "$observation_ready" == "t" ]] || die "Discipline preview user or existing plan-event table unavailable."
+  [[ "$observation_ready" == "t" ]] || die "Discipline user, plan-event table or notification persistence unavailable."
   # 使用部署账号的持久目录，避免依赖旧部署目录中的备份目录权限。
   backup_root="${XDG_STATE_HOME:-$HOME/.local/state}/quantdinger/backups"
   backup_dir=$(umask 077; mkdir -p "$backup_root"; mktemp -d "$backup_root/discipline-preview-XXXXXX")
@@ -258,8 +261,8 @@ YAML
   "${compose[@]}" config --quiet
   # 先用候选容器核对应用将读到的实际配置，再重启服务。
   for service in "${preview_services[@]}"; do
-    log "Checking preview configuration for $service before startup"
-    verify_discipline_preview "${compose[@]}" run --rm --no-deps -T --entrypoint "" "$service"
+    log "Checking discipline configuration for $service before startup"
+    verify_discipline_configuration "${compose[@]}" run --rm --no-deps -T --entrypoint "" "$service"
   done
 fi
 
@@ -268,8 +271,8 @@ log "Restarting backend services..."
 
 if [[ -n "$DISCIPLINE_OBSERVATION_USER_ID" ]]; then
   for service in "${preview_services[@]}"; do
-    log "Checking active preview configuration for $service"
-    verify_discipline_preview "${compose[@]}" exec -T "$service"
+    log "Checking active discipline configuration for $service"
+    verify_discipline_configuration "${compose[@]}" exec -T "$service"
   done
 fi
 
@@ -306,6 +309,9 @@ with get_db_connection() as conn:
         cur.execute("""SELECT
             has_table_privilege('public.qd_trade_plan_events', 'SELECT') AS can_read,
             has_table_privilege('public.qd_trade_plan_events', 'INSERT') AS can_append,
+            (has_table_privilege('public.qd_strategy_notifications', 'SELECT')
+             AND has_table_privilege('public.qd_strategy_notifications', 'INSERT')
+             AND has_table_privilege('public.qd_strategy_notifications', 'UPDATE')) AS notices_durable,
             EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='public'
                 AND table_name='qd_trade_plan_events' AND column_name='payload' AND data_type='jsonb') AS payload_jsonb,
             EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='public.qd_trade_plan_events'::regclass
