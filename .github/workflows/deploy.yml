@@ -1,4 +1,4 @@
-name: Retry one original failed discipline notice
+name: Verify original notice with existing system branding
 on:
   workflow_dispatch:
 permissions:
@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Retry one original failed webhook notice without trading
+      - name: Verify existing brand on the original failed notice
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -27,14 +27,14 @@ jobs:
             from app.services.user_preferences import get_notification_settings
             from app.services.portfolio_monitor_notifications import resolve_notification_delivery
             from app.services.signal_notifier import SignalNotifier, _detect_webhook_dialect
-            from app.services.notifications.email_templates import render_detail_email
+            from app.services.notifications.email_templates import render_detail_email, _brand_name
             with get_db_connection() as db:
                 cur=db.cursor()
                 cur.execute("""SELECT id,symbol,signal_type,payload_json FROM qd_strategy_notifications
                     WHERE user_id=1 AND NULLIF(payload_json,'')::jsonb->'_discipline_notice'->>'kind'='exit_filled'
                       AND (payload_json::jsonb->'_discipline_notice'->>'attempts')::int>=3
                       AND NOT((payload_json::jsonb->'_discipline_notice'->'delivered') @> '["webhook"]'::jsonb)
-                      AND COALESCE((payload_json::jsonb->'_discipline_notice'->>'manual_retries')::int,0)=0
+                      AND COALESCE((payload_json::jsonb->'_discipline_notice'->>'manual_retries')::int,0)=1
                     ORDER BY id DESC LIMIT 1""")
                 row=cur.fetchone()
                 if not row:
@@ -46,10 +46,16 @@ jobs:
                 settings=get_notification_settings(1) or {}
                 cfg=resolve_notification_delivery(1,{"channels":["webhook"],"language":meta["language"]})
                 assert "webhook" in settings.get("default_channels",[]) and "webhook" in meta["channels"]
-                assert "webhook" not in meta["delivered"] and not meta.get("manual_retries")
+                assert "webhook" not in meta["delivered"] and meta.get("manual_retries")==1
                 assert (cfg.get("targets") or {}).get("webhook")
                 # 单独记人工诊断重试，不重置自动重试次数，也不改原消息和事件号。
-                meta["manual_retries"]=1
+                # 复用已有系统品牌，与原通知测试/交易信号格式一致；保留原业务事件及目标。
+                brand=_brand_name()
+                if not payload["title"].startswith(brand+" | "):
+                    payload["title"]=brand+" | "+payload["title"]
+                payload["display"]["plain"]=payload["title"]+"\n"+payload["message"]
+                meta["manual_retries"]=2
+                meta["manual_retry_action"]="existing_brand_format"
                 meta["manual_retry_at"]=int(time.time())
                 cur.execute("UPDATE qd_strategy_notifications SET payload_json=%s WHERE id=%s AND user_id=1",(json.dumps(payload,ensure_ascii=False),row["id"]))
                 db.commit()
