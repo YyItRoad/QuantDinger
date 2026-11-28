@@ -33,7 +33,7 @@ jobs:
                 cur.execute("""SELECT id,symbol,signal_type,payload_json FROM qd_strategy_notifications
                     WHERE user_id=1 AND NULLIF(payload_json,'')::jsonb->'_discipline_notice'->>'kind'='exit_filled'
                       AND (payload_json::jsonb->'_discipline_notice'->>'attempts')::int>=3
-                      AND NOT((payload_json::jsonb->'_discipline_notice'->'delivered') ? 'webhook')
+                      AND NOT((payload_json::jsonb->'_discipline_notice'->'delivered') @> '["webhook"]'::jsonb)
                       AND COALESCE((payload_json::jsonb->'_discipline_notice'->>'manual_retries')::int,0)=0
                     ORDER BY id DESC LIMIT 1""")
                 row=cur.fetchone()
