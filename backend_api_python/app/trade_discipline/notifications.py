@@ -90,8 +90,12 @@ def _exit_notice(row, *, recovered=False):
         return
     if state not in {"FILLED", "PARTIALLY_FILLED", "CANCELED", "EXPIRED", "EXPIRED_IN_MATCH", "REJECTED"}:
         return
-    # 原成交列固定为 NUMERIC(24,8)，与恢复查询的 PostgreSQL 文本表达保持一致，包括零成交。
-    marker = f"{meta.get('submit_attempt', 0)}:{state}:{filled:.8f}"
+    # 老库为 8 位小数，现有成交迁移会扩到 18 位；去掉尾零后与 SQL trim_scale
+    # 使用同一个数值身份，避免旧记录反复占满恢复批次，也不截断真实成交精度。
+    amount_key = format(filled, "f")
+    if "." in amount_key:
+        amount_key = amount_key.rstrip("0").rstrip(".")
+    marker = f"{meta.get('submit_attempt', 0)}:{state}:{amount_key}"
     if meta.get("notice_marker") == marker:
         return
     kind = "exit_filled" if state == "FILLED" else "exit_partial" if filled > 0 else "exit_failed"
@@ -192,7 +196,7 @@ def process_discipline_notices(*, still_active):
                     AND raw_result->'_discipline_exit' IS NOT NULL AND created_at>=NOW()-INTERVAL '7 days'
                     AND raw_result->>'status' IN ('FILLED','PARTIALLY_FILLED','CANCELED','EXPIRED','EXPIRED_IN_MATCH','REJECTED')
                     AND (raw_result->'_discipline_exit'->>'notice_marker') IS DISTINCT FROM
-                        concat(COALESCE(raw_result->'_discipline_exit'->>'submit_attempt','0'),':',raw_result->>'status',':',filled_amount::text)
+                        concat(COALESCE(raw_result->'_discipline_exit'->>'submit_attempt','0'),':',raw_result->>'status',':',trim_scale(COALESCE(filled_amount,0))::text)
                     ORDER BY id LIMIT 10""", (user_id,))
                 rows = list(cur.fetchall())
             finally:

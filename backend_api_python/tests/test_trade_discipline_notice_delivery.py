@@ -153,6 +153,26 @@ def test_restart_recovers_confirmed_result_once_without_resubmitting(notice_db, 
     assert json.loads(rows[0][1])["request_id"] == request_id
 
 
+def test_upgraded_fill_precision_does_not_starve_later_recovery_batches(notice_db, monkeypatch):
+    monkeypatch.setenv("TRADE_DISCIPLINE_USER_ID", "1")
+    monkeypatch.setattr(notifications, "publish_pending_notices", lambda *a, **k: None)
+    with notice_db.cursor() as cur:
+        # 与已有 20260916_fill_accounting 迁移后的生产列类型一致。
+        cur.execute("ALTER TABLE qd_quick_trades ALTER COLUMN filled_amount TYPE NUMERIC(38,18)")
+    amount = "0.123456789123456789"
+    ids = [add_exit(notice_db, filled=amount) for _ in range(12)]
+    for _ in range(3):
+        notifications.process_discipline_notices(still_active=lambda: True)
+    with notice_db.cursor() as cur:
+        cur.execute("SELECT payload_json FROM qd_strategy_notifications ORDER BY id")
+        payloads = [json.loads(row[0]) for row in cur.fetchall()]
+        cur.execute("SELECT raw_result->'_discipline_exit'->>'notice_marker' FROM qd_quick_trades ORDER BY id")
+        markers = [row[0] for row in cur.fetchall()]
+    assert len(payloads) == 12 and {p["request_id"] for p in payloads} == set(ids)
+    assert all(p["filled"] == amount for p in payloads)
+    assert markers == [f"0:FILLED:{amount}"] * 12
+
+
 def test_worker_observes_actual_start_completion_and_never_restarts_it(notice_db, monkeypatch):
     monkeypatch.setenv("TRADE_DISCIPLINE_USER_ID", "1")
     monkeypatch.setattr(notifications, "publish_pending_notices", lambda *a, **k: None)
