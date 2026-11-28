@@ -177,6 +177,27 @@ def test_worker_observes_actual_start_completion_and_never_restarts_it(notice_db
         assert cur.fetchone()[0] == 1
 
 
+def test_created_manager_without_start_command_is_not_misreported_as_failed(notice_db, monkeypatch):
+    monkeypatch.setenv("TRADE_DISCIPLINE_USER_ID", "1")
+    monkeypatch.setattr(notifications, "publish_pending_notices", lambda *a, **k: None)
+    with notice_db.cursor() as cur:
+        cur.execute("""UPDATE qd_strategies_trading SET status='stopped',
+            trading_config='{"position_management":{"discipline_adoption_key":"fixture"}}' WHERE id=42""")
+    notifications.process_discipline_notices(still_active=lambda: True)
+    with notice_db.cursor() as cur:
+        cur.execute("SELECT count(*) FROM qd_strategy_notifications")
+        assert cur.fetchone()[0] == 0
+        cur.execute("""INSERT INTO qd_strategy_logs(strategy_id,level,message)
+            VALUES(42,'error','策略已创建并登记仓位，但自动启动失败，请手动启动')""")
+    for _ in range(2):
+        notifications.process_discipline_notices(still_active=lambda: True)
+    with notice_db.cursor() as cur:
+        cur.execute("SELECT signal_type FROM qd_strategy_notifications")
+        assert cur.fetchall() == [("discipline_start_failed",)]
+        cur.execute("SELECT count(*) FROM qd_strategy_commands")
+        assert cur.fetchone()[0] == 0
+
+
 def test_queue_publication_is_claimed_and_uses_original_event(notice_db, monkeypatch):
     from contextlib import nullcontext
     from app.celery_app import celery_app

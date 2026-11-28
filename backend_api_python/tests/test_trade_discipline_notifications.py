@@ -27,6 +27,9 @@ def test_failure_notice_is_scoped_and_deduplicated(source_db, command_type, stat
             cur.execute("""INSERT INTO qd_strategy_commands
                 (user_id,strategy_id,command_type,status,idempotency_key)
                 VALUES (1,42,%s,%s,'notice-fixture')""", (command_type, status))
+        else:
+            cur.execute("""INSERT INTO qd_strategy_logs(strategy_id,level,message)
+                VALUES(42,'error','策略已创建并登记仓位，但自动启动失败，请手动启动')""")
     for _ in range(2):
         notify_management_start_failures(user_id=1, credential_id=901, strategy_ids=[42])
     notify_management_start_failures(user_id=2, credential_id=901, strategy_ids=[42])

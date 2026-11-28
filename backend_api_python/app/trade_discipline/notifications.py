@@ -17,6 +17,7 @@ def _json(value):
 
 def _manager_results(user_id, strategy_ids=None):
     # 仅检查本用户的纪律接管实例，普通原策略和最近为人工 stop 的实例均不参与。
+    # 实例先创建、命令后入库；无命令时必须有原流程明确的失败日志，不能把创建窗口当失败。
     with get_db_connection() as db:
         cur = db.cursor()
         try:
@@ -29,7 +30,10 @@ def _manager_results(user_id, strategy_ids=None):
                 WHERE s.user_id=%s AND s.trading_config->'position_management'->>'discipline_adoption_key' IS NOT NULL
                   AND (%s::int[] IS NULL OR s.id=ANY(%s::int[]))
                   AND ((command.command_type IN ('start','restart') AND command.status IN ('failed','succeeded'))
-                    OR (command.id IS NULL AND s.status='stopped'))
+                    OR (command.id IS NULL AND s.status='stopped' AND EXISTS (
+                        SELECT 1 FROM qd_strategy_logs startup_log WHERE startup_log.strategy_id=s.id
+                          AND startup_log.level='error'
+                          AND startup_log.message='策略已创建并登记仓位，但自动启动失败，请手动启动')))
                   AND (command.status='failed' OR (command.status='succeeded' AND s.status='running')
                     OR command.id IS NULL)
                   AND NOT EXISTS (SELECT 1 FROM qd_strategy_notifications n WHERE n.user_id=s.user_id
