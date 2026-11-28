@@ -1,4 +1,4 @@
-name: Read-only aggregate notification diagnosis
+name: Retry one original failed discipline notice
 on:
   workflow_dispatch:
 permissions:
@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Inspect aggregate booleans only without changing services
+      - name: Retry one original failed webhook notice without trading
         uses: appleboy/ssh-action@v1
         with:
           host: ${{ secrets.SERVER_HOST }}
@@ -20,50 +20,52 @@ jobs:
             set -euo pipefail
             cd /opt/quantdinger
             docker compose -f docker-compose.ghcr.yml exec -T celery-worker python - <<'PYREMOTE'
-            import json, os
+            import json, os, time
             from dotenv import load_dotenv
             load_dotenv(os.getenv("QUANTDINGER_ENV_FILE") or "/app/.env", override=False)
             from app.utils.db import get_db_connection
-            from app.config.redis_urls import celery_broker_url
-            from app.celery_app import celery_app
             from app.services.user_preferences import get_notification_settings
             from app.services.portfolio_monitor_notifications import resolve_notification_delivery
-            import redis
+            from app.services.signal_notifier import SignalNotifier, _detect_webhook_dialect
+            from app.services.notifications.email_templates import render_detail_email
             with get_db_connection() as db:
                 cur=db.cursor()
-                cur.execute("SET TRANSACTION READ ONLY")
-                cur.execute("""SELECT NULLIF(payload_json,'')::jsonb->'_discipline_notice' AS meta
-                    FROM qd_strategy_notifications WHERE user_id=1
-                    AND NULLIF(payload_json,'')::jsonb->'_discipline_notice' IS NOT NULL
-                    ORDER BY id DESC LIMIT 20""")
-                metadata=[row["meta"] for row in cur.fetchall()]
-                db.rollback()
+                cur.execute("""SELECT id,symbol,signal_type,payload_json FROM qd_strategy_notifications
+                    WHERE user_id=1 AND NULLIF(payload_json,'')::jsonb->'_discipline_notice'->>'kind'='exit_filled'
+                      AND (payload_json::jsonb->'_discipline_notice'->>'attempts')::int>=3
+                      AND NOT((payload_json::jsonb->'_discipline_notice'->'delivered') ? 'webhook')
+                      AND COALESCE((payload_json::jsonb->'_discipline_notice'->>'manual_retries')::int,0)=0
+                    ORDER BY id DESC LIMIT 1""")
+                row=cur.fetchone()
+                if not row:
+                    print("ORIGINAL_RETRY",json.dumps({"eligible_original_notice":False})); raise SystemExit(0)
+                cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",(f"discipline-delivery:1:{row['id']}",))
+                cur.execute("SELECT payload_json FROM qd_strategy_notifications WHERE id=%s AND user_id=1",(row["id"],))
+                payload=json.loads(cur.fetchone()["payload_json"])
+                meta=payload["_discipline_notice"]
+                settings=get_notification_settings(1) or {}
+                cfg=resolve_notification_delivery(1,{"channels":["webhook"],"language":meta["language"]})
+                assert "webhook" in settings.get("default_channels",[]) and "webhook" in meta["channels"]
+                assert "webhook" not in meta["delivered"] and not meta.get("manual_retries")
+                assert (cfg.get("targets") or {}).get("webhook")
+                # 单独记人工诊断重试，不重置自动重试次数，也不改原消息和事件号。
+                meta["manual_retries"]=1
+                meta["manual_retry_at"]=int(time.time())
+                cur.execute("UPDATE qd_strategy_notifications SET payload_json=%s WHERE id=%s AND user_id=1",(json.dumps(payload,ensure_ascii=False),row["id"]))
+                db.commit()
+            result=SignalNotifier()._deliver_channels(strategy_id=None,symbol=row["symbol"],signal_type=row["signal_type"],cfg=cfg,channels=["webhook"],payload={k:v for k,v in payload.items() if k!="_discipline_notice"},rendered={"title":payload["title"],"plain":payload["message"],"email_html":render_detail_email(payload["title"],payload.get("details") or [],language=meta["language"])})["webhook"]
+            err=str(result.get("error") or "").casefold()
+            dialect=_detect_webhook_dialect(cfg["targets"]["webhook"])
+            flags={"accepted":bool(result.get("ok")),"keyword_rejected":"keyword" in err or "关键词" in err,"signature_rejected":"signature" in err or "签名" in err,"authorization_rejected":err.startswith(("http_401:","http_403:")),"vendor_rejection":err.startswith("vendor_"),"feishu":dialect=="feishu","dingtalk":dialect=="dingtalk","wecom":dialect=="wecom","generic":dialect=="generic"}
+            for code in (400,401,403,404,405,429,500,502,503,504): flags["http_"+str(code)]=err.startswith("http_"+str(code)+":")
+            if result.get("ok"):
+                meta["delivered"].append("webhook")
+            meta["results"]["webhook"]={"ok":bool(result.get("ok")),"skipped":False,"diagnostic":"accepted" if result.get("ok") else "manual_retry_rejected"}
+            meta["manual_retry_flags"]=flags
+            with get_db_connection() as db:
+                cur=db.cursor()
+                cur.execute("UPDATE qd_strategy_notifications SET payload_json=%s WHERE id=%s AND user_id=1",(json.dumps(payload,ensure_ascii=False),row["id"]))
+                db.commit()
                 cur.close()
-            flags={"notices_exist":bool(metadata),"external_acknowledged":any(m["delivered"] for m in metadata),"not_yet_attempted":any(m["attempts"]==0 for m in metadata),"published":any(m["published_at"]>0 for m in metadata),"retry_exhausted":any(m["attempts"]>=3 for m in metadata),"delivery_failed_or_unknown":any(r.get("diagnostic")=="delivery_failed_or_unknown" for m in metadata for r in m.get("results",{}).values()),"target_not_configured":any(r.get("diagnostic")=="target_not_configured" for m in metadata for r in m.get("results",{}).values())}
-            settings=get_notification_settings(1) or {}
-            channels=settings.get("default_channels") or []
-            cfg=resolve_notification_delivery(1,{"channels":channels})
-            flags["all_personal_targets_present"]=all(bool((cfg.get("targets") or {}).get(ch)) for ch in channels if ch!="browser")
-            flags["maintenance_queued"]=redis.Redis.from_url(celery_broker_url(),socket_timeout=3,socket_connect_timeout=3).llen("maintenance")>0
-            inspector=celery_app.control.inspect(timeout=4)
-            registered=inspector.registered() or {}
-            queues=inspector.active_queues() or {}
-            flags["notice_task_registered"]=any("quantdinger.tasks.trade_discipline_notice" in names for names in registered.values())
-            flags["maintenance_consumed"]=any(item["name"]=="maintenance" for items in queues.values() for item in items)
-            from app.services.signal_notifier import SignalNotifier, _validate_outbound_http_url
-            notifier=SignalNotifier()
-            flags["email_selected"]="email" in channels
-            flags["webhook_selected"]="webhook" in channels
-            flags["telegram_selected"]="telegram" in channels
-            flags["smtp_configured"]=bool(notifier.smtp_host and notifier.smtp_from)
-            flags["telegram_token_present"]=bool((cfg.get("targets") or {}).get("telegram_bot_token"))
-            if "webhook" in channels:
-                _,error=_validate_outbound_http_url((cfg.get("targets") or {}).get("webhook"))
-                flags["webhook_validation_passed"]=not bool(error)
-                flags["webhook_dns_failed"]=error=="webhook_host_unresolvable"
-                flags["webhook_private_blocked"]=error=="webhook_private_address_blocked"
-            for channel in ("email","webhook","telegram","discord","phone"):
-                flags["failed_"+channel]=any(m.get("results",{}).get(channel,{}).get("ok") is False and not m.get("results",{}).get(channel,{}).get("skipped") for m in metadata)
-            print("NOTIFICATION_AGGREGATE",json.dumps(flags,sort_keys=True))
+            print("ORIGINAL_RETRY",json.dumps(flags,sort_keys=True))
             PYREMOTE
-            docker compose -f docker-compose.ghcr.yml logs --no-color --since 15m --tail 300 trading-worker celery-worker 2>/dev/null | python3 -c 'import sys,json; t=sys.stdin.read(); print("NOTICE_LOG_FLAGS",json.dumps({"queue_unavailable":"trade_discipline notice_queue_unavailable" in t,"record_failed":"trade_discipline notice_record_failed" in t,"poll_unavailable":"trade_discipline notice_poll_unavailable" in t,"unregistered_task":"Received unregistered task" in t,"delivery_logged":"trade_discipline notice_delivery" in t,"smtp_missing":"SMTP_HOST not configured" in t or "SMTP_FROM not configured" in t,"email_error":"email.error" in t,"webhook_timeout":"webhook.timeout" in t,"webhook_connection_error":"webhook.connection_error" in t,"webhook_error":"webhook.error" in t,"telegram_error":"telegram.error" in t},sort_keys=True))'
