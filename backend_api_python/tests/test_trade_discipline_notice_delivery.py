@@ -7,7 +7,7 @@ from decimal import Decimal
 import pytest
 
 from app.trade_discipline import notifications
-from app.trade_discipline.notice_delivery import record_notice, deliver_notice, publish_pending_notices
+from app.trade_discipline.notice_delivery import record_notice, deliver_notice, publish_pending_notices, _delivery_result
 from app.services.signal_notifier import SignalNotifier
 from tests.test_trade_discipline_origin import source_db
 from tests.test_trade_plan_app import full_app
@@ -27,6 +27,25 @@ def notice_db(source_db):
 def create_notice(uid=1, key="fixture-close"):
     return record_notice(user_id=uid, event_key=key, kind="exit_filled", symbol="TRX/USDC",
                          credential_id=901, request_id=701, filled=Decimal("82"), price=Decimal("0.30"))
+
+
+@pytest.mark.parametrize("error,reason,code", [
+    ("vendor_310000:安全设置：关键词不匹配 private-response-token", "keyword_rejected", "vendor_310000"),
+    ("vendor_19021:signature invalid private-response-token", "signature_rejected", "vendor_19021"),
+    ("http_401:private-response-token", "provider_rejected", "http_401"),
+    ("http_503:private-response-token", "provider_rejected", "http_503"),
+    ("connection_error:https://private-response-token", "connection_failed", None),
+    ("timeout", "timeout", None),
+    ("missing_SMTP_HOST", "provider_configuration_missing", None),
+    ("webhook_private_address_blocked", "target_security_rejected", None),
+    ("webhook_host_unresolvable", "target_dns_failed", None),
+    ("vendor_private-response-token:unknown", "delivery_failed_or_unknown", None),
+    ("http_401-private-response-token", "delivery_failed_or_unknown", None),
+])
+def test_provider_failure_is_actionable_without_persisting_private_response(error, reason, code):
+    saved = _delivery_result({"ok": False, "error": error})
+    assert saved["diagnostic"] == reason and saved.get("provider_code") == code
+    assert "private-response-token" not in json.dumps(saved)
 
 
 def read_notice(db, notice_id):

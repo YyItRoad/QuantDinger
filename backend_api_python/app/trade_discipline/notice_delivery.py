@@ -1,6 +1,7 @@
 """纪律通知的站内事实与有限投递任务，复用现有表、个人设置和发送器。"""
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -14,6 +15,33 @@ from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 _META = "_discipline_notice"
+
+
+def _delivery_result(result):
+    """只保存固定分类与安全状态码，提供方原文可能包含密钥或私人信息，必须丢弃。"""
+    ok = bool(result.get("ok")) and not result.get("skipped")
+    skipped = bool(result.get("skipped"))
+    saved = {"ok": ok, "skipped": skipped,
+             "diagnostic": "channel_disabled" if skipped else "accepted" if ok else "delivery_failed_or_unknown"}
+    if ok or skipped:
+        return saved
+    if result.get("diagnostic") == "target_not_configured":
+        return dict(saved, diagnostic="target_not_configured")
+    error = str(result.get("error") or "")
+    code = re.match(r"^(http_[1-5]\d{2}|vendor_-?\d{1,12})(?=:|$)", error)
+    if code:
+        lower = error.casefold()
+        # 提供方描述只用于归类，不写入数据库或日志；未知业务码也只保留数字。
+        reason = "keyword_rejected" if "keyword" in lower or "关键词" in lower else (
+            "signature_rejected" if "signature" in lower or "签名" in lower else "provider_rejected")
+        return dict(saved, diagnostic=reason, provider_code=code.group(1))
+    for prefix, reason in (("timeout", "timeout"), ("connection_error", "connection_failed"),
+                           ("missing_", "provider_configuration_missing"),
+                           ("webhook_private_address_blocked", "target_security_rejected"),
+                           ("webhook_host_unresolvable", "target_dns_failed")):
+        if error.startswith(prefix):
+            return dict(saved, diagnostic=reason)
+    return saved
 
 
 def _payload(row):
@@ -158,21 +186,16 @@ def deliver_notice(user_id, notice_id):
                 *(ch for ch, result in results.items() if result.get("ok") and not result.get("skipped"))]))
             meta["skipped"] = list(dict.fromkeys([*meta.get("skipped", []),
                 *(ch for ch, result in results.items() if result.get("skipped"))]))
-            meta["results"] = {**meta.get("results", {}),
-                **{ch: {"ok": bool(result.get("ok")) and not result.get("skipped"),
-                        "skipped": bool(result.get("skipped")),
-                        "diagnostic": "channel_disabled" if result.get("skipped") else
-                        "accepted" if result.get("ok") else
-                        "target_not_configured" if result.get("diagnostic") == "target_not_configured" else
-                        "delivery_failed_or_unknown"}
-                   for ch, result in results.items()}}
+            meta["results"] = {**meta.get("results", {}), **{ch: _delivery_result(result) for ch, result in results.items()}}
             meta["next_at"] = int(time.time()) + 60
             _update(cur, user_id, notice_id, payload)
             db.commit()
             pending = [ch for ch in meta["channels"] if ch not in meta["delivered"] + meta.get("skipped", [])]
             status = ("skipped" if meta.get("skipped") else "delivered") if not pending else "failed" if meta["attempts"] >= 3 else "pending"
-            logger.info("trade_discipline notice_delivery user_id=%s notice_id=%s status=%s failed_channels=%s",
-                        user_id, notice_id, status, pending)
+            logger.info("trade_discipline notice_delivery user_id=%s notice_id=%s status=%s failed_channels=%s errors=%s",
+                        user_id, notice_id, status, pending,
+                        {ch: meta["results"].get(ch, {}).get("provider_code") or
+                         meta["results"].get(ch, {}).get("diagnostic") for ch in pending})
             return {"status": status, "notice_id": notice_id}
         finally:
             cur.close()
